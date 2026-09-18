@@ -125,3 +125,183 @@ def test_read_signal_missing_pyobjc_raises_unavailable(monkeypatch):
     monkeypatch.setitem(sys.modules, "CoreWLAN", None)
     with pytest.raises(SignalUnavailableError):
         read_signal()
+
+
+# --- read_network_identity (sudo wdutil, session-start only) ---
+
+def _run_ok(stdout):
+    import subprocess
+
+    return subprocess.CompletedProcess(
+        args=["sudo", "wdutil", "info"], returncode=0,
+        stdout=stdout, stderr="")
+
+
+def test_identity_prefers_corewlan_when_present(monkeypatch):
+    """Location-granted case: CoreWLAN ssid/bssid wins, no sudo needed."""
+    import subprocess
+
+    from wifimap import signal as sig_mod
+    monkeypatch.setitem(sys.modules, "CoreWLAN",
+                        _make_mod(FakeInterface(ssid="Home", bssid="aa:bb:cc:dd:ee:ff")))
+    calls = []
+    monkeypatch.setattr(subprocess, "run",
+                        lambda *a, **k: calls.append((a, k)) or _run_ok("SSID: X\nBSSID: Y\n"))
+    assert sig_mod.read_network_identity() == ("Home", "aa:bb:cc:dd:ee:ff")
+    assert calls == []
+
+
+def test_identity_passwordless_sudo_parses_wdutil(monkeypatch):
+    from wifimap import signal as sig_mod
+    import subprocess
+    monkeypatch.setitem(sys.modules, "CoreWLAN",
+                        _make_mod(FakeInterface(ssid=None, bssid=None)))
+
+    def _fake(cmd, **kw):
+        if cmd == ["sudo", "-n", "true"]:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if cmd[:3] == ["sudo", "-n", "wdutil"]:
+            return _run_ok("SSID : MyNet\nBSSID : 11:22:33:44:55:66\n")
+        raise AssertionError("unexpected cmd %r" % (cmd,))
+
+    monkeypatch.setattr(subprocess, "run", _fake)
+    assert sig_mod.read_network_identity() == ("MyNet", "11:22:33:44:55:66")
+
+
+def test_identity_parses_variant_labels(monkeypatch):
+    from wifimap import signal as sig_mod
+    import subprocess
+    monkeypatch.setitem(sys.modules, "CoreWLAN",
+                        _make_mod(FakeInterface(ssid=None, bssid=None)))
+
+    def _fake(cmd, **kw):
+        if cmd == ["sudo", "-n", "true"]:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        return _run_ok("ssid=VariantNet\nbss: AA-BB-CC-DD-EE-FF\n")
+
+    monkeypatch.setattr(subprocess, "run", _fake)
+    assert sig_mod.read_network_identity() == ("VariantNet", "AA-BB-CC-DD-EE-FF")
+
+
+def test_identity_prompts_once_then_reads(monkeypatch):
+    """sudo needs password: one `sudo -v` prompt, then `sudo wdutil info`."""
+    from wifimap import signal as sig_mod
+    import subprocess
+    monkeypatch.setitem(sys.modules, "CoreWLAN",
+                        _make_mod(FakeInterface(ssid=None, bssid=None)))
+    seen = []
+
+    def _fake(cmd, **kw):
+        seen.append(cmd)
+        if cmd == ["sudo", "-n", "true"]:
+            return subprocess.CompletedProcess(cmd, 1, "", "password required")
+        if cmd == ["sudo", "-v"]:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if cmd[:3] == ["sudo", "-n", "wdutil"]:
+            return _run_ok("SSID: PromptNet\nBSSID: 00:11:22:33:44:55\n")
+        raise AssertionError("unexpected cmd %r" % (cmd,))
+
+    monkeypatch.setattr(subprocess, "run", _fake)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    assert sig_mod.read_network_identity() == ("PromptNet", "00:11:22:33:44:55")
+    assert seen.count(["sudo", "-v"]) == 1
+
+
+def test_identity_abort_returns_none(monkeypatch):
+    from wifimap import signal as sig_mod
+    import subprocess
+    monkeypatch.setitem(sys.modules, "CoreWLAN",
+                        _make_mod(FakeInterface(ssid=None, bssid=None)))
+
+    def _fake(cmd, **kw):
+        if cmd == ["sudo", "-n", "true"]:
+            return subprocess.CompletedProcess(cmd, 1, "", "password required")
+        if cmd == ["sudo", "-v"]:
+            return subprocess.CompletedProcess(cmd, 1, "", "aborted")
+        raise AssertionError("must not reach wdutil after abort: %r" % (cmd,))
+
+    monkeypatch.setattr(subprocess, "run", _fake)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    assert sig_mod.read_network_identity() is None
+
+
+def test_identity_no_sudo_no_tty_returns_none(monkeypatch):
+    """Non-interactive (tests/daemons): no prompt, never hang."""
+    from wifimap import signal as sig_mod
+    import subprocess
+    monkeypatch.setitem(sys.modules, "CoreWLAN", None)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+
+    def _fake(cmd, **kw):
+        if cmd == ["sudo", "-n", "true"]:
+            return subprocess.CompletedProcess(cmd, 1, "", "password required")
+        raise AssertionError("must not prompt without tty: %r" % (cmd,))
+
+    monkeypatch.setattr(subprocess, "run", _fake)
+    assert sig_mod.read_network_identity() is None
+
+
+def test_identity_parse_failure_returns_none(monkeypatch):
+    from wifimap import signal as sig_mod
+    import subprocess
+    monkeypatch.setitem(sys.modules, "CoreWLAN",
+                        _make_mod(FakeInterface(ssid=None, bssid=None)))
+
+    def _fake(cmd, **kw):
+        if cmd == ["sudo", "-n", "true"]:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        return _run_ok("usage: sudo wdutil info ...\n")
+
+    monkeypatch.setattr(subprocess, "run", _fake)
+    assert sig_mod.read_network_identity() is None
+
+
+def test_walk_backfills_poll_with_session_identity(tmp_path):
+    from wifimap import signal as sig_mod
+    from wifimap import tui as tui_mod
+    st = tui_mod.WalkState(str(tmp_path / "w.db"))
+    assert st.ensure_identity(identity_fn=lambda: ("SessNet", "aa:bb:cc:00:11:22")) == (
+        "SessNet", "aa:bb:cc:00:11:22")
+    st.poll(read_fn=lambda: sig_mod.Signal(ssid=None, bssid=None, rssi=-60))
+    assert st.sig.ssid == "SessNet"
+    assert st.sig.bssid == "aa:bb:cc:00:11:22"
+    # poll values win when present
+    st.poll(read_fn=lambda: sig_mod.Signal(ssid="Real", bssid="ff", rssi=-50))
+    assert st.sig.ssid == "Real"
+    assert tui_mod.format_net_line(st.net_ssid) == "Net: SessNet"
+    assert tui_mod.format_net_line(None) == "Net: unknown"
+
+
+def test_walk_identity_abort_toasts_and_continues(tmp_path):
+    from wifimap import tui as tui_mod
+    st = tui_mod.WalkState(str(tmp_path / "w.db"))
+    assert st.ensure_identity(identity_fn=lambda: None) is None
+    assert "unknown" in st.toast.lower() or "skipped" in st.toast.lower()
+    assert tui_mod.format_net_line(st.net_ssid) == "Net: unknown"
+
+
+def test_scan_backfills_ssid_and_warns_on_abort(monkeypatch, tmp_path, capsys):
+    from wifimap import signal as sig_mod
+    from wifimap import store as store_mod
+    from wifimap.cli import main
+    db = str(tmp_path / "scan.db")
+    monkeypatch.setattr(sig_mod, "read_signal",
+                        lambda timeout=2.0: sig_mod.Signal(ssid=None, bssid=None, rssi=-60))
+    monkeypatch.setattr(sig_mod, "read_network_identity",
+                        lambda: ("ScanNet", "11:22:33:44:55:66"))
+    rc = main(["--db", db, "scan", "--location", "lab", "--no-speedtest"])
+    assert rc == 0
+    conn = store_mod.get_db(db)
+    try:
+        rows = store_mod.list_readings(conn)
+        assert rows[0]["ssid"] == "ScanNet"
+        assert rows[0]["bssid"] == "11:22:33:44:55:66"
+    finally:
+        conn.close()
+    # abort path: warn on stderr, exit 0, tagging unaffected
+    db2 = str(tmp_path / "scan2.db")
+    monkeypatch.setattr(sig_mod, "read_network_identity", lambda: None)
+    rc = main(["--db", db2, "scan", "--location", "lab", "--no-speedtest"])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "unknown" in out.err.lower() or "warn" in out.err.lower()

@@ -104,6 +104,10 @@ def _cmd_scan(db_path: str, args: argparse.Namespace) -> int:
                   file=sys.stderr)
             return EXIT_STORAGE
         try:
+            identity = signal_mod.read_network_identity()
+        except Exception:  # noqa: BLE001 - identity is best-effort
+            identity = None
+        try:
             sig = signal_mod.read_signal()
         except signal_mod.NoWiFiError as exc:
             print("Error: no WiFi: %s" % (exc,), file=sys.stderr)
@@ -113,6 +117,14 @@ def _cmd_scan(db_path: str, args: argparse.Namespace) -> int:
                   "(hint: pip install pyobjc-framework-CoreWLAN)"
                   % (exc,), file=sys.stderr)
             return EXIT_NOWIFI
+        if identity is not None:
+            if sig.ssid is None:
+                sig.ssid = identity[0]
+            if sig.bssid is None:
+                sig.bssid = identity[1]
+        elif sig.ssid is None or sig.bssid is None:
+            print("Warning: network name unavailable (sudo skipped); "
+                  "SSID unknown, tagging unaffected", file=sys.stderr)
         ping_ms: Optional[float] = None
         down_mbps: Optional[float] = None
         up_mbps: Optional[float] = None

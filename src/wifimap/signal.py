@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 
 class NoWiFiError(Exception):
@@ -123,6 +124,118 @@ _SIGNAL_RE = re.compile(
 _RATE_RE = re.compile(r"Transmit Rate:\s*(\S+)")
 _PHY_RE = re.compile(r"PHY Mode:\s*(.+)")
 _CHANNEL_RE = re.compile(r"Channel:\s*(\S[^\n]*)")
+
+#: Timeouts (s) for the one-shot session identity lookup. Every
+#: subprocess call has a timeout so walk/scan can never hang.
+_SUDO_CHECK_TIMEOUT = 10.0
+_SUDO_PROMPT_TIMEOUT = 120.0
+_WDUTIL_TIMEOUT = 15.0
+
+#: Tolerant `wdutil info` labels (case-insensitive, `:` or `=` sep).
+#: verify: compare against real `sudo wdutil info` output on hardware;
+#: unit fixtures below cover SSID/BSSID/BSS spellings only.
+_SSID_RE = re.compile(
+    r"(?im)^\s*(?:SSID|Network\s*Name)\s*[:=]\s*(.+?)\s*$")
+_BSSID_RE = re.compile(
+    r"(?im)^\s*(?:BSSID|BSS)\s*[:=]\s*([0-9A-Fa-f:\-]{11,})\s*$")
+
+
+def _parse_wdutil_identity(text: str) -> Optional[Tuple[str, str]]:
+    """Parse (ssid, bssid) from `wdutil info` output; None on failure."""
+    if not text:
+        return None
+    ssid_m = _SSID_RE.search(text)
+    bssid_m = _BSSID_RE.search(text)
+    if not ssid_m or not bssid_m:
+        return None
+    ssid = ssid_m.group(1).strip().strip("\"'")
+    bssid = bssid_m.group(1).strip()
+    if not ssid or not bssid:
+        return None
+    return (ssid, bssid)
+
+
+def _read_corewlan_identity() -> Optional[Tuple[str, str]]:
+    """CoreWLAN ssid/bssid when Location-granted; None if redacted/missing."""
+    try:
+        from CoreWLAN import CWWiFiClient
+    except Exception:
+        return None
+    try:
+        client = CWWiFiClient.sharedWiFiClient()
+        iface = client.interface() if client is not None else None
+        if iface is None:
+            return None
+        ssid = iface.ssid()
+        bssid = iface.bssid()
+    except Exception:
+        return None
+    if ssid is None or bssid is None:
+        return None
+    ssid_s, bssid_s = str(ssid).strip(), str(bssid).strip()
+    if not ssid_s or not bssid_s:
+        return None
+    return (ssid_s, bssid_s)
+
+
+def _run_wdutil_info() -> Optional[Tuple[str, str]]:
+    """Run `sudo -n wdutil info` once and parse; None on any failure."""
+    try:
+        proc = subprocess.run(
+            ["sudo", "-n", "wdutil", "info"],
+            capture_output=True, text=True, timeout=_WDUTIL_TIMEOUT,
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        return _parse_wdutil_identity(proc.stdout or "")
+    except Exception:
+        return None
+
+
+def read_network_identity() -> Optional[Tuple[str, str]]:
+    """Session network identity: (ssid, bssid) or None.
+
+    Order: (a) CoreWLAN current ssid/bssid when non-None (no sudo
+    needed); (b) else one privileged ``wdutil info`` lookup: if
+    ``sudo -n true`` succeeds, read directly; otherwise run ``sudo -v``
+    ONCE (user prompted in terminal, cached ~5min) then read. Non-tty
+    sessions skip the prompt and return None. Abort/wrong-password,
+    timeouts, and parse failures all return None — never raise, never
+    hang (every subprocess call has a timeout).
+
+    verify: run ``sudo wdutil info`` on real hardware and confirm
+    ``_parse_wdutil_identity`` extracts the SSID/BSSID labels shown.
+    """
+    found = _read_corewlan_identity()
+    if found is not None:
+        return found
+    try:
+        check = subprocess.run(
+            ["sudo", "-n", "true"],
+            capture_output=True, text=True, timeout=_SUDO_CHECK_TIMEOUT,
+        )
+    except Exception:
+        return None
+    if check.returncode == 0:
+        return _run_wdutil_info()
+    try:
+        if not sys.stdin.isatty():
+            return None
+    except Exception:
+        return None
+    try:
+        prompt = subprocess.run(
+            ["sudo", "-v"],
+            timeout=_SUDO_PROMPT_TIMEOUT,
+        )
+    except Exception:
+        return None
+    if prompt.returncode != 0:
+        return None
+    return _run_wdutil_info()
 
 
 def read_signal_profiler(timeout: float = 30.0) -> Signal:

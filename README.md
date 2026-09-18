@@ -30,6 +30,13 @@ Floor convention: 0 ground, -1 first basement, +1 first upper.
 tags — on macOS 26 SSID/BSSID come back NULL without Location permission;
 that is normal.
 
+## Network name via sudo wdutil
+
+At session start (`scan` / `walk`) wifimap makes one privileged
+`wdutil info` call to fill SSID/BSSID (NULL under macOS 26 redaction).
+One sudo prompt at start, cached ~5min; skip/abort = `Net: unknown`,
+tagging unaffected.
+
 ## Install
 
 ```sh

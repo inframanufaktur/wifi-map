@@ -68,6 +68,11 @@ def format_signal_line(sig: signal_mod.Signal) -> str:
     )
 
 
+def format_net_line(ssid: Optional[str]) -> str:
+    """Session header: ``Net: <ssid>`` or ``Net: unknown``."""
+    return "Net: %s" % (ssid if ssid else "unknown")
+
+
 def picker_start_cursor(loc_ids: List[int],
                         active: Optional[int]) -> int:
     """Cursor position with the active location preselected (spec §1).
@@ -283,7 +288,35 @@ class WalkState:
         self.no_wifi_msg: str = ""
         self.toast: str = ""
         self.pending: int = 0
+        self.net_ssid: Optional[str] = None
+        self.net_bssid: Optional[str] = None
         self._lock = threading.Lock()
+
+    def ensure_identity(
+        self,
+        identity_fn: Optional[Callable[[], Optional[Tuple[str, str]]]] = None,
+    ) -> Optional[Tuple[str, str]]:
+        """One-shot session lookup; backfills polls; abort → toast + None."""
+        fn = identity_fn or signal_mod.read_network_identity
+        try:
+            ident = fn()
+        except Exception:  # noqa: BLE001 - abort/failure means unknown
+            ident = None
+        if ident is None:
+            self.net_ssid = None
+            self.net_bssid = None
+            self.set_toast(
+                "network name unavailable (sudo skipped); showing Net: unknown")
+            return None
+        self.net_ssid, self.net_bssid = ident[0], ident[1]
+        self._backfill_identity()
+        return ident
+
+    def _backfill_identity(self) -> None:
+        if self.net_ssid is not None and self.sig.ssid is None:
+            self.sig.ssid = self.net_ssid
+        if self.net_bssid is not None and self.sig.bssid is None:
+            self.sig.bssid = self.net_bssid
 
     def set_toast(self, msg: str) -> None:
         with self._lock:
@@ -306,6 +339,7 @@ class WalkState:
             self.sig = attempt_read(fn)
             self.no_wifi = False
             self.no_wifi_msg = ""
+            self._backfill_identity()
         except signal_mod.NoWiFiError as exc:
             self.no_wifi = True
             self.no_wifi_msg = str(exc)
@@ -496,6 +530,7 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
     state = WalkState(db_path, no_speedtest=no_speedtest)
     try:
         state.active_id = _resolve_preset(conn, location_preset)
+        state.ensure_identity()
         if location_preset is not None and state.active_id is None:
             state.set_toast(
                 "unknown preset %r; press `l` to pick" % (location_preset,))
@@ -532,6 +567,7 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                     _emit("`s` blocked; fix WiFi or quit with `q`.")
                 else:
                     _emit(format_signal_line(state.sig))
+                _emit(format_net_line(state.net_ssid))
                 toast, pending = state.ui_snapshot()
                 _emit("loc: %s  pending: %d" % (
                     _location_label(conn, state.active_id), pending))
@@ -626,6 +662,7 @@ def _walk_fallback(db_path: str, interval: float,
     state = WalkState(db_path, no_speedtest=no_speedtest)
     try:
         state.active_id = _resolve_preset(conn, location_preset)
+        state.ensure_identity()
         print("walk fallback (no curses): keys s/l/n/f/q + Enter", flush=True)
         while True:
             state.poll()
@@ -633,6 +670,7 @@ def _walk_fallback(db_path: str, interval: float,
                 print("NO-WIFI: %s (`s` blocked)" % state.no_wifi_msg)
             else:
                 print(format_signal_line(state.sig), flush=True)
+            print(format_net_line(state.net_ssid), flush=True)
             toast, pending = state.ui_snapshot()
             print("loc: %s pending: %d %s" % (
                 _location_label(conn, state.active_id), pending,
@@ -786,6 +824,7 @@ __all__ = [
     "KEY_CREATE",
     "attempt_read",
     "finish_snapshot",
+    "format_net_line",
     "format_signal_line",
     "parse_floor_input",
     "picker_move",
