@@ -17,6 +17,13 @@ from typing import Any, Dict, Optional
 # download/upload.bandwidth (man speedtest). Mbps = bytes/sec / 125_000.
 _BYTES_PER_SEC_PER_MBPS = 125_000.0
 
+# First run of Ookla speedtest 1.2 prints a EULA/GDPR prompt and blocks on
+# stdin, which hangs/fails non-interactive scans. These documented flags
+# auto-accept so every invocation is non-interactive.
+_OOKLA_ARGV = [
+    "speedtest", "--format=json", "--accept-license", "--accept-gdpr",
+]
+
 
 class SpeedtestUnavailableError(Exception):
     """Raised when the Ookla binary is missing (scan exits 4 when required)."""
@@ -49,10 +56,14 @@ def _server_name(server: Any) -> Optional[str]:
 
 
 def run_speedtest(timeout: float = 120.0) -> Speed:
-    """Run ``speedtest --format=json`` and parse down/up Mbps + ping ms."""
+    """Run Ookla ``speedtest --format=json`` and parse down/up Mbps + ping ms.
+
+    ``--accept-license --accept-gdpr`` keep first runs non-interactive
+    (Ookla 1.2 otherwise prompts on stdin and the scan stores NULLs).
+    """
     try:
         proc = subprocess.run(
-            ["speedtest", "--format=json"],
+            _OOKLA_ARGV,
             capture_output=True, text=True, timeout=timeout,
         )
     except FileNotFoundError as exc:

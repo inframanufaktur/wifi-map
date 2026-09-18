@@ -63,6 +63,9 @@ Throughput (optional):
 
 - `wifimap` shells out to the **official Ookla** `speedtest` binary with
   `--format=json` (parsed: down/up Mbps, ping ms, server name/id).
+- First-run EULA/GDPR prompt is auto-accepted via `--accept-license
+  --accept-gdpr` (Ookla 1.2 otherwise blocks on stdin and the scan
+  stores NULLs).
 - verify: official installer is linked from https://www.speedtest.net/apps/cli —
   download + install command not yet verified from this machine.
 - verify: Homebrew only carries unofficial clients — `brew info

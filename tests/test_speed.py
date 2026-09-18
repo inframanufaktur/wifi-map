@@ -8,6 +8,7 @@ from wifimap.speed import (
     Speed,
     SpeedtestFailedError,
     SpeedtestUnavailableError,
+    _OOKLA_ARGV,
     run_speedtest,
 )
 
@@ -66,5 +67,34 @@ def test_run_speedtest_nonzero_exit(monkeypatch):
         subprocess, "run",
         lambda *a, **k: subprocess.CompletedProcess(
             args=["speedtest"], returncode=1, stdout="", stderr="boom"))
+    with pytest.raises(SpeedtestFailedError):
+        run_speedtest()
+
+
+def test_run_speedtest_passes_license_accept_flags(monkeypatch):
+    seen = {}
+
+    def _capture(args, **kwargs):
+        seen["argv"] = list(args)
+        return _completed(OOKLA_SAMPLE)
+
+    monkeypatch.setattr(subprocess, "run", _capture)
+    run_speedtest()
+    assert "--accept-license" in seen["argv"]
+    assert "--accept-gdpr" in seen["argv"]
+    assert "--format=json" in seen["argv"]
+    assert seen["argv"] == _OOKLA_ARGV
+
+
+def test_run_speedtest_eula_prompt_failure(monkeypatch):
+    """Without the accept flags, Ookla 1.2 first run prints the EULA to
+    stdout/stderr and exits non-zero waiting on stdin — mocked here as a
+    failed result (live scans stored NULLs before the flags fix)."""
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(
+            args=["speedtest", "--format=json"], returncode=1, stdout="",
+            stderr="To accept the message please run speedtest interactively "
+                   "or use the following option: --accept-license"))
     with pytest.raises(SpeedtestFailedError):
         run_speedtest()
