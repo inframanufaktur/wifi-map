@@ -594,6 +594,39 @@ def clear_benchmark(
     conn.commit()
 
 
+def format_benchmark_delta(cur: dict, bench) -> str:
+    """Format cur-vs-benchmark deltas for rssi/snr/down/up."""
+    if not bench:
+        return ""
+    if not cur:
+        return ""
+    specs = (
+        ("rssi", "rssi", "%+d", True),
+        ("snr", "snr", "%+d", True),
+        ("down_mbps", "down", "%+.1f", False),
+        ("up_mbps", "up", "%+.1f", False),
+    )
+    parts = []
+    for key, label, fmt, as_int in specs:
+        try:
+            c = cur.get(key) if isinstance(cur, dict) else None
+            b = bench.get(key) if isinstance(bench, dict) else None
+        except AttributeError:
+            continue
+        if c is None or b is None:
+            continue
+        if isinstance(c, bool) or isinstance(b, bool):
+            continue
+        if not isinstance(c, (int, float)) or not isinstance(b, (int, float)):
+            continue
+        diff = c - b
+        if as_int:
+            parts.append("%s %s" % (label, fmt % round(diff)))
+        else:
+            parts.append("%s %s" % (label, fmt % diff))
+    return ", ".join(parts)
+
+
 def list_readings(
     conn: sqlite3.Connection,
     location: Optional[Union[int, str]] = None,

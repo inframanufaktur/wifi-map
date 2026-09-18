@@ -8,6 +8,7 @@ from wifimap.store import (
     create_location,
     create_room,
     create_spot,
+    format_benchmark_delta,
     get_benchmark,
     get_db,
     get_location,
@@ -405,3 +406,15 @@ def test_benchmark_ts_default_is_iso(db):
     assert bench is not None
     assert isinstance(bench["ts"], str)
     assert "T" in bench["ts"]
+
+
+def test_format_benchmark_delta_full():
+    cur = {"rssi": -67, "snr": 24, "down_mbps": 48.1, "up_mbps": 10.0}
+    bench = {"rssi": -45, "snr": 32, "down_mbps": 310.5, "up_mbps": 48.2}
+    s = format_benchmark_delta(cur, bench)
+    assert "rssi -22" in s and "snr -8" in s and "down -262.4" in s
+
+
+def test_format_benchmark_delta_null_safe():
+    s = format_benchmark_delta({"rssi": -67}, {"rssi": None, "down_mbps": 100.0})
+    assert s == "" or "rssi" not in s
