@@ -151,6 +151,45 @@ def grouped_graph_width(total_w: int, prefixes) -> int:
     return max(10, total_w - max_pre - len(" [60s]") - 1)
 
 
+#: Fixed width of the meter value column (e.g. ``" -63 dBm  "``).
+METER_VAL_W = 10
+
+#: Fixed width of the meter label column (``"RSSI  "``/``"SNR   "``/``"noise "``).
+METER_LABEL_W = 6
+
+
+def format_meter_left(label: str, value: str, rating: Optional[str]) -> str:
+    """Left side of a meter row: label + value + hugging ``[rating]``.
+
+    No padding inside brackets; alignment padding is applied AFTER ``]``
+    by the caller via ``ljust(maxLeft)`` so all ``|`` line up.
+    """
+    lab = (label if label is not None else "").ljust(METER_LABEL_W)[:METER_LABEL_W]
+    val = (value if value is not None else "UNKNOWN").ljust(METER_VAL_W)
+    if rating:
+        return "%s%s[%s]" % (lab, val, rating)
+    return "%s%s" % (lab, val)
+
+
+def format_meter_row(label: str, value: str, rating: Optional[str],
+                     bar: str, max_left: int) -> str:
+    """Full meter row with ``|`` separator and ``[60s]`` suffix."""
+    left = format_meter_left(label, value, rating).ljust(max_left)
+    return "%s | %s [60s]" % (left, bar)
+
+
+def meter_layout(total_w: int, lefts: List[str]) -> Tuple[int, int]:
+    """Return ``(maxLeft, gw)`` so grouped rows share bar width."""
+    max_left = max((len(s) for s in lefts), default=0)
+    gw = max(10, total_w - max_left - len(" | ") - len(" [60s]") - 1)
+    return (max_left, gw)
+
+
+def format_extra_line(ch: str, phy: str, tx: str) -> str:
+    """Fourth info row: ``ch <ch> phy <phy> tx <tx>``."""
+    return "ch %s phy %s tx %s" % (ch, phy, tx)
+
+
 def ansi_wrap(s: str, code: str) -> str:
     """Wrap s in ANSI colour; plain when NO_COLOR is set."""
     if os.environ.get("NO_COLOR"):
@@ -772,36 +811,49 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                              else "%3d dB" % state.sig.snr)
                     noise_s = ("UNKNOWN" if state.sig.noise is None
                                else "%4d dBm" % state.sig.noise)
-                    r_rate = "%-7s" % rate_rssi(state.sig.rssi)
-                    s_rate = "%-7s" % rate_snr(state.sig.snr)
+                    r_rate = rate_rssi(state.sig.rssi)
+                    s_rate = rate_snr(state.sig.snr)
                     ch_s = state.sig.channel or "-"
                     phy_s = state.sig.phy or "-"
                     tx_s = state.sig.tx_rate or "-"
-                    val_r = "%s [%s]" % (rssi_s, r_rate)
-                    val_s = "%s [%s]" % (snr_s, s_rate)
-                    p1 = "RSSI " + val_r + " "
-                    p2 = "SNR " + val_s + " "
-                    p3 = ("noise %s ch %s phy %s tx %s "
-                          % (noise_s, ch_s, phy_s, tx_s))
+                    r_val_pad = rssi_s.ljust(METER_VAL_W)
+                    s_val_pad = snr_s.ljust(METER_VAL_W)
+                    n_val_pad = noise_s.ljust(METER_VAL_W)
+                    lefts = [
+                        format_meter_left("RSSI", rssi_s, r_rate),
+                        format_meter_left("SNR", snr_s, s_rate),
+                        format_meter_left("noise", noise_s, None),
+                    ]
+                    max_left, gw = meter_layout(w, lefts)
+                    pad1 = " " * (max_left - len(lefts[0]))
+                    pad2 = " " * (max_left - len(lefts[1]))
+                    pad3 = " " * (max_left - len(lefts[2]))
                     if h >= 10:
-                        gw = grouped_graph_width(w, [p1, p2, p3])
                         rssi_g = state.hist_rssi.sparkline(-90, -30, gw)
                         snr_g = state.hist_snr.sparkline(0, 40, gw)
                         noise_g = state.hist_noise.sparkline(-100, -60, gw)
-                        _emit_segs([("RSSI ", 0), (val_r + " ", r_attr),
+                        _emit_segs([("RSSI  ", 0),
+                                    (r_val_pad + "[%s]" % r_rate, r_attr),
+                                    (pad1 + " | ", 0),
                                     (rssi_g, r_attr), (" [60s]", 0)])
-                        _emit_segs([("SNR ", 0), (val_s + " ", s_attr),
+                        _emit_segs([("SNR   ", 0),
+                                    (s_val_pad + "[%s]" % s_rate, s_attr),
+                                    (pad2 + " | ", 0),
                                     (snr_g, s_attr), (" [60s]", 0)])
-                        _emit_segs([("noise ", 0), (noise_s, r_attr),
-                                    (" ch %s phy %s tx %s "
-                                     % (ch_s, phy_s, tx_s), 0),
+                        _emit_segs([("noise ", 0), (n_val_pad, r_attr),
+                                    (pad3 + " | ", 0),
                                     (noise_g, r_attr), (" [60s]", 0)])
+                        _emit(format_extra_line(ch_s, phy_s, tx_s))
                     else:
-                        _emit_segs([("RSSI ", 0), (val_r, r_attr)])
-                        _emit_segs([("SNR ", 0), (val_s, s_attr)])
-                        _emit_segs([("noise ", 0), (noise_s, r_attr),
-                                    (" ch %s phy %s tx %s "
-                                     % (ch_s, phy_s, tx_s), 0)])
+                        _emit_segs([("RSSI  ", 0),
+                                    (r_val_pad + "[%s]" % r_rate, r_attr),
+                                    (pad1, 0)])
+                        _emit_segs([("SNR   ", 0),
+                                    (s_val_pad + "[%s]" % s_rate, s_attr),
+                                    (pad2, 0)])
+                        _emit_segs([("noise ", 0), (n_val_pad, r_attr),
+                                    (pad3, 0)])
+                        _emit(format_extra_line(ch_s, phy_s, tx_s))
                 manual = " (manual)" if state.ssid_override else ""
                 _emit("Net: %s%s" % (state.net_ssid or "unknown", manual))
                 toast, pending = state.ui_snapshot()
@@ -916,48 +968,67 @@ def _walk_fallback(db_path: str, interval: float,
                 rssi_s = "UNKNOWN" if state.sig.rssi is None else "%4d dBm" % state.sig.rssi
                 snr_s = "UNKNOWN" if state.sig.snr is None else "%3d dB" % state.sig.snr
                 noise_s = "UNKNOWN" if state.sig.noise is None else "%4d dBm" % state.sig.noise
-                r_rating = "%-7s" % rate_rssi(state.sig.rssi)
-                s_rating = "%-7s" % rate_snr(state.sig.snr)
-                _, r_code = rating_style(r_rating.strip() or "UNKNOWN")
-                _, s_code = rating_style(s_rating.strip() or "UNKNOWN")
-                print("RSSI " + ansi_wrap("%s [%s]" % (rssi_s, r_rating), r_code), flush=True)
-                print("SNR " + ansi_wrap("%s [%s]" % (snr_s, s_rating), s_code), flush=True)
-                print("noise " + ansi_wrap(noise_s, r_code)
-                      + " ch %s phy %s tx %s" % (
-                          state.sig.channel or "-", state.sig.phy or "-",
-                          state.sig.tx_rate or "-"), flush=True)
+                r_rating = rate_rssi(state.sig.rssi)
+                s_rating = rate_snr(state.sig.snr)
+                _, r_code = rating_style(r_rating or "UNKNOWN")
+                _, s_code = rating_style(s_rating or "UNKNOWN")
+                lefts = [
+                    format_meter_left("RSSI", rssi_s, r_rating),
+                    format_meter_left("SNR", snr_s, s_rating),
+                    format_meter_left("noise", noise_s, None),
+                ]
+                max_left = max((len(s) for s in lefts), default=0)
+                print(("RSSI  " + ansi_wrap(
+                    rssi_s.ljust(METER_VAL_W) + "[%s]" % r_rating,
+                    r_code) + " " * (max_left - len(lefts[0]))), flush=True)
+                print(("SNR   " + ansi_wrap(
+                    snr_s.ljust(METER_VAL_W) + "[%s]" % s_rating,
+                    s_code) + " " * (max_left - len(lefts[1]))), flush=True)
+                print(("noise " + ansi_wrap(noise_s.ljust(METER_VAL_W), r_code)
+                       + " " * (max_left - len(lefts[2]))), flush=True)
+                print(format_extra_line(
+                    state.sig.channel or "-", state.sig.phy or "-",
+                    state.sig.tx_rate or "-"), flush=True)
             else:
                 rssi_s = "UNKNOWN" if state.sig.rssi is None else "%4d dBm" % state.sig.rssi
                 snr_s = "UNKNOWN" if state.sig.snr is None else "%3d dB" % state.sig.snr
                 noise_s = "UNKNOWN" if state.sig.noise is None else "%4d dBm" % state.sig.noise
-                r_rating = "%-7s" % rate_rssi(state.sig.rssi)
-                s_rating = "%-7s" % rate_snr(state.sig.snr)
-                _, r_code = rating_style(r_rating.strip() or "UNKNOWN")
-                _, s_code = rating_style(s_rating.strip() or "UNKNOWN")
+                r_rating = rate_rssi(state.sig.rssi)
+                s_rating = rate_snr(state.sig.snr)
+                _, r_code = rating_style(r_rating or "UNKNOWN")
+                _, s_code = rating_style(s_rating or "UNKNOWN")
                 ch_s = state.sig.channel or "-"
                 phy_s = state.sig.phy or "-"
                 tx_s = state.sig.tx_rate or "-"
-                val_r = "%s [%s]" % (rssi_s, r_rating)
-                val_s = "%s [%s]" % (snr_s, s_rating)
-                p1 = "RSSI " + val_r + " "
-                p2 = "SNR " + val_s + " "
-                p3 = "noise %s ch %s phy %s tx %s " % (noise_s, ch_s, phy_s, tx_s)
+                lefts = [
+                    format_meter_left("RSSI", rssi_s, r_rating),
+                    format_meter_left("SNR", snr_s, s_rating),
+                    format_meter_left("noise", noise_s, None),
+                ]
                 tw = 80
                 try:
                     tw = shutil.get_terminal_size((80, 24)).columns
                 except Exception:
                     pass
-                gw = min(40, grouped_graph_width(tw, [p1, p2, p3]))
+                max_left, gw = meter_layout(tw, lefts)
                 rssi_g = state.hist_rssi.sparkline(-90, -30, gw, align="right")
                 snr_g = state.hist_snr.sparkline(0, 40, gw, align="right")
                 noise_g = state.hist_noise.sparkline(-100, -60, gw, align="right")
-                print("RSSI " + ansi_wrap(val_r + " ", r_code)
-                      + ansi_wrap(rssi_g, r_code) + " [60s]", flush=True)
-                print("SNR " + ansi_wrap(val_s + " ", s_code)
-                      + ansi_wrap(snr_g, s_code) + " [60s]", flush=True)
-                print("noise " + ansi_wrap(noise_s, r_code)
-                      + " ch %s phy %s tx %s " % (ch_s, phy_s, tx_s)
-                      + ansi_wrap(noise_g, r_code) + " [60s]", flush=True)
+                pad1 = " " * (max_left - len(lefts[0]))
+                pad2 = " " * (max_left - len(lefts[1]))
+                pad3 = " " * (max_left - len(lefts[2]))
+                print("RSSI  " + ansi_wrap(
+                    rssi_s.ljust(METER_VAL_W) + "[%s]" % r_rating, r_code)
+                    + pad1 + " | " + ansi_wrap(rssi_g, r_code)
+                    + " [60s]", flush=True)
+                print("SNR   " + ansi_wrap(
+                    snr_s.ljust(METER_VAL_W) + "[%s]" % s_rating, s_code)
+                    + pad2 + " | " + ansi_wrap(snr_g, s_code)
+                    + " [60s]", flush=True)
+                print("noise " + ansi_wrap(noise_s.ljust(METER_VAL_W), r_code)
+                      + pad3 + " | " + ansi_wrap(noise_g, r_code)
+                      + " [60s]", flush=True)
+                print(format_extra_line(ch_s, phy_s, tx_s), flush=True)
             manual = " (manual)" if state.ssid_override else ""
             print("Net: %s%s" % (state.net_ssid or "unknown", manual), flush=True)
             toast, pending = state.ui_snapshot()
@@ -1118,6 +1189,9 @@ __all__ = [
     "attempt_read",
     "ansi_wrap",
     "finish_snapshot",
+    "format_extra_line",
+    "format_meter_left",
+    "format_meter_row",
     "format_net_line",
     "format_signal_line",
     "history_cap",
@@ -1125,6 +1199,7 @@ __all__ = [
     "wide_graph_width",
     "grouped_graph_width",
     "layout_mode",
+    "meter_layout",
     "parse_floor_input",
     "picker_move",
     "picker_press",
@@ -1135,6 +1210,8 @@ __all__ = [
     "snapshot_payload",
     "SparkHistory",
     "start_snapshot_thread",
+    "METER_LABEL_W",
+    "METER_VAL_W",
     "WIDE_MIN_WIDTH",
     "run_walk",
 ]

@@ -589,3 +589,40 @@ def test_grouped_graph_width_aligns_right_edges():
             assert len(p) + gw + len(" [60s]") <= w - 1
     assert tui_mod.grouped_graph_width(20, [p1, p2, p3]) == 10
     assert tui_mod.grouped_graph_width(80, []) == max(10, 80 - 0 - 6 - 1)
+
+
+def test_format_meter_left_no_pad_inside_brackets():
+    left_rssi = tui_mod.format_meter_left("RSSI", "-63 dBm", "OK")
+    left_snr = tui_mod.format_meter_left("SNR", "29 dB", "GREAT")
+    left_noise = tui_mod.format_meter_left("noise", "-92 dBm", None)
+    # no padding inside brackets: hugging text
+    assert "[OK]" in left_rssi and "[OK " not in left_rssi
+    assert "[GREAT]" in left_snr and "[GREAT " not in left_snr
+    # fixed-width label field 6 chars
+    assert left_rssi.startswith("RSSI  ")
+    assert left_snr.startswith("SNR   ")
+    assert left_noise.startswith("noise ")
+    # value field fixed width: label(6)+value(10) prefix equal length
+    assert left_rssi[6:16] == "-63 dBm   "
+    assert left_snr[6:16] == "29 dB     "
+    assert left_noise[6:16] == "-92 dBm   "
+
+
+def test_format_meter_row_pipe_aligns():
+    lefts = [
+        tui_mod.format_meter_left("RSSI", "-63 dBm", "OK"),
+        tui_mod.format_meter_left("SNR", "29 dB", "GREAT"),
+        tui_mod.format_meter_left("noise", "-92 dBm", None),
+    ]
+    max_left, gw = tui_mod.meter_layout(80, lefts)
+    assert max_left == max(len(s) for s in lefts)
+    assert gw == max(10, 80 - max_left - 3 - 6 - 1)
+    rows = [tui_mod.format_meter_row(*args, bar="##", max_left=max_left)
+            for args in (("RSSI", "-63 dBm", "OK"),
+                         ("SNR", "29 dB", "GREAT"),
+                         ("noise", "-92 dBm", None))]
+    pipes = [r.index("|") for r in rows]
+    assert pipes[0] == pipes[1] == pipes[2] == max_left + 1
+    for r in rows:
+        assert r.endswith("## [60s]")
+        assert "[OK ]" not in r and "[GREAT ]" not in r
