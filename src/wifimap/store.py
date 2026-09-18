@@ -386,7 +386,7 @@ def resolve_spot(
 
 def add_reading(
     conn: sqlite3.Connection,
-    location_id: int,
+    spot_id: int,
     ts: Optional[str] = None,
     ssid: Optional[str] = None,
     bssid: Optional[str] = None,
@@ -407,12 +407,12 @@ def add_reading(
         ts = datetime.now(timezone.utc).isoformat()
     cur = conn.execute(
         """INSERT INTO readings(
-             ts, location_id, ssid, bssid, rssi, noise, snr,
+             ts, spot_id, ssid, bssid, rssi, noise, snr,
              channel, phy, tx_rate, ping_ms, down_mbps, up_mbps,
              server, note)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
-            ts, location_id, ssid, bssid, rssi, noise, snr,
+            ts, spot_id, ssid, bssid, rssi, noise, snr,
             channel, phy, tx_rate, ping_ms, down_mbps, up_mbps,
             server, note,
         ),
@@ -427,23 +427,30 @@ def add_reading(
 def list_readings(
     conn: sqlite3.Connection,
     location: Optional[Union[int, str]] = None,
+    room: Optional[Union[int, str]] = None,
+    spot: Optional[Union[int, str]] = None,
     floor: Optional[int] = None,
     ssid: Optional[str] = None,
     limit: int = 50,
 ) -> List[dict]:
-    """List readings newest-first as joined dicts (location_name/floor).
+    """List readings newest-first as joined dicts across all 3 levels.
 
-    Numeric location strings route to the id lookup (matching id OR name).
+    Numeric location/room/spot strings route to the id lookup
+    (matching id OR name).
     """
-    if limit < 0:
+    if isinstance(limit, bool) or limit < 0:
         raise ValueError("limit must be >= 0")
     query = (
-        "SELECT r.id, r.ts, r.location_id, r.ssid, r.bssid, r.rssi,"
+        "SELECT r.id, r.ts, r.spot_id, r.ssid, r.bssid, r.rssi,"
         " r.noise, r.snr, r.channel, r.phy, r.tx_rate,"
         " r.ping_ms, r.down_mbps, r.up_mbps, r.server, r.note,"
-        " l.name AS location_name, l.floor AS floor,"
-        " l.outdoors AS outdoors"
-        " FROM readings r JOIN locations l ON r.location_id = l.id"
+        " s.name AS spot_name, s.room_id AS room_id,"
+        " m.name AS room_name, m.location_id AS location_id,"
+        " m.floor AS floor, m.outdoors AS outdoors,"
+        " l.name AS location_name"
+        " FROM readings r JOIN spots s ON r.spot_id = s.id"
+        " JOIN rooms m ON s.room_id = m.id"
+        " JOIN locations l ON m.location_id = l.id"
     )
     clauses = []
     params: List[Any] = []
@@ -451,7 +458,7 @@ def list_readings(
         if isinstance(location, bool):
             raise ValueError("invalid location filter: %r" % (location,))
         if isinstance(location, int):
-            clauses.append("r.location_id = ?")
+            clauses.append("m.location_id = ?")
             params.append(location)
         else:
             name = str(location)
@@ -460,13 +467,51 @@ def list_readings(
             except ValueError:
                 as_id = None
             if as_id is not None:
-                clauses.append("(r.location_id = ? OR l.name = ?)")
+                clauses.append("(m.location_id = ? OR l.name = ?)")
                 params.extend([as_id, name])
             else:
                 clauses.append("l.name = ?")
                 params.append(name)
+    if room is not None:
+        if isinstance(room, bool):
+            raise ValueError("invalid room filter: %r" % (room,))
+        if isinstance(room, int):
+            clauses.append("s.room_id = ?")
+            params.append(room)
+        else:
+            name = str(room)
+            try:
+                as_id = int(name)
+            except ValueError:
+                as_id = None
+            if as_id is not None:
+                clauses.append("(s.room_id = ? OR m.name = ?)")
+                params.extend([as_id, name])
+            else:
+                clauses.append("m.name = ?")
+                params.append(name)
+    if spot is not None:
+        if isinstance(spot, bool):
+            raise ValueError("invalid spot filter: %r" % (spot,))
+        if isinstance(spot, int):
+            clauses.append("r.spot_id = ?")
+            params.append(spot)
+        else:
+            name = str(spot)
+            try:
+                as_id = int(name)
+            except ValueError:
+                as_id = None
+            if as_id is not None:
+                clauses.append("(r.spot_id = ? OR s.name = ?)")
+                params.extend([as_id, name])
+            else:
+                clauses.append("s.name = ?")
+                params.append(name)
     if floor is not None:
-        clauses.append("l.floor = ?")
+        if isinstance(floor, bool):
+            raise ValueError("invalid floor filter: %r" % (floor,))
+        clauses.append("m.floor = ?")
         params.append(floor)
     if ssid is not None:
         if isinstance(ssid, bool):
