@@ -4,9 +4,11 @@ import pytest
 
 from wifimap.store import (
     add_reading,
+    clear_benchmark,
     create_location,
     create_room,
     create_spot,
+    get_benchmark,
     get_db,
     get_location,
     get_room,
@@ -18,6 +20,7 @@ from wifimap.store import (
     resolve_location,
     resolve_room,
     resolve_spot,
+    set_benchmark,
     update_room_floor,
 )
 
@@ -339,3 +342,40 @@ def test_readings_join_all_levels(db):
     assert list_readings(db, room="kitchen")[0]["id"] == r1
     assert list_readings(db, spot="window")[0]["id"] == r1
     assert list_readings(db, location="home", floor=0)[0]["id"] == r1
+
+
+def test_benchmark_set_get_overwrite(db):
+    lid = create_location(db, "home")
+    set_benchmark(db, lid, ssid="home-5g", rssi=-45, snr=32,
+                  down_mbps=310.5, up_mbps=48.2)
+    bench = get_benchmark(db, lid)
+    assert bench is not None
+    assert bench["location_id"] == lid
+    assert bench["ssid"] == "home-5g"
+    assert bench["rssi"] == -45
+    assert bench["ts"]
+    set_benchmark(db, lid, ssid="home-5g", rssi=-50, snr=30,
+                  down_mbps=200.0, up_mbps=40.0)
+    bench2 = get_benchmark(db, lid)
+    assert bench2 is not None
+    assert bench2["rssi"] == -50
+    assert bench2["snr"] == 30
+    rows = db.execute(
+        "SELECT COUNT(*) FROM benchmarks WHERE location_id = ?",
+        (lid,),
+    ).fetchone()
+    assert rows[0] == 1
+
+
+def test_benchmark_missing_returns_none(db):
+    lid = create_location(db, "home")
+    assert get_benchmark(db, lid) is None
+    assert get_benchmark(db, 9999) is None
+
+
+def test_benchmark_clear(db):
+    lid = create_location(db, "home")
+    set_benchmark(db, lid, rssi=-45)
+    assert get_benchmark(db, lid) is not None
+    clear_benchmark(db, lid)
+    assert get_benchmark(db, lid) is None

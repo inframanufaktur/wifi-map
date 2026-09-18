@@ -40,6 +40,7 @@ CREATE INDEX IF NOT EXISTS idx_rooms_location ON rooms(location_id);
 CREATE INDEX IF NOT EXISTS idx_spots_room ON spots(room_id);
 CREATE INDEX IF NOT EXISTS idx_readings_spot ON readings(spot_id);
 CREATE INDEX IF NOT EXISTS idx_readings_ssid ON readings(ssid);
+CREATE TABLE IF NOT EXISTS benchmarks(location_id INTEGER PRIMARY KEY REFERENCES locations(id) ON DELETE CASCADE, ts TEXT NOT NULL, ssid TEXT, bssid TEXT, rssi INTEGER, noise INTEGER, snr INTEGER, channel TEXT, phy TEXT, tx_rate TEXT, ping_ms REAL, down_mbps REAL, up_mbps REAL, server TEXT, note TEXT);
 """
 @dataclass
 class Location:
@@ -503,6 +504,89 @@ def add_reading(
     if row is None:
         raise sqlite3.Error("reading insert returned no row id")
     return row
+
+
+def set_benchmark(
+    conn: sqlite3.Connection,
+    location_id: int,
+    ts: Optional[str] = None,
+    ssid: Optional[str] = None,
+    bssid: Optional[str] = None,
+    rssi: Optional[int] = None,
+    noise: Optional[int] = None,
+    snr: Optional[int] = None,
+    channel: Optional[str] = None,
+    phy: Optional[str] = None,
+    tx_rate: Optional[str] = None,
+    ping_ms: Optional[float] = None,
+    down_mbps: Optional[float] = None,
+    up_mbps: Optional[float] = None,
+    server: Optional[str] = None,
+    note: Optional[str] = None,
+) -> None:
+    """Upsert one benchmarks row per location; ts defaults to UTC ISO."""
+    if isinstance(location_id, bool):
+        raise ValueError("unknown location id: %r" % (location_id,))
+    exists = conn.execute(
+        "SELECT id FROM locations WHERE id = ?", (location_id,)
+    ).fetchone()
+    if exists is None:
+        raise ValueError("unknown location id: %r" % (location_id,))
+    if ts is None:
+        ts = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """INSERT INTO benchmarks(
+             location_id, ts, ssid, bssid, rssi, noise, snr,
+             channel, phy, tx_rate, ping_ms, down_mbps, up_mbps,
+             server, note)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(location_id) DO UPDATE SET
+             ts = excluded.ts, ssid = excluded.ssid,
+             bssid = excluded.bssid, rssi = excluded.rssi,
+             noise = excluded.noise, snr = excluded.snr,
+             channel = excluded.channel, phy = excluded.phy,
+             tx_rate = excluded.tx_rate, ping_ms = excluded.ping_ms,
+             down_mbps = excluded.down_mbps, up_mbps = excluded.up_mbps,
+             server = excluded.server, note = excluded.note""",
+        (
+            location_id, ts, ssid, bssid, rssi, noise, snr,
+            channel, phy, tx_rate, ping_ms, down_mbps, up_mbps,
+            server, note,
+        ),
+    )
+    conn.commit()
+
+
+def get_benchmark(
+    conn: sqlite3.Connection,
+    location_id: int,
+) -> Optional[dict]:
+    """Return the benchmark row for a location, or None if missing."""
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT location_id, ts, ssid, bssid, rssi, noise, snr,"
+            " channel, phy, tx_rate, ping_ms, down_mbps, up_mbps,"
+            " server, note FROM benchmarks WHERE location_id = ?",
+            (location_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return dict(row)
+    finally:
+        conn.row_factory = None
+
+
+def clear_benchmark(
+    conn: sqlite3.Connection,
+    location_id: int,
+) -> None:
+    """Delete the benchmark row for a location."""
+    conn.execute(
+        "DELETE FROM benchmarks WHERE location_id = ?",
+        (location_id,),
+    )
+    conn.commit()
 
 
 def list_readings(
