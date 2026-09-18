@@ -469,3 +469,14 @@ def test_ssid_override_backfills_and_tags_snapshot(tmp_path):
 def test_ssid_override_blank_normalizes_to_none(tmp_path):
     st = tui_mod.WalkState(str(tmp_path / "w.db"), ssid_override="   ")
     assert st.ssid_override is None
+
+
+def test_rate_rssi_snr_thresholds():
+    assert tui_mod.rate_rssi(-55) == "GREAT"
+    assert tui_mod.rate_rssi(-65) == "OK"
+    assert tui_mod.rate_rssi(-80) == "WEAK"
+    assert tui_mod.rate_rssi(None) == "UNKNOWN"
+    assert tui_mod.rate_snr(30) == "GREAT"
+    assert tui_mod.rate_snr(20) == "OK"
+    assert tui_mod.rate_snr(5) == "WEAK"
+    assert tui_mod.rate_snr(None) == "UNKNOWN"

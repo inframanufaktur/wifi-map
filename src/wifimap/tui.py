@@ -78,6 +78,28 @@ def format_net_line(ssid: Optional[str]) -> str:
     return "Net: %s" % (ssid if ssid else "unknown")
 
 
+def rate_rssi(v: Optional[int]) -> str:
+    """Rate RSSI: >=-60 GREAT, >=-70 OK, else WEAK, None UNKNOWN."""
+    if v is None:
+        return "UNKNOWN"
+    if v >= -60:
+        return "GREAT"
+    if v >= -70:
+        return "OK"
+    return "WEAK"
+
+
+def rate_snr(v: Optional[int]) -> str:
+    """Rate SNR: >=25 GREAT, >=15 OK, else WEAK, None UNKNOWN."""
+    if v is None:
+        return "UNKNOWN"
+    if v >= 25:
+        return "GREAT"
+    if v >= 15:
+        return "OK"
+    return "WEAK"
+
+
 def picker_start_cursor(loc_ids: List[int],
                         active: Optional[int]) -> int:
     """Cursor position with the active location preselected (spec §1).
@@ -870,6 +892,8 @@ __all__ = [
     "picker_move",
     "picker_press",
     "picker_start_cursor",
+    "rate_rssi",
+    "rate_snr",
     "snapshot_payload",
     "start_snapshot_thread",
     "run_walk",
