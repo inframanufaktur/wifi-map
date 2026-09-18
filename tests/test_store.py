@@ -118,6 +118,40 @@ def test_reading_ts_defaults(db):
     assert rows[0]["ts"]  # non-empty ISO timestamp
 
 
+def test_list_readings_limit_zero(db):
+    lid = create_location(db, "room", floor=0)
+    add_reading(db, lid, rssi=-60)
+    assert list_readings(db, limit=0) == []
+
+
+def test_list_readings_negative_limit_raises(db):
+    with pytest.raises(ValueError):
+        list_readings(db, limit=-1)
+
+
+def test_resolve_digit_string_routes_to_id(db):
+    lid = create_location(db, "study", floor=0)
+    assert resolve_location(db, str(lid)) == lid
+
+
+def test_list_readings_location_plus_floor_filter(db):
+    a0 = create_location(db, "dup", floor=0)
+    a1 = create_location(db, "dup", floor=1)
+    r0 = add_reading(db, a0, rssi=-50)
+    r1 = add_reading(db, a1, rssi=-70)
+    rows = list_readings(db, location="dup", floor=1)
+    assert [r["id"] for r in rows] == [r1]
+    assert rows[0]["location_id"] == a1
+    assert r0 not in [r["id"] for r in rows]
+
+
+def test_create_location_empty_name_raises(db):
+    with pytest.raises(ValueError):
+        create_location(db, "")
+    with pytest.raises(ValueError):
+        resolve_location(db, "")
+
+
 def test_get_db_enables_wal_and_fk(tmp_path):
     path = str(tmp_path / "pragma.db")
     conn = get_db(path)
