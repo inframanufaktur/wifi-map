@@ -23,6 +23,16 @@ def _db_path(monkeypatch, tmp_path):
     return str(tmp_path / "cli.db")
 
 
+def _seed_3level(conn, loc="home", room="kitchen", spot="window",
+                 floor=0, outdoors=False, **reading_kw):
+    lid = store_mod.create_location(conn, loc)
+    rid = store_mod.create_room(conn, lid, room, floor=floor,
+                                outdoors=outdoors)
+    sid = store_mod.create_spot(conn, rid, spot)
+    store_mod.add_reading(conn, sid, **reading_kw)
+    return sid
+
+
 def test_scan_insert_path(monkeypatch, tmp_path, capsys):
     db = _db_path(monkeypatch, tmp_path)
     monkeypatch.setattr(
@@ -37,14 +47,17 @@ def test_scan_insert_path(monkeypatch, tmp_path, capsys):
             ping_ms=10.0, down_mbps=90.0, up_mbps=12.0, server="T (1)"),
     )
     rc, out, err = _run(capsys, "--db", db, "scan",
-                        "--location", "kitchen", "--no-speedtest")
+                        "--location", "home", "--room", "kitchen",
+                        "--spot", "window", "--no-speedtest")
     assert rc == 0
     assert "kitchen" in out
     conn = store_mod.get_db(db)
     try:
         rows = store_mod.list_readings(conn)
         assert len(rows) == 1
-        assert rows[0]["location_name"] == "kitchen"
+        assert rows[0]["location_name"] == "home"
+        assert rows[0]["room_name"] == "kitchen"
+        assert rows[0]["spot_name"] == "window"
         assert rows[0]["rssi"] == -55
     finally:
         conn.close()
@@ -56,7 +69,8 @@ def test_scan_no_wifi_exit_2(monkeypatch, tmp_path, capsys):
         raise signal_mod.NoWiFiError("off")
     monkeypatch.setattr(signal_mod, "read_signal", _boom)
     rc, out, err = _run(capsys, "--db", db, "scan",
-                        "--location", "kitchen", "--no-speedtest")
+                        "--location", "home", "--room", "kitchen",
+                        "--spot", "window", "--no-speedtest")
     assert rc == 2
     assert err.strip() != ""
 
@@ -67,7 +81,8 @@ def test_scan_signal_unavailable_exit_2(monkeypatch, tmp_path, capsys):
         raise signal_mod.SignalUnavailableError("no backend")
     monkeypatch.setattr(signal_mod, "read_signal", _boom)
     rc, out, err = _run(capsys, "--db", db, "scan",
-                        "--location", "kitchen", "--no-speedtest")
+                        "--location", "home", "--room", "kitchen",
+                        "--spot", "window", "--no-speedtest")
     assert rc == 2
     assert "PyObjC" in err or "backend" in err or "hint" in err.lower()
 
@@ -82,7 +97,8 @@ def test_scan_speedtest_fail_stores_nulls(monkeypatch, tmp_path, capsys):
         raise speed_mod.SpeedtestFailedError("timeout")
     monkeypatch.setattr(speed_mod, "run_speedtest", _fail)
     rc, out, err = _run(capsys, "--db", db, "scan",
-                        "--location", "den")
+                        "--location", "home", "--room", "den",
+                        "--spot", "window")
     assert rc == 0
     conn = store_mod.get_db(db)
     try:
@@ -106,7 +122,8 @@ def test_scan_speedtest_unavailable_warns_and_keeps_signal(
         raise speed_mod.SpeedtestUnavailableError("no binary")
     monkeypatch.setattr(speed_mod, "run_speedtest", _missing)
     rc, out, err = _run(capsys, "--db", db, "scan",
-                        "--location", "den2")
+                        "--location", "home", "--room", "den2",
+                        "--spot", "window")
     assert rc == 0
     assert "speedtest" in err.lower() or "warn" in err.lower()
     conn = store_mod.get_db(db)
@@ -125,15 +142,19 @@ def test_scan_resolve_autocreate_with_flags(monkeypatch, tmp_path, capsys):
         lambda timeout=2.0: signal_mod.Signal(rssi=-70),
     )
     rc, out, err = _run(
-        capsys, "--db", db, "scan", "--location", "attic",
-        "--location-floor", "1", "--location-outdoors", "1",
+        capsys, "--db", db, "scan", "--location", "home",
+        "--room", "attic", "--spot", "window",
+        "--room-floor", "1", "--room-outdoors", "1",
         "--no-speedtest")
     assert rc == 0
     conn = store_mod.get_db(db)
     try:
         locs = {loc.name: loc for loc in store_mod.list_locations(conn)}
-        assert locs["attic"].floor == 1
-        assert locs["attic"].outdoors is True
+        assert "home" in locs
+        rooms = store_mod.list_rooms(conn, location_id=locs["home"].id)
+        by_name = {r.name: r for r in rooms}
+        assert by_name["attic"].floor == 1
+        assert by_name["attic"].outdoors is True
     finally:
         conn.close()
 
@@ -141,23 +162,23 @@ def test_scan_resolve_autocreate_with_flags(monkeypatch, tmp_path, capsys):
 def test_locations_add_and_list(monkeypatch, tmp_path, capsys):
     db = _db_path(monkeypatch, tmp_path)
     rc, out, err = _run(capsys, "--db", db, "locations", "add",
-                        "--name", "office", "--floor", "2")
+                        "--name", "office")
     assert rc == 0
     assert out.strip().isdigit()
     rc, out, err = _run(capsys, "--db", db, "locations", "list")
     assert rc == 0
     assert "office" in out
-    assert "id" in out.lower() and "floor" in out.lower()
+    assert "id" in out.lower() and "name" in out.lower()
 
 
 def test_list_filters(monkeypatch, tmp_path, capsys):
     db = _db_path(monkeypatch, tmp_path)
     conn = store_mod.get_db(db)
     try:
-        a = store_mod.create_location(conn, "room-a", floor=0)
-        b = store_mod.create_location(conn, "room-b", floor=1)
-        store_mod.add_reading(conn, a, rssi=-50, note="a1")
-        store_mod.add_reading(conn, b, rssi=-70, note="b1")
+        _seed_3level(conn, loc="room-a", room="r", spot="s", floor=0,
+                     rssi=-50, note="a1")
+        _seed_3level(conn, loc="room-b", room="r", spot="s", floor=1,
+                     rssi=-70, note="b1")
     finally:
         conn.close()
     rc, out, err = _run(capsys, "--db", db, "list")
@@ -184,8 +205,8 @@ def test_export_csv_content(monkeypatch, tmp_path, capsys):
     db = _db_path(monkeypatch, tmp_path)
     conn = store_mod.get_db(db)
     try:
-        lid = store_mod.create_location(conn, "kitchen", floor=0)
-        store_mod.add_reading(conn, lid, rssi=-55, ssid="home")
+        _seed_3level(conn, loc="kitchen", room="r", spot="s",
+                     rssi=-55, ssid="home")
     finally:
         conn.close()
     csv_path = str(tmp_path / "out.csv")
@@ -205,7 +226,8 @@ def test_scan_db_error_exit_3(monkeypatch, tmp_path, capsys):
         raise sqlite3.Error("locked")
     monkeypatch.setattr(store_mod, "get_db", _boom)
     rc, out, err = _run(capsys, "--db", str(tmp_path / "x.db"),
-                        "scan", "--location", "k", "--no-speedtest")
+                        "scan", "--location", "home", "--room", "k",
+                        "--spot", "window", "--no-speedtest")
     assert rc == 3
     assert err.strip() != ""
 
@@ -216,7 +238,8 @@ def test_scan_unknown_id_exit_3(monkeypatch, tmp_path, capsys):
         raise ValueError("unknown location id: 9999")
     monkeypatch.setattr(store_mod, "resolve_location", _noid)
     rc, out, err = _run(capsys, "--db", db, "scan",
-                        "--location", "9999", "--no-speedtest")
+                        "--location", "9999", "--room", "k",
+                        "--spot", "window", "--no-speedtest")
     assert rc == 3
     assert err.strip() != ""
 
@@ -224,7 +247,8 @@ def test_scan_unknown_id_exit_3(monkeypatch, tmp_path, capsys):
 def test_scan_unwritable_db_exit_3(tmp_path, capsys):
     db = str(tmp_path / "nodir" / "x.db")
     rc, out, err = _run(capsys, "--db", db, "scan",
-                        "--location", "k", "--no-speedtest")
+                        "--location", "home", "--room", "k",
+                        "--spot", "window", "--no-speedtest")
     assert rc == 3
     assert err.strip() != ""
 
@@ -233,8 +257,7 @@ def test_export_bad_path_exit_3(tmp_path, capsys):
     db = str(tmp_path / "cli.db")
     conn = store_mod.get_db(db)
     try:
-        lid = store_mod.create_location(conn, "k", floor=0)
-        store_mod.add_reading(conn, lid, rssi=-55)
+        _seed_3level(conn, loc="k", room="r", spot="s", rssi=-55)
     finally:
         conn.close()
     rc, out, err = _run(capsys, "--db", db, "export",
@@ -247,8 +270,7 @@ def test_list_nulls_show_dash(tmp_path, capsys):
     db = str(tmp_path / "cli.db")
     conn = store_mod.get_db(db)
     try:
-        lid = store_mod.create_location(conn, "den", floor=0)
-        store_mod.add_reading(conn, lid, rssi=-60)
+        _seed_3level(conn, loc="den", room="r", spot="s", rssi=-60)
     finally:
         conn.close()
     rc, out, err = _run(capsys, "--db", db, "list")
@@ -280,3 +302,22 @@ def test_list_ssid_filter_passes_through(tmp_path, monkeypatch, capsys):
                        "--ssid", "home-5g"])
     assert rc == cli_mod.EXIT_OK
     assert seen["ssid"] == "home-5g"
+
+
+def test_scan_location_room_spot(monkeypatch, tmp_path):
+    from wifimap import signal as signal_mod, store as store_mod
+    from wifimap.cli import main
+    db = str(tmp_path / "cli.db")
+    monkeypatch.setattr(signal_mod, "read_signal",
+        lambda timeout=2.0: signal_mod.Signal(ssid="h", rssi=-55))
+    rc = main(["--db", db, "scan", "--location", "home",
+               "--room", "kitchen", "--spot", "window", "--no-speedtest"])
+    assert rc == 0
+    conn = store_mod.get_db(db)
+    try:
+        rows = store_mod.list_readings(conn)
+        assert rows[0]["location_name"] == "home"
+        assert rows[0]["room_name"] == "kitchen"
+        assert rows[0]["spot_name"] == "window"
+    finally:
+        conn.close()

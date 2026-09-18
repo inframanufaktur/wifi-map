@@ -51,8 +51,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("scan", help="Single snapshot row, print, exit.")
     s.add_argument("--location", required=True, help="Location ID|NAME")
-    s.add_argument("--location-floor", type=int, default=0)
-    s.add_argument("--location-outdoors", type=int, choices=(0, 1),
+    s.add_argument("--room", required=True, help="Room ID|NAME")
+    s.add_argument("--spot", required=True, help="Spot ID|NAME")
+    s.add_argument("--room-floor", type=int, default=0)
+    s.add_argument("--room-outdoors", type=int, choices=(0, 1),
                    default=0)
     s.add_argument("--no-speedtest", action="store_true")
     s.add_argument("--note", default=None)
@@ -66,11 +68,29 @@ def _build_parser() -> argparse.ArgumentParser:
 
     loc = sub.add_parser("locations", help="Locations CRUD.")
     loc_sub = loc.add_subparsers(dest="locations_cmd", required=False)
-    loc_sub.add_parser("list", help="Print id/name/floor/outdoors.")
+    loc_sub.add_parser("list", help="Print id/name.")
     ladd = loc_sub.add_parser("add", help="Create a location.")
     ladd.add_argument("--name", required=True)
-    ladd.add_argument("--floor", type=int, default=0)
-    ladd.add_argument("--outdoors", action="store_true")
+
+    rm = sub.add_parser("rooms", help="Rooms CRUD.")
+    rm_sub = rm.add_subparsers(dest="rooms_cmd", required=False)
+    rmlist = rm_sub.add_parser("list", help="Print id/name/floor/outdoors.")
+    rmlist.add_argument("--location", required=True, help="Location ID|NAME")
+    rmadd = rm_sub.add_parser("add", help="Create a room.")
+    rmadd.add_argument("--location", required=True, help="Location ID|NAME")
+    rmadd.add_argument("--name", required=True)
+    rmadd.add_argument("--floor", type=int, default=0)
+    rmadd.add_argument("--outdoors", action="store_true")
+
+    sp = sub.add_parser("spots", help="Spots CRUD.")
+    sp_sub = sp.add_subparsers(dest="spots_cmd", required=False)
+    splist = sp_sub.add_parser("list", help="Print id/name.")
+    splist.add_argument("--location", required=True, help="Location ID|NAME")
+    splist.add_argument("--room", required=True, help="Room ID|NAME")
+    spadd = sp_sub.add_parser("add", help="Create a spot.")
+    spadd.add_argument("--location", required=True, help="Location ID|NAME")
+    spadd.add_argument("--room", required=True, help="Room ID|NAME")
+    spadd.add_argument("--name", required=True)
 
     li = sub.add_parser("list", help="History table (joins locations).")
     li.add_argument("--location", default=None, help="Filter ID|NAME")
@@ -98,11 +118,13 @@ def _cmd_scan(db_path: str, args: argparse.Namespace) -> int:
         return EXIT_STORAGE
     try:
         try:
-            loc_id = store_mod.resolve_location(
-                conn, args.location,
-                floor=args.location_floor,
-                outdoors=bool(args.location_outdoors),
+            loc_id = store_mod.resolve_location(conn, args.location)
+            room_id = store_mod.resolve_room(
+                conn, loc_id, args.room,
+                floor=args.room_floor,
+                outdoors=bool(args.room_outdoors),
             )
+            spot_id = store_mod.resolve_spot(conn, room_id, args.spot)
         except (sqlite3.Error, OSError, ValueError) as exc:
             print("Error: cannot resolve location: %s" % (exc,),
                   file=sys.stderr)
@@ -145,7 +167,7 @@ def _cmd_scan(db_path: str, args: argparse.Namespace) -> int:
                 ping_ms, down_mbps, up_mbps, server = None, None, None, "ERROR"
         try:
             rid = store_mod.add_reading(
-                conn, loc_id, ssid=sig.ssid, bssid=sig.bssid,
+                conn, spot_id, ssid=sig.ssid, bssid=sig.bssid,
                 rssi=sig.rssi, noise=sig.noise, snr=sig.snr,
                 channel=sig.channel, phy=sig.phy, tx_rate=sig.tx_rate,
                 ping_ms=ping_ms, down_mbps=down_mbps, up_mbps=up_mbps,
@@ -155,8 +177,9 @@ def _cmd_scan(db_path: str, args: argparse.Namespace) -> int:
             print("Error: cannot store reading: %s" % (exc,),
                   file=sys.stderr)
             return EXIT_STORAGE
-        print("#%d %s rssi=%s snr=%s down=%s up=%s note=%s" % (
-            rid, args.location, _disp(sig.rssi), _disp(sig.snr),
+        print("#%d %s/%s/%s rssi=%s snr=%s down=%s up=%s note=%s" % (
+            rid, args.location, args.room, args.spot,
+            _disp(sig.rssi), _disp(sig.snr),
             _disp(down_mbps), _disp(up_mbps), _disp(args.note)))
         return EXIT_OK
     finally:
@@ -193,11 +216,10 @@ def _cmd_locations_list(db_path: str) -> int:
             print("Error: cannot list locations: %s" % (exc,),
                   file=sys.stderr)
             return EXIT_STORAGE
-        print("%-4s %-20s %-6s %-8s" % ("id", "name", "floor", "outdoors"))
+        print("%-4s %-20s" % ("id", "name"))
         for loc in locs:
-            print("%-4s %-20s %-6s %-8s" % (
-                _disp(loc.id), _disp(loc.name), _disp(loc.floor),
-                _disp(1 if loc.outdoors else 0)))
+            print("%-4s %-20s" % (
+                _disp(loc.id), _disp(loc.name)))
         return EXIT_OK
     finally:
         conn.close()
@@ -211,14 +233,102 @@ def _cmd_locations_add(db_path: str, args: argparse.Namespace) -> int:
         return EXIT_STORAGE
     try:
         try:
-            lid = store_mod.create_location(
-                conn, args.name, floor=args.floor,
-                outdoors=bool(args.outdoors))
+            lid = store_mod.create_location(conn, args.name)
         except (sqlite3.Error, OSError, ValueError) as exc:
             print("Error: cannot add location: %s" % (exc,),
                   file=sys.stderr)
             return EXIT_STORAGE
         print(lid)
+        return EXIT_OK
+    finally:
+        conn.close()
+
+
+def _cmd_rooms_list(db_path: str, args: argparse.Namespace) -> int:
+    try:
+        conn = _open_db(db_path)
+    except (sqlite3.Error, OSError) as exc:
+        print("Error: cannot open DB: %s" % (exc,), file=sys.stderr)
+        return EXIT_STORAGE
+    try:
+        try:
+            loc_id = store_mod.resolve_location(conn, args.location)
+            rooms = store_mod.list_rooms(conn, location_id=loc_id)
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            print("Error: cannot list rooms: %s" % (exc,),
+                  file=sys.stderr)
+            return EXIT_STORAGE
+        print("%-4s %-20s %-6s %-8s" % ("id", "name", "floor", "outdoors"))
+        for rm in rooms:
+            print("%-4s %-20s %-6s %-8s" % (
+                _disp(rm.id), _disp(rm.name), _disp(rm.floor),
+                _disp(1 if rm.outdoors else 0)))
+        return EXIT_OK
+    finally:
+        conn.close()
+
+
+def _cmd_rooms_add(db_path: str, args: argparse.Namespace) -> int:
+    try:
+        conn = _open_db(db_path)
+    except (sqlite3.Error, OSError) as exc:
+        print("Error: cannot open DB: %s" % (exc,), file=sys.stderr)
+        return EXIT_STORAGE
+    try:
+        try:
+            loc_id = store_mod.resolve_location(conn, args.location)
+            rid = store_mod.create_room(
+                conn, loc_id, args.name, floor=args.floor,
+                outdoors=bool(args.outdoors))
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            print("Error: cannot add room: %s" % (exc,),
+                  file=sys.stderr)
+            return EXIT_STORAGE
+        print(rid)
+        return EXIT_OK
+    finally:
+        conn.close()
+
+
+def _cmd_spots_list(db_path: str, args: argparse.Namespace) -> int:
+    try:
+        conn = _open_db(db_path)
+    except (sqlite3.Error, OSError) as exc:
+        print("Error: cannot open DB: %s" % (exc,), file=sys.stderr)
+        return EXIT_STORAGE
+    try:
+        try:
+            loc_id = store_mod.resolve_location(conn, args.location)
+            room_id = store_mod.resolve_room(conn, loc_id, args.room)
+            spots = store_mod.list_spots(conn, room_id=room_id)
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            print("Error: cannot list spots: %s" % (exc,),
+                  file=sys.stderr)
+            return EXIT_STORAGE
+        print("%-4s %-20s" % ("id", "name"))
+        for sp in spots:
+            print("%-4s %-20s" % (_disp(sp.id), _disp(sp.name)))
+        return EXIT_OK
+    finally:
+        conn.close()
+
+
+def _cmd_spots_add(db_path: str, args: argparse.Namespace) -> int:
+    try:
+        conn = _open_db(db_path)
+    except (sqlite3.Error, OSError) as exc:
+        print("Error: cannot open DB: %s" % (exc,), file=sys.stderr)
+        return EXIT_STORAGE
+    try:
+        try:
+            loc_id = store_mod.resolve_location(conn, args.location)
+            room_id = store_mod.resolve_room(conn, loc_id, args.room)
+            sid = store_mod.create_spot(conn, room_id, args.name)
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            print("Error: cannot add spot: %s" % (exc,),
+                  file=sys.stderr)
+            return EXIT_STORAGE
+        print(sid)
         return EXIT_OK
     finally:
         conn.close()
@@ -311,6 +421,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if getattr(args, "locations_cmd", None) == "add":
             return _cmd_locations_add(db_path, args)
         return _cmd_locations_list(db_path)
+    if args.cmd == "rooms":
+        if getattr(args, "rooms_cmd", None) == "add":
+            return _cmd_rooms_add(db_path, args)
+        return _cmd_rooms_list(db_path)
+    if args.cmd == "spots":
+        if getattr(args, "spots_cmd", None) == "add":
+            return _cmd_spots_add(db_path, args)
+        return _cmd_spots_list(db_path)
     if args.cmd == "list":
         return _cmd_list(db_path, args)
     if args.cmd == "export":
