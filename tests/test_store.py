@@ -10,7 +10,6 @@ from wifimap.store import (
     list_locations,
     list_readings,
     resolve_location,
-    update_location_floor,
 )
 
 
@@ -224,3 +223,27 @@ def test_new_schema_tables(tmp_path):
         assert {"locations", "rooms", "spots", "readings"} <= tables
     finally:
         conn.close()
+
+
+def test_location_create_unique(db):
+    from wifimap.store import create_location
+    import sqlite3
+    lid = create_location(db, "home")
+    assert isinstance(lid, int)
+    with pytest.raises(sqlite3.IntegrityError):
+        create_location(db, "home")
+
+
+def test_room_spot_scoped_unique(db):
+    from wifimap.store import create_location, create_room, create_spot
+    import sqlite3
+    home = create_location(db, "home")
+    office = create_location(db, "office")
+    k = create_room(db, home, "kitchen", floor=0)
+    with pytest.raises(sqlite3.IntegrityError):
+        create_room(db, home, "kitchen", floor=0)
+    create_room(db, home, "kitchen", floor=1)
+    create_room(db, office, "kitchen", floor=0)
+    w = create_spot(db, k, "window")
+    with pytest.raises(sqlite3.IntegrityError):
+        create_spot(db, k, "window")
