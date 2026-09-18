@@ -6,7 +6,7 @@ Goal: map home WiFi for connectivity planning. Capture signal strength + interne
 
 ## Constraints
 - macOS only (current machine, ARM64)
-- Python (3.11+), stdlib-first
+- Python (3.9+, 3.9-compatible code), stdlib-first
 - SQLite storage
 - Throughput = internet speedtest (Ookla binary, external dep)
 - Mode: hybrid CLI + walk (option C) with in-walk snapshot, walkthrough-first

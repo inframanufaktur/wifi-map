@@ -70,6 +70,16 @@ def test_resolve_int_passthrough(db):
         resolve_location(db, 9999)
 
 
+def test_resolve_same_name_different_floor_creates(db):
+    original = create_location(db, "office", floor=0)
+    assert resolve_location(db, "office", floor=0) == original
+    new_id = resolve_location(db, "office", floor=1)
+    assert new_id != original
+    locs = {(loc.name, loc.floor): loc for loc in list_locations(db)}
+    assert locs[("office", 1)].id == new_id
+    assert locs[("office", 1)].floor == 1
+
+
 def test_readings_insert_join_filters_limit(db):
     a = create_location(db, "room-a", floor=0)
     b = create_location(db, "room-b", floor=1)

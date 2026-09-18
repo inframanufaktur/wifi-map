@@ -118,12 +118,6 @@ def resolve_location(
     ).fetchone()
     if row is not None:
         return row[0]
-    row = conn.execute(
-        "SELECT id FROM locations WHERE name = ? ORDER BY id LIMIT 1",
-        (name,),
-    ).fetchone()
-    if row is not None:
-        return row[0]
     return create_location(conn, name, floor=floor, outdoors=outdoors)
 
 
