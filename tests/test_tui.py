@@ -506,3 +506,20 @@ def test_poll_appends_history(tmp_path):
     st.poll(read_fn=lambda: signal_mod.Signal(rssi=-61, noise=-91, snr=29))
     assert st.hist_rssi.sparkline(-90, -30, 5) != ""
     assert len(st.hist_rssi.sparkline(-90, -30, 5)) == 2
+
+
+def test_poll_nowifi_appends_gap(tmp_path):
+    def _off():
+        raise signal_mod.NoWiFiError("off")
+
+    st = tui_mod.WalkState(str(tmp_path / "w.db"), history_max=5)
+    for _ in range(3):
+        st.poll(read_fn=_off)
+    assert st.no_wifi is True
+    assert st.hist_rssi.sparkline(-90, -30, 3) == "   "
+
+
+def test_history_cap_windows():
+    assert tui_mod.history_cap(1.0) == 60
+    assert tui_mod.history_cap(0.5) == 120
+    assert tui_mod.history_cap(90.0) == 1
