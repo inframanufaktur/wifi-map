@@ -289,7 +289,8 @@ def test_scan_backfills_ssid_and_warns_on_abort(monkeypatch, tmp_path, capsys):
                         lambda timeout=2.0: sig_mod.Signal(ssid=None, bssid=None, rssi=-60))
     monkeypatch.setattr(sig_mod, "read_network_identity",
                         lambda: ("ScanNet", "11:22:33:44:55:66"))
-    rc = main(["--db", db, "scan", "--location", "lab", "--no-speedtest"])
+    rc = main(["--db", db, "scan", "--location", "lab", "--room", "R1",
+               "--spot", "S1", "--no-speedtest"])
     assert rc == 0
     conn = store_mod.get_db(db)
     try:
@@ -301,7 +302,8 @@ def test_scan_backfills_ssid_and_warns_on_abort(monkeypatch, tmp_path, capsys):
     # abort path: warn on stderr, exit 0, tagging unaffected
     db2 = str(tmp_path / "scan2.db")
     monkeypatch.setattr(sig_mod, "read_network_identity", lambda: None)
-    rc = main(["--db", db2, "scan", "--location", "lab", "--no-speedtest"])
+    rc = main(["--db", db2, "scan", "--location", "lab", "--room", "R1",
+               "--spot", "S1", "--no-speedtest"])
     out = capsys.readouterr()
     assert rc == 0
     assert "unknown" in out.err.lower() or "warn" in out.err.lower()
