@@ -114,7 +114,7 @@ class SparkHistory:
     def append(self, v: Optional[float]) -> None:
         self._buf.append(v)
 
-    def sparkline(self, lo: float, hi: float, width: int) -> str:
+    def sparkline(self, lo: float, hi: float, width: int, align: str = "right") -> str:
         vals = list(self._buf)[-width:] if width > 0 else []
         if not vals:
             return ""
@@ -131,7 +131,10 @@ class SparkHistory:
                 frac = 0.0 if frac < 0.0 else (1.0 if frac > 1.0 else frac)
                 lvl = int(round(frac * 7))
             out.append(_SPARK_CHARS[lvl])
-        return "".join(out)
+        s = "".join(out)
+        if align == "right" and len(s) < width:
+            s = " " * (width - len(s)) + s
+        return s
 
 
 def history_cap(interval: float) -> int:

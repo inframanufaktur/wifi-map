@@ -496,7 +496,7 @@ def test_sparkline_vectors_gaps_and_window():
     h3 = tui_mod.SparkHistory(maxlen=3)
     for v in [1, 2, 3, 4]:
         h3.append(v)
-    assert h3.sparkline(1, 4, 10) == "▃▆█"
+    assert h3.sparkline(1, 4, 10) == "       ▃▆█"
     assert tui_mod.SparkHistory(maxlen=4).sparkline(0, 1, 4) == ""
 
 
@@ -505,7 +505,7 @@ def test_poll_appends_history(tmp_path):
     st.poll(read_fn=lambda: signal_mod.Signal(rssi=-60, noise=-90, snr=30))
     st.poll(read_fn=lambda: signal_mod.Signal(rssi=-61, noise=-91, snr=29))
     assert st.hist_rssi.sparkline(-90, -30, 5) != ""
-    assert len(st.hist_rssi.sparkline(-90, -30, 5)) == 2
+    assert len(st.hist_rssi.sparkline(-90, -30, 5)) == 5
 
 
 def test_poll_nowifi_appends_gap(tmp_path):
@@ -517,6 +517,16 @@ def test_poll_nowifi_appends_gap(tmp_path):
         st.poll(read_fn=_off)
     assert st.no_wifi is True
     assert st.hist_rssi.sparkline(-90, -30, 3) == "   "
+
+
+def test_sparkline_right_aligns_newest():
+    h = tui_mod.SparkHistory(maxlen=60)
+    h.append(-60)
+    h.append(-50)
+    line = h.sparkline(-90, -30, 5)
+    assert len(line) == 5
+    assert line[:3] == "   "
+    assert line[3:] != "   "
 
 
 def test_history_cap_windows():
