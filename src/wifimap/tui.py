@@ -721,7 +721,7 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                     noise_s = "UNKNOWN" if state.sig.noise is None else "%d dBm" % state.sig.noise
                     _emit("RSSI %s [%s] | RSSI  %s" % (rssi_s, rate_rssi(state.sig.rssi), rssi_g), r_attr)
                     _emit("SNR %s [%s] | SNR   %s" % (snr_s, rate_snr(state.sig.snr), snr_g), s_attr)
-                    _emit("noise %s ch %s | noise %s" % (noise_s, state.sig.channel or "-", noise_g))
+                    _emit("noise %s ch %s | noise %s" % (noise_s, state.sig.channel or "-", noise_g), r_attr)
                 elif state.no_wifi:
                     _emit("NO-WIFI: %s" % (state.no_wifi_msg,))
                     _emit("`s` blocked; fix WiFi or quit with `q`.")
@@ -743,7 +743,7 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                     gw = max(10, w - 12)
                     _emit("RSSI  %s [60s]" % state.hist_rssi.sparkline(-90, -30, gw))
                     _emit("SNR   %s [60s]" % state.hist_snr.sparkline(0, 40, gw))
-                    _emit("noise %s [60s]" % state.hist_noise.sparkline(-100, -60, gw))
+                    _emit("noise %s [60s]" % state.hist_noise.sparkline(-100, -60, gw), r_attr)
                 _emit("keys: s snapshot | l switch | n new | "
                       "f floor | q quit")
                 if toast:
