@@ -576,3 +576,16 @@ def test_wide_graph_width_fits_w_minus_1():
     for w in (100, 120, 200):
         gw = tui_mod.wide_graph_width(w, left, 6, 3, 0)
         assert len("RSSI -57 dBm [GREAT]") + 3 + 6 + gw <= w - 1
+
+
+def test_grouped_graph_width_aligns_right_edges():
+    p1 = "RSSI %4d dBm [%-7s] " % (-60, "GREAT")
+    p2 = "SNR %3d dB [%-7s] " % (30, "GREAT")
+    p3 = "noise %4d dBm ch %s phy %s tx %s " % (-90, "36", "ax", "9")
+    for w in (80, 100, 120):
+        gw = tui_mod.grouped_graph_width(w, [p1, p2, p3])
+        assert gw == max(10, w - max(len(p1), len(p2), len(p3)) - 6 - 1)
+        for p in (p1, p2, p3):
+            assert len(p) + gw + len(" [60s]") <= w - 1
+    assert tui_mod.grouped_graph_width(20, [p1, p2, p3]) == 10
+    assert tui_mod.grouped_graph_width(80, []) == max(10, 80 - 0 - 6 - 1)
