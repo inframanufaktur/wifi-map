@@ -289,7 +289,7 @@ class WalkState:
                  ssid_override: Optional[str] = None) -> None:
         self.db_path = db_path
         self.no_speedtest = no_speedtest
-        self.ssid_override = ssid_override.strip() if ssid_override else None
+        self.ssid_override = (ssid_override.strip() or None) if ssid_override is not None else None
         self.active_id: Optional[int] = None
         self.sig: signal_mod.Signal = signal_mod.Signal()
         self.no_wifi: bool = False

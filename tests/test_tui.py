@@ -464,3 +464,8 @@ def test_ssid_override_backfills_and_tags_snapshot(tmp_path):
         assert rows[0]["ssid"] == "home-5g"
     finally:
         conn.close()
+
+
+def test_ssid_override_blank_normalizes_to_none(tmp_path):
+    st = tui_mod.WalkState(str(tmp_path / "w.db"), ssid_override="   ")
+    assert st.ssid_override is None
