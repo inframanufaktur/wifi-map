@@ -190,6 +190,23 @@ def format_extra_line(ch: str, phy: str, tx: str) -> str:
     return "ch %s phy %s tx %s" % (ch, phy, tx)
 
 
+def format_radio_line(mcs: object, band: Optional[str],
+                      security: Optional[str]) -> str:
+    """Radio detail row: ``mcs <m> band <band> sec <security>``; None → `-`."""
+    m = "-" if mcs is None else str(mcs)
+    b = band if band else "-"
+    s = security if security else "-"
+    return "mcs %s band %s sec %s" % (m, b, s)
+
+
+def format_addr_line(ip: Optional[str], router: Optional[str],
+                     mac: Optional[str]) -> str:
+    """Session addr header; ``""`` when all unknown (caller omits)."""
+    if not ip and not router and not mac:
+        return ""
+    return "IP %s RTR %s MAC %s" % (ip or "-", router or "-", mac or "-")
+
+
 def ansi_wrap(s: str, code: str) -> str:
     """Wrap s in ANSI colour; plain when NO_COLOR is set."""
     if os.environ.get("NO_COLOR"):
@@ -462,7 +479,37 @@ class WalkState:
         self.pending: int = 0
         self.net_ssid: Optional[str] = None
         self.net_bssid: Optional[str] = None
+        self.ip: Optional[str] = None
+        self.router: Optional[str] = None
+        self.mac: Optional[str] = None
+        self._addrs_done: bool = False
         self._lock = threading.Lock()
+
+    def ensure_addrs(
+        self,
+        addrs_fn: Optional[Callable[
+            [], Optional[Tuple[Optional[str], Optional[str], Optional[str]]]]] = None,
+    ) -> Optional[Tuple[Optional[str], Optional[str], Optional[str]]]:
+        """One-shot session addr lookup (ip, router, mac); never raise."""
+        if self._addrs_done:
+            return (self.ip, self.router, self.mac)
+        self._addrs_done = True
+        fn = addrs_fn or signal_mod.read_local_addrs
+        try:
+            found = fn()
+        except Exception:  # noqa: BLE001 - addr lookup is best-effort
+            found = None
+        if found is None:
+            self.ip, self.router, self.mac = None, None, None
+            return None
+        try:
+            self.ip, self.router, self.mac = found[0], found[1], found[2]
+        except Exception:
+            self.ip, self.router, self.mac = None, None, None
+            return None
+        if not self.ip and not self.router and not self.mac:
+            return None
+        return (self.ip, self.router, self.mac)
 
     def ensure_identity(
         self,
@@ -738,6 +785,7 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
     try:
         state.active_id = _resolve_preset(conn, location_preset)
         state.ensure_identity()
+        state.ensure_addrs()
         if location_preset is not None and state.active_id is None:
             state.set_toast(
                 "unknown preset %r; press `l` to pick" % (location_preset,))
@@ -844,6 +892,9 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                                     (pad3 + " | ", 0),
                                     (noise_g, 0), (" [60s]", 0)])
                         _emit(format_extra_line(ch_s, phy_s, tx_s))
+                        _emit(format_radio_line(
+                            state.sig.mcs, state.sig.band,
+                            state.sig.security))
                     else:
                         _emit_segs([("RSSI  ", 0),
                                     (r_val_pad + "[%s]" % r_rate, r_attr),
@@ -854,8 +905,14 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                         _emit_segs([("noise ", 0), (n_val_pad, 0),
                                     (pad3, 0)])
                         _emit(format_extra_line(ch_s, phy_s, tx_s))
+                        _emit(format_radio_line(
+                            state.sig.mcs, state.sig.band,
+                            state.sig.security))
                 manual = " (manual)" if state.ssid_override else ""
                 _emit("Net: %s%s" % (state.net_ssid or "unknown", manual))
+                _addr = format_addr_line(state.ip, state.router, state.mac)
+                if _addr:
+                    _emit(_addr)
                 toast, pending = state.ui_snapshot()
                 _emit("loc: %s  pending: %d" % (
                     _location_label(conn, state.active_id), pending))
@@ -960,6 +1017,7 @@ def _walk_fallback(db_path: str, interval: float,
     try:
         state.active_id = _resolve_preset(conn, location_preset)
         state.ensure_identity()
+        state.ensure_addrs()
         print("walk fallback (no curses): keys s/l/n/f/q + Enter", flush=True)
         while True:
             state.poll()
@@ -989,6 +1047,9 @@ def _walk_fallback(db_path: str, interval: float,
                 print(format_extra_line(
                     state.sig.channel or "-", state.sig.phy or "-",
                     state.sig.tx_rate or "-"), flush=True)
+                print(format_radio_line(
+                    state.sig.mcs, state.sig.band,
+                    state.sig.security), flush=True)
             else:
                 rssi_s = "UNKNOWN" if state.sig.rssi is None else "%4d dBm" % state.sig.rssi
                 snr_s = "UNKNOWN" if state.sig.snr is None else "%3d dB" % state.sig.snr
@@ -1029,8 +1090,14 @@ def _walk_fallback(db_path: str, interval: float,
                       + pad3 + " | " + noise_g
                       + " [60s]", flush=True)
                 print(format_extra_line(ch_s, phy_s, tx_s), flush=True)
+                print(format_radio_line(
+                    state.sig.mcs, state.sig.band,
+                    state.sig.security), flush=True)
             manual = " (manual)" if state.ssid_override else ""
             print("Net: %s%s" % (state.net_ssid or "unknown", manual), flush=True)
+            _addr = format_addr_line(state.ip, state.router, state.mac)
+            if _addr:
+                print(_addr, flush=True)
             toast, pending = state.ui_snapshot()
             print("loc: %s pending: %d %s" % (
                 _location_label(conn, state.active_id), pending,
@@ -1190,6 +1257,8 @@ __all__ = [
     "ansi_wrap",
     "finish_snapshot",
     "format_extra_line",
+    "format_radio_line",
+    "format_addr_line",
     "format_meter_left",
     "format_meter_row",
     "format_net_line",

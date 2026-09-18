@@ -305,3 +305,138 @@ def test_scan_backfills_ssid_and_warns_on_abort(monkeypatch, tmp_path, capsys):
     out = capsys.readouterr()
     assert rc == 0
     assert "unknown" in out.err.lower() or "warn" in out.err.lower()
+
+
+# --- radio detail fields (mcs/band/security), display-only ---
+
+def test_signal_radio_defaults_none():
+    sig = Signal()
+    assert sig.mcs is None and sig.band is None and sig.security is None
+
+
+def test_security_map_and_fallback():
+    from wifimap import signal as sig_mod
+    assert sig_mod._security_name(0) == "open"
+    assert sig_mod._security_name(1) == "WEP"
+    assert sig_mod._security_name(2) == "WPA Personal"
+    assert sig_mod._security_name(3) == "WPA/WPA2 Personal"
+    assert sig_mod._security_name(4) == "WPA2 Personal"
+    assert sig_mod._security_name(8) == "WPA3 Personal"
+    assert sig_mod._security_name(99) == "sec(99)"
+    assert sig_mod._security_name(None) is None
+
+
+def test_band_map_and_unknown():
+    from wifimap import signal as sig_mod
+
+    class _Ch:
+        def __init__(self, code):
+            self._code = code
+
+        def channelBand(self):
+            return self._code
+
+    assert sig_mod._band_name(_Ch(1)) == "2.4 GHz"
+    assert sig_mod._band_name(_Ch(2)) == "5 GHz"
+    assert sig_mod._band_name(_Ch(9)) is None
+    assert sig_mod._band_name(None) is None
+    assert sig_mod._band_name(object()) is None
+
+
+def test_mcs_missing_api_gives_none():
+    from wifimap import signal as sig_mod
+    assert sig_mod._mcs_value(object()) is None
+
+    class _M:
+        def mcsIndex(self):
+            return 9
+
+    assert sig_mod._mcs_value(_M()) == 9
+
+    class _Bad:
+        def mcsIndex(self):
+            raise RuntimeError("gone")
+
+    assert sig_mod._mcs_value(_Bad()) is None
+
+
+def test_read_signal_radio_fields(monkeypatch):
+    from wifimap import signal as sig_mod
+
+    class _Ch(FakeChannel):
+        def channelBand(self):
+            return 2
+
+    class _Iface(FakeInterface):
+        def mcsIndex(self):
+            return 11
+
+        def securityMode(self):
+            return 8
+
+        def wlanChannel(self):
+            return _Ch()
+
+    monkeypatch.setitem(sys.modules, "CoreWLAN", _make_mod(_Iface()))
+    sig = read_signal()
+    assert sig.mcs == 11
+    assert sig.band == "5 GHz"
+    assert sig.security == "WPA3 Personal"
+
+
+def test_read_signal_radio_absent_stays_none(fake_wlan):
+    sig = read_signal()
+    assert sig.mcs is None and sig.band is None and sig.security is None
+
+
+def test_profiler_fallback_radio_none(monkeypatch):
+    from wifimap import signal as sig_mod
+    import subprocess
+    out = ("Current Wireless Network: X\nSignal / Noise: -60 dBm / -90 dBm\n"
+           "Transmit Rate: 100\nPHY Mode: 802.11ax\nChannel: 36\n")
+    monkeypatch.setattr(subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(a, 0, out, ""))
+    sig = sig_mod.read_signal_profiler()
+    assert sig.mcs is None and sig.band is None and sig.security is None
+
+
+# --- read_local_addrs (mocked subprocess, no live calls) ---
+
+def test_read_local_addrs_full(monkeypatch):
+    from wifimap import signal as sig_mod
+    import subprocess
+
+    def _fake(cmd, **kw):
+        if cmd == ["ipconfig", "getifaddr", "en0"]:
+            return subprocess.CompletedProcess(cmd, 0, "192.168.178.50\n", "")
+        if cmd == ["ipconfig", "getoption", "en0", "router"]:
+            return subprocess.CompletedProcess(cmd, 0, "192.168.178.1\n", "")
+        raise AssertionError("unexpected cmd %r" % (cmd,))
+
+    monkeypatch.setattr(subprocess, "run", _fake)
+    monkeypatch.setattr(sig_mod, "_read_hw_address", lambda: "aa:bb:cc:dd:ee:ff")
+    assert sig_mod.read_local_addrs() == (
+        "192.168.178.50", "192.168.178.1", "aa:bb:cc:dd:ee:ff")
+
+
+def test_read_local_addrs_partial_and_all_missing(monkeypatch):
+    from wifimap import signal as sig_mod
+    import subprocess
+
+    def _fake(cmd, **kw):
+        if cmd == ["ipconfig", "getifaddr", "en0"]:
+            raise subprocess.TimeoutExpired(cmd, 5)
+        if cmd == ["ipconfig", "getoption", "en0", "router"]:
+            return subprocess.CompletedProcess(cmd, 0, "192.168.178.1\n", "")
+        raise AssertionError("unexpected cmd %r" % (cmd,))
+
+    monkeypatch.setattr(subprocess, "run", _fake)
+    monkeypatch.setattr(sig_mod, "_read_hw_address", lambda: None)
+    assert sig_mod.read_local_addrs() == (None, "192.168.178.1", None)
+    monkeypatch.setattr(sig_mod, "_read_hw_address", lambda: None)
+
+    def _fail(cmd, **kw):
+        raise OSError("no ipconfig")
+
+    monkeypatch.setattr(subprocess, "run", _fail)
+    assert sig_mod.read_local_addrs() is None

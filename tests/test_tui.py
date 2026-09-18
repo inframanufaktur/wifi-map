@@ -626,3 +626,48 @@ def test_format_meter_row_pipe_aligns():
     for r in rows:
         assert r.endswith("## [60s]")
         assert "[OK ]" not in r and "[GREAT ]" not in r
+
+
+def test_format_radio_line_placeholders():
+    assert tui_mod.format_radio_line(None, None, None) == "mcs - band - sec -"
+    assert tui_mod.format_radio_line(9, "5 GHz", "WPA3 Personal") == (
+        "mcs 9 band 5 GHz sec WPA3 Personal")
+
+
+def test_format_addr_line_omits_when_unknown():
+    assert tui_mod.format_addr_line(None, None, None) == ""
+    assert tui_mod.format_addr_line("1.2.3.4", None, None) == (
+        "IP 1.2.3.4 RTR - MAC -")
+    line = tui_mod.format_addr_line("192.168.178.50", "192.168.178.1",
+                                    "aa:bb:cc:dd:ee:ff")
+    assert "192.168.178.50" in line and "192.168.178.1" in line
+
+
+def test_ensure_addrs_one_shot_and_never_raise(tmp_path):
+    st = tui_mod.WalkState(str(tmp_path / "w.db"))
+    assert st.ip is None and st.router is None and st.mac is None
+    calls = []
+
+    def _fn():
+        calls.append(1)
+        return ("1.1.1.1", "1.1.1.254", "aa:bb:cc:00:11:22")
+
+    assert st.ensure_addrs(addrs_fn=_fn) == ("1.1.1.1", "1.1.1.254", "aa:bb:cc:00:11:22")
+    assert st.ensure_addrs(addrs_fn=_fn) == ("1.1.1.1", "1.1.1.254", "aa:bb:cc:00:11:22")
+    assert len(calls) == 1  # one-shot
+
+    st2 = tui_mod.WalkState(str(tmp_path / "w2.db"))
+
+    def _boom():
+        raise RuntimeError("nope")
+
+    assert st2.ensure_addrs(addrs_fn=_boom) is None
+    assert (st2.ip, st2.router, st2.mac) == (None, None, None)
+
+
+def test_snapshot_payload_excludes_display_only():
+    sig = signal_mod.Signal(ssid="h", rssi=-60, mcs=9, band="5 GHz",
+                            security="WPA3 Personal")
+    payload = tui_mod.snapshot_payload(sig)
+    assert "mcs" not in payload and "band" not in payload
+    assert "security" not in payload

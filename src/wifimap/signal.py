@@ -36,6 +36,9 @@ class Signal:
     channel: Optional[str] = None
     phy: Optional[str] = None
     tx_rate: Optional[str] = None
+    mcs: Optional[int] = None
+    band: Optional[str] = None
+    security: Optional[str] = None
 
 
 # CWPHYMode enum (Apple docs): 0 none, 1 a, 2 b, 3 g, 4 n, 5 ac, 6 ax.
@@ -57,6 +60,58 @@ _CHANNEL_WIDTHS = {
     3: "80MHz",
     4: "160MHz",
 }
+
+
+# CWChannelBand enum (best-effort): 1 = 2.4GHz, 2 = 5GHz.
+_CHANNEL_BANDS = {
+    1: "2.4 GHz",
+    2: "5 GHz",
+}
+
+# CWSecurity enum (best-effort; 8=WPA3 Personal verified live against
+# macOS WiFi UI on a WPA3 network, others per Apple docs).
+_SECURITY_MODES = {
+    0: "open",
+    1: "WEP",
+    2: "WPA Personal",
+    3: "WPA/WPA2 Personal",
+    4: "WPA2 Personal",
+    8: "WPA3 Personal",
+}
+
+
+def _security_name(mode: object) -> Optional[str]:
+    try:
+        code = int(mode)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return str(mode) if mode is not None else None
+    return _SECURITY_MODES.get(code, "sec(%s)" % code)
+
+
+def _band_name(channel: object) -> Optional[str]:
+    if channel is None:
+        return None
+    try:
+        code = int(channel.channelBand())  # type: ignore[union-attr]
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return _CHANNEL_BANDS.get(code)
+
+
+def _mcs_value(iface: object) -> Optional[int]:
+    try:
+        fn = getattr(iface, "mcsIndex", None)
+        if fn is None:
+            return None
+        v = fn() if callable(fn) else fn
+    except Exception:
+        return None
+    if v is None:
+        return None
+    try:
+        return int(v)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
 
 
 def _phy_name(mode: object) -> Optional[str]:
@@ -107,15 +162,28 @@ def read_signal(timeout: float = 2.0) -> Signal:
     bssid = iface.bssid()
     snr = rssi - noise if noise is not None else None
     rate = iface.transmitRate()
+    wlan_ch = None
+    try:
+        wlan_ch = iface.wlanChannel()
+    except Exception:
+        wlan_ch = None
+    sec = None
+    try:
+        sec = _security_name(iface.securityMode())
+    except Exception:
+        sec = None
     return Signal(
         ssid=str(ssid) if ssid is not None else None,
         bssid=str(bssid) if bssid is not None else None,
         rssi=int(rssi),
         noise=int(noise) if noise is not None else None,
         snr=int(snr) if snr is not None else None,
-        channel=_channel_str(iface.wlanChannel()),
+        channel=_channel_str(wlan_ch),
         phy=_phy_name(iface.activePHYMode()),
         tx_rate=str(rate) if rate is not None else None,
+        mcs=_mcs_value(iface),
+        band=_band_name(wlan_ch),
+        security=sec,
     )
 
 
@@ -236,6 +304,79 @@ def read_network_identity() -> Optional[Tuple[str, str]]:
     if prompt.returncode != 0:
         return None
     return _run_wdutil_info()
+
+
+#: Timeout (s) for each one-shot local-addr subprocess call.
+_ADDR_TIMEOUT = 5.0
+
+
+def _run_ipconfig(args) -> Optional[str]:
+    """Run one ipconfig query; stripped stdout or None on any failure."""
+    try:
+        proc = subprocess.run(
+            ["ipconfig"] + list(args),
+            capture_output=True, text=True, timeout=_ADDR_TIMEOUT,
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        out = (proc.stdout or "").strip()
+    except Exception:
+        return None
+    return out or None
+
+
+def _read_hw_address() -> Optional[str]:
+    """CoreWLAN hardwareAddress(); None on any failure (never raise)."""
+    try:
+        from CoreWLAN import CWWiFiClient
+    except Exception:
+        return None
+    try:
+        client = CWWiFiClient.sharedWiFiClient()
+        iface = client.interface() if client is not None else None
+        if iface is None:
+            return None
+        mac = iface.hardwareAddress()
+    except Exception:
+        return None
+    if mac is None:
+        return None
+    try:
+        s = str(mac).strip()
+    except Exception:
+        return None
+    return s or None
+
+
+def read_local_addrs():
+    # type: () -> Optional[Tuple[Optional[str], Optional[str], Optional[str]]]
+    """Session one-shot: (ip, router, mac) or None when all unknown.
+
+    IP via ``ipconfig getifaddr en0`` (verified returns 192.168.178.50);
+    router via ``ipconfig getoption en0 router``
+    (verified returns 192.168.178.1); MAC via CoreWLAN
+    ``hardwareAddress()`` (verified live). No sudo needed. Never raise;
+    each lookup has a timeout; per-field failure yields None for that
+    field; None overall only when every field is missing.
+    """
+    try:
+        ip = _run_ipconfig(["getifaddr", "en0"])
+    except Exception:
+        ip = None
+    try:
+        router = _run_ipconfig(["getoption", "en0", "router"])
+    except Exception:
+        router = None
+    try:
+        mac = _read_hw_address()
+    except Exception:
+        mac = None
+    if not ip and not router and not mac:
+        return None
+    return (ip, router, mac)
 
 
 def read_signal_profiler(timeout: float = 30.0) -> Signal:
