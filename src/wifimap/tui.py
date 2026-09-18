@@ -673,6 +673,17 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
             curses.curs_set(0)
         except Exception:
             pass
+        has_col = False
+        try:
+            if curses.has_colors():
+                curses.start_color()
+                curses.use_default_colors()
+                curses.init_pair(1, curses.COLOR_GREEN, -1)
+                curses.init_pair(2, curses.COLOR_YELLOW, -1)
+                curses.init_pair(3, curses.COLOR_RED, -1)
+                has_col = True
+        except Exception:
+            has_col = False
         while True:
             state.poll()
             try:
@@ -686,33 +697,49 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                 h, w = stdscr.getmaxyx()
                 row = 0
 
-                def _emit(s: str) -> None:
+                def _emit(s: str, attr: int = 0) -> None:
                     nonlocal row
                     if row < h - 1:
                         try:
-                            stdscr.addstr(row, 0, s[: w - 1])
+                            stdscr.addstr(row, 0, s[: w - 1], attr)
                         except Exception:
                             pass
                         row += 1
 
-                if state.no_wifi:
+                r_pair, _ = rating_style(rate_rssi(state.sig.rssi))
+                s_pair, _ = rating_style(rate_snr(state.sig.snr))
+                r_attr = curses.color_pair(r_pair) if (has_col and r_pair) else 0
+                s_attr = curses.color_pair(s_pair) if (has_col and s_pair) else 0
+                mode = layout_mode(w)
+                if mode == "wide" and h >= 10 and not state.no_wifi:
+                    gw = max(10, (w // 2) - 12)
+                    rssi_g = state.hist_rssi.sparkline(-90, -30, gw)
+                    snr_g = state.hist_snr.sparkline(0, 40, gw)
+                    noise_g = state.hist_noise.sparkline(-100, -60, gw)
+                    rssi_s = "UNKNOWN" if state.sig.rssi is None else "%d dBm" % state.sig.rssi
+                    snr_s = "UNKNOWN" if state.sig.snr is None else "%d dB" % state.sig.snr
+                    noise_s = "UNKNOWN" if state.sig.noise is None else "%d dBm" % state.sig.noise
+                    _emit("RSSI %s [%s] | RSSI  %s" % (rssi_s, rate_rssi(state.sig.rssi), rssi_g), r_attr)
+                    _emit("SNR %s [%s] | SNR   %s" % (snr_s, rate_snr(state.sig.snr), snr_g), s_attr)
+                    _emit("noise %s ch %s | noise %s" % (noise_s, state.sig.channel or "-", noise_g))
+                elif state.no_wifi:
                     _emit("NO-WIFI: %s" % (state.no_wifi_msg,))
                     _emit("`s` blocked; fix WiFi or quit with `q`.")
                 else:
                     rssi_s = "UNKNOWN" if state.sig.rssi is None else "%d dBm" % state.sig.rssi
                     snr_s = "UNKNOWN" if state.sig.snr is None else "%d dB" % state.sig.snr
                     noise_s = "UNKNOWN" if state.sig.noise is None else "%d dBm" % state.sig.noise
-                    _emit("RSSI %s [%s]" % (rssi_s, rate_rssi(state.sig.rssi)))
+                    _emit("RSSI %s [%s]" % (rssi_s, rate_rssi(state.sig.rssi)), r_attr)
                     _emit("SNR %s [%s]  noise %s  ch %s  phy %s  tx %s" % (
                         snr_s, rate_snr(state.sig.snr), noise_s,
                         state.sig.channel or "-", state.sig.phy or "-",
-                        state.sig.tx_rate or "-"))
+                        state.sig.tx_rate or "-"), s_attr)
                 manual = " (manual)" if state.ssid_override else ""
                 _emit("Net: %s%s" % (state.net_ssid or "unknown", manual))
                 toast, pending = state.ui_snapshot()
                 _emit("loc: %s  pending: %d" % (
                     _location_label(conn, state.active_id), pending))
-                if h >= 10 and not state.no_wifi:
+                if mode == "narrow" and h >= 10 and not state.no_wifi:
                     gw = max(10, w - 12)
                     _emit("RSSI  %s [60s]" % state.hist_rssi.sparkline(-90, -30, gw))
                     _emit("SNR   %s [60s]" % state.hist_snr.sparkline(0, 40, gw))

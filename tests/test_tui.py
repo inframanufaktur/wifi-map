@@ -546,3 +546,10 @@ def test_layout_mode_boundary():
     assert tui_mod.layout_mode(99) == "narrow"
     assert tui_mod.layout_mode(100) == "wide"
     assert tui_mod.layout_mode(200) == "wide"
+
+
+def test_curses_pair_for_rating_uses_rating_style():
+    pair, _ = tui_mod.rating_style(tui_mod.rate_rssi(-55))
+    assert pair == 1
+    pair, _ = tui_mod.rating_style(tui_mod.rate_rssi(-80))
+    assert pair == 3
