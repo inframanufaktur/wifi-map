@@ -379,3 +379,29 @@ def test_benchmark_clear(db):
     assert get_benchmark(db, lid) is not None
     clear_benchmark(db, lid)
     assert get_benchmark(db, lid) is None
+
+
+def test_benchmark_bool_id_raises(db):
+    lid = create_location(db, "home")
+    with pytest.raises(ValueError):
+        set_benchmark(db, True, rssi=-45)
+    with pytest.raises(ValueError):
+        get_benchmark(db, True)
+    with pytest.raises(ValueError):
+        clear_benchmark(db, False)
+    # valid id still works after rejected bool calls
+    assert get_benchmark(db, lid) is None
+
+
+def test_benchmark_unknown_id_raises(db):
+    with pytest.raises(ValueError):
+        set_benchmark(db, 9999, rssi=-45)
+
+
+def test_benchmark_ts_default_is_iso(db):
+    lid = create_location(db, "home")
+    set_benchmark(db, lid, rssi=-45)
+    bench = get_benchmark(db, lid)
+    assert bench is not None
+    assert isinstance(bench["ts"], str)
+    assert "T" in bench["ts"]

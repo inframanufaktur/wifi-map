@@ -562,6 +562,9 @@ def get_benchmark(
     location_id: int,
 ) -> Optional[dict]:
     """Return the benchmark row for a location, or None if missing."""
+    if isinstance(location_id, bool):
+        raise ValueError("invalid location id: %r" % (location_id,))
+    old = conn.row_factory
     conn.row_factory = sqlite3.Row
     try:
         row = conn.execute(
@@ -574,7 +577,7 @@ def get_benchmark(
             return None
         return dict(row)
     finally:
-        conn.row_factory = None
+        conn.row_factory = old
 
 
 def clear_benchmark(
@@ -582,6 +585,8 @@ def clear_benchmark(
     location_id: int,
 ) -> None:
     """Delete the benchmark row for a location."""
+    if isinstance(location_id, bool):
+        raise ValueError("invalid location id: %r" % (location_id,))
     conn.execute(
         "DELETE FROM benchmarks WHERE location_id = ?",
         (location_id,),
