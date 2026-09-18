@@ -12,7 +12,7 @@ import csv
 import sqlite3
 import sys
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import Optional, Sequence
 
 from wifimap import signal as signal_mod
 from wifimap import speed as speed_mod
@@ -30,6 +30,11 @@ _EXPORT_FIELDS = [
     "ssid", "bssid", "rssi", "noise", "snr", "channel", "phy",
     "tx_rate", "ping_ms", "down_mbps", "up_mbps", "server", "note",
 ]
+
+
+def _disp(v: object) -> str:
+    """Human-table cell: NULL shows as ``-`` (CSV export keeps ``""``)."""
+    return "-" if v is None else str(v)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -130,8 +135,8 @@ def _cmd_scan(db_path: str, args: argparse.Namespace) -> int:
                   file=sys.stderr)
             return EXIT_STORAGE
         print("#%d %s rssi=%s snr=%s down=%s up=%s note=%s" % (
-            rid, args.location, sig.rssi, sig.snr, down_mbps, up_mbps,
-            args.note or ""))
+            rid, args.location, _disp(sig.rssi), _disp(sig.snr),
+            _disp(down_mbps), _disp(up_mbps), _disp(args.note)))
         return EXIT_OK
     finally:
         conn.close()
@@ -152,8 +157,9 @@ def _cmd_locations_list(db_path: str) -> int:
             return EXIT_STORAGE
         print("%-4s %-20s %-6s %-8s" % ("id", "name", "floor", "outdoors"))
         for loc in locs:
-            print("%-4d %-20s %-6d %-8d" % (
-                loc.id, loc.name, loc.floor, 1 if loc.outdoors else 0))
+            print("%-4s %-20s %-6s %-8s" % (
+                _disp(loc.id), _disp(loc.name), _disp(loc.floor),
+                _disp(1 if loc.outdoors else 0)))
         return EXIT_OK
     finally:
         conn.close()
@@ -199,9 +205,10 @@ def _cmd_list(db_path: str, args: argparse.Namespace) -> int:
             "id", "location", "floor", "rssi", "down", "up", "note"))
         for r in rows:
             print("%-4s %-20s %-6s %-6s %-9s %-9s %s" % (
-                r.get("id"), r.get("location_name"), r.get("floor"),
-                r.get("rssi"), r.get("down_mbps"), r.get("up_mbps"),
-                r.get("note") or ""))
+                _disp(r.get("id")), _disp(r.get("location_name")),
+                _disp(r.get("floor")), _disp(r.get("rssi")),
+                _disp(r.get("down_mbps")), _disp(r.get("up_mbps")),
+                _disp(r.get("note"))))
         return EXIT_OK
     finally:
         conn.close()
@@ -254,8 +261,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _cmd_list(db_path, args)
     if args.cmd == "export":
         return _cmd_export(db_path, args)
-    parser.print_usage(sys.stderr)
-    return EXIT_OK
+    raise AssertionError("unreachable: argparse requires a subcommand")
 
 
 if __name__ == "__main__":

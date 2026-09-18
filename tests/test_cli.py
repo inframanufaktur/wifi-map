@@ -207,3 +207,50 @@ def test_scan_db_error_exit_3(monkeypatch, tmp_path, capsys):
                         "scan", "--location", "k", "--no-speedtest")
     assert rc == 3
     assert err.strip() != ""
+
+
+def test_scan_unknown_id_exit_3(monkeypatch, tmp_path, capsys):
+    db = str(tmp_path / "cli.db")
+    def _noid(conn, id_or_name, floor=0, outdoors=False):
+        raise ValueError("unknown location id: 9999")
+    monkeypatch.setattr(store_mod, "resolve_location", _noid)
+    rc, out, err = _run(capsys, "--db", db, "scan",
+                        "--location", "9999", "--no-speedtest")
+    assert rc == 3
+    assert err.strip() != ""
+
+
+def test_scan_unwritable_db_exit_3(tmp_path, capsys):
+    db = str(tmp_path / "nodir" / "x.db")
+    rc, out, err = _run(capsys, "--db", db, "scan",
+                        "--location", "k", "--no-speedtest")
+    assert rc == 3
+    assert err.strip() != ""
+
+
+def test_export_bad_path_exit_3(tmp_path, capsys):
+    db = str(tmp_path / "cli.db")
+    conn = store_mod.get_db(db)
+    try:
+        lid = store_mod.create_location(conn, "k", floor=0)
+        store_mod.add_reading(conn, lid, rssi=-55)
+    finally:
+        conn.close()
+    rc, out, err = _run(capsys, "--db", db, "export",
+                        "--csv", str(tmp_path / "nodir" / "o.csv"))
+    assert rc == 3
+    assert err.strip() != ""
+
+
+def test_list_nulls_show_dash(tmp_path, capsys):
+    db = str(tmp_path / "cli.db")
+    conn = store_mod.get_db(db)
+    try:
+        lid = store_mod.create_location(conn, "den", floor=0)
+        store_mod.add_reading(conn, lid, rssi=-60)
+    finally:
+        conn.close()
+    rc, out, err = _run(capsys, "--db", db, "list")
+    assert rc == 0
+    assert "None" not in out
+    assert "-" in out
