@@ -803,15 +803,19 @@ def _walk_fallback(db_path: str, interval: float,
             else:
                 rssi_s = "UNKNOWN" if state.sig.rssi is None else "%d dBm" % state.sig.rssi
                 print("RSSI %s [%s]" % (rssi_s, rate_rssi(state.sig.rssi)), flush=True)
-                print("SNR %s [%s]  noise %s" % (
+                print("SNR %s [%s]  noise %s  ch %s  phy %s  tx %s" % (
                     "UNKNOWN" if state.sig.snr is None else "%d dB" % state.sig.snr,
                     rate_snr(state.sig.snr),
-                    "UNKNOWN" if state.sig.noise is None else "%d dBm" % state.sig.noise),
+                    "UNKNOWN" if state.sig.noise is None else "%d dBm" % state.sig.noise,
+                    state.sig.channel or "-", state.sig.phy or "-",
+                    state.sig.tx_rate or "-"),
                     flush=True)
             manual = " (manual)" if state.ssid_override else ""
             print("Net: %s%s" % (state.net_ssid or "unknown", manual), flush=True)
             gw = 40
             print("RSSI  %s [60s]" % state.hist_rssi.sparkline(-90, -30, gw), flush=True)
+            print("SNR   %s [60s]" % state.hist_snr.sparkline(0, 40, gw), flush=True)
+            print("noise %s [60s]" % state.hist_noise.sparkline(-100, -60, gw), flush=True)
             toast, pending = state.ui_snapshot()
             print("loc: %s pending: %d %s" % (
                 _location_label(conn, state.active_id), pending,
