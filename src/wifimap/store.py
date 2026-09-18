@@ -594,7 +594,7 @@ def clear_benchmark(
     conn.commit()
 
 
-def format_benchmark_delta(cur: dict, bench) -> str:
+def format_benchmark_delta(cur: dict, bench: Optional[dict]) -> str:
     """Format cur-vs-benchmark deltas for rssi/snr/down/up."""
     if not bench:
         return ""
