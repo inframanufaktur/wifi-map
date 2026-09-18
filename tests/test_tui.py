@@ -68,17 +68,33 @@ def test_picker_press_arrows_and_create():
     assert tui_mod.picker_press("x", 1, 3) == (1, "ignore", None)
 
 
+def _db(tmp_path):
+    return str(tmp_path / "tui.db")
+
+
+def _seed_3level(conn, loc="home", room="kitchen", spots=("window", "bed"),
+                 floor=0, outdoors=False):
+    """Create location + room + spots; return (lid, rid, spot_ids)."""
+    lid = store_mod.create_location(conn, loc)
+    rid = store_mod.create_room(conn, lid, room, floor=floor,
+                                outdoors=outdoors)
+    sids = [store_mod.create_spot(conn, rid, name) for name in spots]
+    return lid, rid, sids
+
+
 def test_fallback_pick_enter_confirms_active(monkeypatch, tmp_path):
     db = _db(tmp_path)
     conn = store_mod.get_db(db)
     try:
-        a = store_mod.create_location(conn, "room-a", floor=0)
-        store_mod.create_location(conn, "room-b", floor=1)
+        lid, rid, (wid, bid) = _seed_3level(conn)
         st = tui_mod.WalkState(db)
-        st.active_id = a
+        st.active_location_id = lid
+        st.active_spot_id = wid
+        # Enter at room level confirms kitchen, Enter at spot level
+        # confirms window (prefilled active drilldown).
         monkeypatch.setattr("builtins.input", lambda *args: "")
         assert tui_mod._fallback_pick(conn, st) is True
-        assert st.active_id == a  # prefilled active kept
+        assert st.active_spot_id == wid  # prefilled active kept
     finally:
         conn.close()
 
@@ -87,11 +103,45 @@ def test_fallback_pick_cancel(monkeypatch, tmp_path):
     db = _db(tmp_path)
     conn = store_mod.get_db(db)
     try:
-        store_mod.create_location(conn, "room-a", floor=0)
+        lid, rid, _ = _seed_3level(conn)
         st = tui_mod.WalkState(db)
+        st.active_location_id = lid
         monkeypatch.setattr("builtins.input", lambda *args: "q")
         assert tui_mod._fallback_pick(conn, st) is False
-        assert st.active_id is None
+        assert st.active_spot_id is None
+    finally:
+        conn.close()
+
+
+def test_fallback_pick_scoped_to_location(monkeypatch, tmp_path):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        lid, rid, (wid, bid) = _seed_3level(conn)
+        other = store_mod.create_location(conn, "office")
+        other_room = store_mod.create_room(conn, other, "desk")
+        other_spot = store_mod.create_spot(conn, other_room, "chair")
+        st = tui_mod.WalkState(db)
+        st.active_location_id = lid
+        # digit 1 picks kitchen (only room in home), digit 2 picks bed.
+        answers = iter(["1", "2"])
+        monkeypatch.setattr("builtins.input",
+                            lambda *args: next(answers))
+        assert tui_mod._fallback_pick(conn, st) is True
+        assert st.active_spot_id == bid
+        assert st.active_spot_id != other_spot
+    finally:
+        conn.close()
+
+
+def test_fallback_pick_no_preset_toasts(monkeypatch, tmp_path):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        _seed_3level(conn)
+        st = tui_mod.WalkState(db)
+        assert tui_mod._fallback_pick(conn, st) is False
+        assert "preset" in st.ui_snapshot()[0].lower()
     finally:
         conn.close()
 
@@ -156,7 +206,8 @@ def test_finish_snapshot_speed_ok(tmp_path):
     db = _db(tmp_path)
     conn = store_mod.get_db(db)
     try:
-        lid = store_mod.create_location(conn, "den")
+        _, _, (sid, _) = _seed_3level(conn, loc="den", room="r",
+                                      spots=("s1", "s2"))
     finally:
         conn.close()
     sig = {"ssid": "h", "bssid": None, "rssi": -60, "noise": -90,
@@ -166,7 +217,7 @@ def test_finish_snapshot_speed_ok(tmp_path):
         return speed_mod.Speed(ping_ms=9.0, down_mbps=80.0, up_mbps=10.0,
                                server="S (1)")
 
-    res = tui_mod.finish_snapshot(db, lid, dict(sig), run_speedtest_fn=_sp)
+    res = tui_mod.finish_snapshot(db, sid, dict(sig), run_speedtest_fn=_sp)
     assert res.ok and res.reading_id is not None
     conn = store_mod.get_db(db)
     try:
@@ -181,7 +232,8 @@ def test_finish_snapshot_speed_fail_nulls_error(tmp_path):
     db = _db(tmp_path)
     conn = store_mod.get_db(db)
     try:
-        lid = store_mod.create_location(conn, "den")
+        _, _, (sid, _) = _seed_3level(conn, loc="den", room="r",
+                                      spots=("s1", "s2"))
     finally:
         conn.close()
 
@@ -189,7 +241,7 @@ def test_finish_snapshot_speed_fail_nulls_error(tmp_path):
         raise speed_mod.SpeedtestFailedError("timeout")
 
     res = tui_mod.finish_snapshot(
-        db, lid, {"ssid": "h", "rssi": -61}, run_speedtest_fn=_fail)
+        db, sid, {"ssid": "h", "rssi": -61}, run_speedtest_fn=_fail)
     assert res.ok
     conn = store_mod.get_db(db)
     try:
@@ -204,7 +256,8 @@ def test_finish_snapshot_missing_binary_signal_only(tmp_path):
     db = _db(tmp_path)
     conn = store_mod.get_db(db)
     try:
-        lid = store_mod.create_location(conn, "den")
+        _, _, (sid, _) = _seed_3level(conn, loc="den", room="r",
+                                      spots=("s1", "s2"))
     finally:
         conn.close()
 
@@ -212,7 +265,7 @@ def test_finish_snapshot_missing_binary_signal_only(tmp_path):
         raise speed_mod.SpeedtestUnavailableError("no binary")
 
     res = tui_mod.finish_snapshot(
-        db, lid, {"ssid": "h", "rssi": -62}, run_speedtest_fn=_missing)
+        db, sid, {"ssid": "h", "rssi": -62}, run_speedtest_fn=_missing)
     assert res.ok
     assert "signal-only" in res.message.lower() or "warn" in res.message.lower()
     conn = store_mod.get_db(db)
@@ -226,13 +279,14 @@ def test_start_snapshot_thread_daemon_join(tmp_path):
     db = _db(tmp_path)
     conn = store_mod.get_db(db)
     try:
-        lid = store_mod.create_location(conn, "lab")
+        _, _, (sid, _) = _seed_3level(conn, loc="lab", room="r",
+                                      spots=("s1", "s2"))
     finally:
         conn.close()
     sig = signal_mod.Signal(ssid="h", rssi=-55)
     done = []
     t = tui_mod.start_snapshot_thread(
-        db, lid, sig, no_speedtest=True,
+        db, sid, sig, no_speedtest=True,
         on_done=lambda r: done.append(r))
     assert t.daemon is True
     t.join(timeout=10)
@@ -258,14 +312,29 @@ def test_walk_state_set_floor(tmp_path):
     db = _db(tmp_path)
     conn = store_mod.get_db(db)
     try:
-        lid = store_mod.create_location(conn, "attic", floor=0)
+        _, rid, (sid, _) = _seed_3level(conn, loc="home", room="attic",
+                                        floor=0)
         st = tui_mod.WalkState(db)
-        st.active_id = lid
+        st.active_location_id = store_mod.resolve_location(conn, "home")
+        st.active_spot_id = sid
         assert "1" in st.set_floor(conn, 1)
-        locs = {loc.name: loc for loc in store_mod.list_locations(conn)}
-        assert locs["attic"].floor == 1
+        assert store_mod.get_room(conn, rid).floor == 1
         with pytest.raises(ValueError):
             tui_mod.parse_floor_input("bad")
+    finally:
+        conn.close()
+
+
+def test_walk_state_set_floor_unknown_spot_toasts(tmp_path):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        _seed_3level(conn)
+        st = tui_mod.WalkState(db)
+        st.active_spot_id = 9999
+        assert "unknown" in st.set_floor(conn, 0).lower()
+        st2 = tui_mod.WalkState(db)
+        assert "no active" in st2.set_floor(conn, 0).lower()
     finally:
         conn.close()
 
@@ -274,12 +343,15 @@ def test_walk_state_set_floor_unique_conflict_toasts(tmp_path):
     db = _db(tmp_path)
     conn = store_mod.get_db(db)
     try:
-        store_mod.create_location(conn, "dup", floor=0)
-        other = store_mod.create_location(conn, "dup", floor=1)
+        lid = store_mod.create_location(conn, "home")
+        store_mod.create_room(conn, lid, "dup", floor=0)
+        other = store_mod.create_room(conn, lid, "dup", floor=1)
+        other_spot = store_mod.create_spot(conn, other, "s")
         st = tui_mod.WalkState(db)
-        st.active_id = other
+        st.active_location_id = lid
+        st.active_spot_id = other_spot
         assert "DB error" in st.set_floor(conn, 0)
-        assert store_mod.get_location(conn, other).floor == 1
+        assert store_mod.get_room(conn, other).floor == 1
     finally:
         conn.close()
 
@@ -322,7 +394,7 @@ def test_resolve_preset_routes(tmp_path):
     db = _db(tmp_path)
     conn = store_mod.get_db(db)
     try:
-        lid = store_mod.create_location(conn, "den", floor=0)
+        lid = store_mod.create_location(conn, "den")
         assert tui_mod._resolve_preset(conn, None) is None
         assert tui_mod._resolve_preset(conn, "den") == lid
         assert tui_mod._resolve_preset(conn, str(lid)) == lid
@@ -340,16 +412,18 @@ def test_location_label_states(tmp_path, monkeypatch):
     conn = store_mod.get_db(db)
     try:
         assert tui_mod._location_label(conn, None) == "(none)"
-        lid = store_mod.create_location(conn, "lab", floor=1)
-        assert tui_mod._location_label(conn, lid) == "#%d lab (floor 1)" % lid
-        assert "deleted" in tui_mod._location_label(conn, lid + 999)
+        _, _, (sid, _) = _seed_3level(conn, loc="lab", room="kitchen",
+                                      spots=("window", "bed"), floor=1)
+        assert tui_mod._location_label(conn, sid) == (
+            "#%d lab/kitchen/window (floor 1)" % sid)
+        assert "deleted" in tui_mod._location_label(conn, sid + 999)
 
-        def _boom(conn_arg, loc_id):
+        def _boom(conn_arg, spot_id):
             import sqlite3
             raise sqlite3.Error("locked")
 
-        monkeypatch.setattr(store_mod, "get_location", _boom)
-        assert "db error" in tui_mod._location_label(conn, lid)
+        monkeypatch.setattr(store_mod, "get_spot", _boom)
+        assert "db error" in tui_mod._location_label(conn, sid)
     finally:
         conn.close()
 
@@ -358,11 +432,12 @@ def test_try_snapshot_success_path(tmp_path):
     db = _db(tmp_path)
     conn = store_mod.get_db(db)
     try:
-        lid = store_mod.create_location(conn, "den", floor=0)
+        _, _, (sid, _) = _seed_3level(conn, loc="den", room="r",
+                                      spots=("s1", "s2"))
     finally:
         conn.close()
     st = tui_mod.WalkState(db, no_speedtest=True)
-    st.active_id = lid
+    st.active_spot_id = sid
     st.sig = signal_mod.Signal(ssid="h", rssi=-60, noise=-90, snr=30)
     t = st.try_snapshot()
     assert t is not None
@@ -375,9 +450,15 @@ def test_try_snapshot_success_path(tmp_path):
         rows = store_mod.list_readings(conn)
         assert len(rows) == 1
         assert rows[0]["rssi"] == -60
-        assert rows[0]["location_id"] == lid
+        assert rows[0]["spot_id"] == sid
     finally:
         conn.close()
+
+
+def test_try_snapshot_no_spot_toasts(tmp_path):
+    st = tui_mod.WalkState(str(tmp_path / "w.db"), no_speedtest=True)
+    assert st.try_snapshot() is None
+    assert "no active spot" in st.ui_snapshot()[0].lower()
 
 
 def test_run_walk_rejects_bad_interval(capsys, tmp_path):
@@ -391,22 +472,26 @@ def test_fallback_create_valid_and_invalid(monkeypatch, tmp_path):
     db = _db(tmp_path)
     conn = store_mod.get_db(db)
     try:
+        lid = store_mod.create_location(conn, "home")
         st = tui_mod.WalkState(db)
-        answers = iter(["garden", "0", "y"])
+        st.active_location_id = lid
+        answers = iter(["kitchen", "0", "y", "window"])
         monkeypatch.setattr("builtins.input",
                             lambda *args: next(answers))
         tui_mod._fallback_create(conn, st)
-        assert st.active_id is not None
-        loc = store_mod.get_location(conn, st.active_id)
-        assert loc is not None and loc.name == "garden"
-        assert loc.outdoors is True
+        assert st.active_spot_id is not None
+        spot = store_mod.get_spot(conn, st.active_spot_id)
+        assert spot is not None and spot.name == "window"
+        room = store_mod.get_room(conn, spot.room_id)
+        assert room is not None and room.name == "kitchen"
+        assert room.outdoors is True
         # invalid floor → toast, active untouched
-        before = st.active_id
+        before = st.active_spot_id
         answers = iter(["shed", "notanint", "n"])
         monkeypatch.setattr("builtins.input",
                             lambda *args: next(answers))
         tui_mod._fallback_create(conn, st)
-        assert st.active_id == before
+        assert st.active_spot_id == before
         assert "cancelled" in st.ui_snapshot()[0].lower()
     finally:
         conn.close()
@@ -416,16 +501,18 @@ def test_fallback_floor_valid_and_invalid(monkeypatch, tmp_path):
     db = _db(tmp_path)
     conn = store_mod.get_db(db)
     try:
-        lid = store_mod.create_location(conn, "office", floor=0)
+        lid, rid, (sid, _) = _seed_3level(conn, loc="home", room="office",
+                                          floor=0)
         st = tui_mod.WalkState(db)
-        st.active_id = lid
+        st.active_location_id = lid
+        st.active_spot_id = sid
         monkeypatch.setattr("builtins.input", lambda *args: "2")
         tui_mod._fallback_floor(conn, st)
-        assert store_mod.get_location(conn, lid).floor == 2
+        assert store_mod.get_room(conn, rid).floor == 2
         assert "2" in st.ui_snapshot()[0]
         monkeypatch.setattr("builtins.input", lambda *args: "bad")
         tui_mod._fallback_floor(conn, st)
-        assert store_mod.get_location(conn, lid).floor == 2
+        assert store_mod.get_room(conn, rid).floor == 2
         assert "integer" in st.ui_snapshot()[0].lower()
     finally:
         conn.close()
@@ -448,11 +535,12 @@ def test_ssid_override_backfills_and_tags_snapshot(tmp_path):
     db = str(tmp_path / "w.db")
     conn = store_mod.get_db(db)
     try:
-        lid = store_mod.create_location(conn, "den", floor=0)
+        _, _, (sid, _) = _seed_3level(conn, loc="den", room="r",
+                                      spots=("s1", "s2"))
     finally:
         conn.close()
     st = tui_mod.WalkState(db, no_speedtest=True, ssid_override="home-5g")
-    st.active_id = lid
+    st.active_spot_id = sid
     st.poll(read_fn=lambda: signal_mod.Signal(ssid="other", rssi=-60))
     assert st.sig.ssid == "home-5g"
     t = st.try_snapshot()

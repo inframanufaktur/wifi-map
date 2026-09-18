@@ -365,7 +365,7 @@ class SnapshotResult:
 
 def finish_snapshot(
     db_path: str,
-    location_id: int,
+    spot_id: int,
     sig_dict: Dict[str, object],
     run_speedtest_fn: Optional[Callable[[], speed_mod.Speed]] = None,
     no_speedtest: bool = False,
@@ -399,7 +399,7 @@ def finish_snapshot(
     try:
         try:
             rid = store_mod.add_reading(
-                conn, location_id,
+                conn, spot_id,
                 ssid=sig_dict.get("ssid"),  # type: ignore[arg-type]
                 bssid=sig_dict.get("bssid"),  # type: ignore[arg-type]
                 rssi=sig_dict.get("rssi"),  # type: ignore[arg-type]
@@ -455,7 +455,11 @@ def start_snapshot_thread(
 # ---------------------------------------------------------------------------
 
 class WalkState:
-    """Mutable walk session: active location, last signal, toast, counters.
+    """Mutable walk session: active spot, last signal, toast, counters.
+
+    ``active_location_id`` is the preset location scoping the room/spot
+    drilldown; ``active_spot_id`` is the snapshot target. ``active_id``
+    stays as an alias of ``active_spot_id`` for compat.
 
     ``toast``/``pending`` are shared between the UI thread and snapshot
     worker threads; all mutation and UI reads go through the lock.
@@ -471,7 +475,8 @@ class WalkState:
         self.hist_rssi: SparkHistory = SparkHistory(maxlen=self.history_max)
         self.hist_noise: SparkHistory = SparkHistory(maxlen=self.history_max)
         self.hist_snr: SparkHistory = SparkHistory(maxlen=self.history_max)
-        self.active_id: Optional[int] = None
+        self.active_location_id: Optional[int] = None
+        self.active_spot_id: Optional[int] = None
         self.sig: signal_mod.Signal = signal_mod.Signal()
         self.no_wifi: bool = False
         self.no_wifi_msg: str = ""
@@ -484,6 +489,15 @@ class WalkState:
         self.mac: Optional[str] = None
         self._addrs_done: bool = False
         self._lock = threading.Lock()
+
+    @property
+    def active_id(self) -> Optional[int]:
+        """Alias of ``active_spot_id`` (snapshot target)."""
+        return self.active_spot_id
+
+    @active_id.setter
+    def active_id(self, value: Optional[int]) -> None:
+        self.active_spot_id = value
 
     def ensure_addrs(
         self,
@@ -581,16 +595,16 @@ class WalkState:
         self,
         run_speedtest_fn: Optional[Callable[[], speed_mod.Speed]] = None,
     ) -> Optional["threading.Thread"]:
-        """Spawn snapshot thread for active location; None + hint if blocked."""
+        """Spawn snapshot thread for active spot; None + hint if blocked."""
         if self.no_wifi:
             self.set_toast("NO-WIFI: `s` blocked (WiFi off/not associated)")
             return None
-        if self.active_id is None:
-            self.set_toast("no active location: press `l` to pick one")
+        if self.active_spot_id is None:
+            self.set_toast("no active spot: press `l` to pick one")
             return None
         with self._lock:
             self.pending += 1
-        loc_id = self.active_id
+        loc_id = self.active_spot_id
         sig_copy = copy.deepcopy(self.sig)
         if self.ssid_override is not None:
             sig_copy.ssid = self.ssid_override
@@ -609,16 +623,34 @@ class WalkState:
         return t
 
     def set_floor(self, conn: sqlite3.Connection, floor: int) -> str:
-        """Update active location floor; returns toast message."""
-        if self.active_id is None:
-            return "no active location"
+        """Update active spot's room floor; returns toast message."""
+        if self.active_spot_id is None:
+            return "no active spot"
         try:
-            store_mod.update_location_floor(conn, self.active_id, floor)
+            spot = store_mod.get_spot(conn, self.active_spot_id)
+        except (sqlite3.Error, OSError) as exc:
+            return "DB error: %s" % (exc,)
+        if spot is None:
+            return "unknown spot id: %r" % (self.active_spot_id,)
+        try:
+            store_mod.update_room_floor(conn, spot.room_id, floor)
         except ValueError:
-            return "unknown location id: %r" % (self.active_id,)
+            return "unknown room id: %r" % (spot.room_id,)
         except (sqlite3.Error, OSError) as exc:
             return "DB error: %s" % (exc,)
         return "floor set to %d" % floor
+
+
+def _active_room_id(conn: sqlite3.Connection,
+                    state: "WalkState") -> Optional[int]:
+    """Room id of the active spot, or None when unset/unknown."""
+    if state.active_spot_id is None:
+        return None
+    try:
+        spot = store_mod.get_spot(conn, state.active_spot_id)
+    except (sqlite3.Error, OSError):
+        return None
+    return spot.room_id if spot is not None else None
 
 
 def _resolve_preset(conn: sqlite3.Connection, preset: Optional[str]) -> Optional[int]:
@@ -630,53 +662,57 @@ def _resolve_preset(conn: sqlite3.Connection, preset: Optional[str]) -> Optional
         return None
 
 
-def _location_label(conn: sqlite3.Connection, loc_id: Optional[int]) -> str:
-    if loc_id is None:
+def _location_label(conn: sqlite3.Connection, spot_id: Optional[int]) -> str:
+    if spot_id is None:
         return "(none)"
     try:
-        loc = store_mod.get_location(conn, loc_id)
+        spot = store_mod.get_spot(conn, spot_id)
+        if spot is None:
+            return "#%s (deleted?)" % spot_id
+        room = store_mod.get_room(conn, spot.room_id)
+        if room is None:
+            return "#%s (deleted?)" % spot_id
+        loc = store_mod.get_location(conn, room.location_id)
+        if loc is None:
+            return "#%s (deleted?)" % spot_id
     except (sqlite3.Error, OSError, ValueError):
-        return "#%s (db error)" % loc_id
-    if loc is None:
-        return "#%s (deleted?)" % loc_id
-    return "#%s %s (floor %s)" % (loc.id, loc.name, loc.floor)
+        return "#%s (db error)" % spot_id
+    return "#%s %s/%s/%s (floor %s)" % (
+        spot.id, loc.name, room.name, spot.name, room.floor)
 
 
 # ---------------------------------------------------------------------------
 # Curses loop
 # ---------------------------------------------------------------------------
 
-def _picker_curses(stdscr: object, conn: sqlite3.Connection,
-                   active: Optional[int],
-                   poll_timeout_ms: int = PICKER_TIMEOUT_RESTORE_MS,
-                   ) -> Optional[PickerSelection]:
-    """Numbered-list picker prefilled with active; returns id/``"new"``/None.
+def _list_picker_curses(stdscr: object, title: str,
+                        rows: List[Tuple[int, str]],
+                        active: Optional[int],
+                        create_label: str,
+                        poll_timeout_ms: int = PICKER_TIMEOUT_RESTORE_MS,
+                        ) -> Optional[PickerSelection]:
+    """Generic numbered-list picker prefilled with active.
 
-    The cursor starts on the active row (spec §1 prefill), so a single
-    Enter confirms instantly for fast walkthroughs. Arrows roam,
-    digits jump+confirm, ``+`` confirms the create row, ``q`` cancels.
-    The ``"new"`` create row means the caller prompts for
-    name/floor/outdoors. Cancel → None.
+    Positions ``0..count-1`` are rows, ``count`` is the create row.
+    Returns id/``"new"``/None (cancel). Cursor starts on the active row
+    so a single Enter confirms instantly for fast walkthroughs.
     """
     import curses
 
-    locs = store_mod.list_locations(conn)
-    ids = [loc.id for loc in locs]
+    ids = [rid for rid, _ in rows]
     cursor = picker_start_cursor(ids, active)
     stdscr.timeout(-1)  # type: ignore[attr-defined]  # blocking for picker
     try:
         while True:
             h, w = stdscr.getmaxyx()  # type: ignore[attr-defined]
-            lines = ["Pick location (Enter=active, 1-%d, + new, q cancel):"
-                     % len(locs)]
-            for i, loc in enumerate(locs):
+            lines = ["%s (Enter=active, 1-%d, + new, q cancel):"
+                     % (title, len(rows))]
+            for i, (rid, label) in enumerate(rows):
                 cur = ">" if i == cursor else " "
-                mark = "*" if loc.id == active else " "
-                lines.append("%s%s%d. %s (floor %d%s)" % (
-                    cur, mark, i + 1, loc.name, loc.floor,
-                    ", outdoors" if loc.outdoors else ""))
-            lines.append("%s  +. <new location>" % (
-                ">" if cursor == len(locs) else " ",))
+                mark = "*" if rid == active else " "
+                lines.append("%s%s%d. %s" % (cur, mark, i + 1, label))
+            lines.append("%s  +. <%s>" % (
+                ">" if cursor == len(rows) else " ", create_label))
             stdscr.clear()  # type: ignore[attr-defined]
             for r, ln in enumerate(lines[: h - 1]):
                 try:
@@ -698,16 +734,85 @@ def _picker_curses(stdscr: object, conn: sqlite3.Connection,
                     key = chr(ch)
                 except (ValueError, OverflowError):
                     continue
-            cursor, action, idx = picker_press(key, cursor, len(locs))
+            cursor, action, idx = picker_press(key, cursor, len(rows))
             if action == "cancel":
                 return None
             if action == "confirm" and idx is not None:
-                if idx == len(locs):
+                if idx == len(rows):
                     return "new"
-                return locs[idx].id
+                return rows[idx][0]
             # "move"/"ignore" → re-render with updated cursor
     finally:
         stdscr.timeout(poll_timeout_ms)  # type: ignore[attr-defined]
+
+
+def _room_picker_curses(stdscr: object, conn: sqlite3.Connection,
+                        location_id: int,
+                        active_room: Optional[int],
+                        poll_timeout_ms: int = PICKER_TIMEOUT_RESTORE_MS,
+                        ) -> Optional[PickerSelection]:
+    """Room picker scoped to a location; ``"new"`` means create a room."""
+    rooms = store_mod.list_rooms(conn, location_id=location_id)
+    rows = [(rm.id, "%s (floor %d%s)" % (
+        rm.name, rm.floor, ", outdoors" if rm.outdoors else ""))
+        for rm in rooms]
+    return _list_picker_curses(stdscr, "Pick room", rows, active_room,
+                               "new room", poll_timeout_ms)
+
+
+def _spot_picker_curses(stdscr: object, conn: sqlite3.Connection,
+                        room_id: int,
+                        active_spot: Optional[int],
+                        poll_timeout_ms: int = PICKER_TIMEOUT_RESTORE_MS,
+                        ) -> Optional[PickerSelection]:
+    """Spot picker scoped to a room; ``"new"`` means create a spot."""
+    spots = store_mod.list_spots(conn, room_id=room_id)
+    rows = [(sp.id, sp.name) for sp in spots]
+    return _list_picker_curses(stdscr, "Pick spot", rows, active_spot,
+                               "new spot", poll_timeout_ms)
+
+
+def _pick_room_spot_curses(
+    stdscr: object, conn: sqlite3.Connection, state: "WalkState",
+    poll_timeout_ms: int = PICKER_TIMEOUT_RESTORE_MS,
+) -> bool:
+    """Drilldown: pick room in active location, then spot in that room.
+
+    Returns True when a spot is selected (state.active_spot_id set),
+    False on cancel at either level.
+    """
+    if state.active_location_id is None:
+        state.set_toast("no preset location: rerun with --location")
+        return False
+    active_room = _active_room_id(conn, state)
+    try:
+        picked_room = _room_picker_curses(
+            stdscr, conn, state.active_location_id, active_room,
+            poll_timeout_ms)
+    except (sqlite3.Error, OSError) as exc:
+        state.set_toast("DB error: %s" % (exc,))
+        return False
+    if picked_room == "new":
+        picked_room = _create_room_curses(
+            stdscr, conn, state.active_location_id, poll_timeout_ms)
+    if not isinstance(picked_room, int):
+        state.set_toast("room pick cancelled")
+        return False
+    try:
+        picked_spot = _spot_picker_curses(
+            stdscr, conn, picked_room, state.active_spot_id,
+            poll_timeout_ms)
+    except (sqlite3.Error, OSError) as exc:
+        state.set_toast("DB error: %s" % (exc,))
+        return False
+    if picked_spot == "new":
+        picked_spot = _create_spot_curses(
+            stdscr, conn, picked_room, poll_timeout_ms)
+    if not isinstance(picked_spot, int):
+        state.set_toast("spot pick cancelled")
+        return False
+    state.active_spot_id = picked_spot
+    return True
 
 
 def _prompt_curses(stdscr: object, prompt: str,
@@ -742,11 +847,12 @@ def _prompt_curses(stdscr: object, prompt: str,
             pass
 
 
-def _create_location_curses(
+def _create_room_curses(
     stdscr: object, conn: sqlite3.Connection,
+    location_id: int,
     poll_timeout_ms: int = PICKER_TIMEOUT_RESTORE_MS,
 ) -> Optional[int]:
-    name = _prompt_curses(stdscr, "name: ", poll_timeout_ms).strip()
+    name = _prompt_curses(stdscr, "room name: ", poll_timeout_ms).strip()
     if not name:
         return None
     floor_s = _prompt_curses(stdscr, "floor (int): ", poll_timeout_ms).strip()
@@ -757,8 +863,22 @@ def _create_location_curses(
     od_s = _prompt_curses(stdscr, "outdoors? [y/N]: ", poll_timeout_ms).strip().lower()
     outdoors = od_s in ("y", "yes", "1")
     try:
-        return store_mod.create_location(
-            conn, name, floor=floor, outdoors=outdoors)
+        return store_mod.create_room(
+            conn, location_id, name, floor=floor, outdoors=outdoors)
+    except (sqlite3.Error, OSError, ValueError):
+        return None
+
+
+def _create_spot_curses(
+    stdscr: object, conn: sqlite3.Connection,
+    room_id: int,
+    poll_timeout_ms: int = PICKER_TIMEOUT_RESTORE_MS,
+) -> Optional[int]:
+    name = _prompt_curses(stdscr, "spot name: ", poll_timeout_ms).strip()
+    if not name:
+        return None
+    try:
+        return store_mod.create_spot(conn, room_id, name)
     except (sqlite3.Error, OSError, ValueError):
         return None
 
@@ -783,12 +903,14 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
     state = WalkState(db_path, no_speedtest=no_speedtest,
                       ssid_override=ssid, history_max=cap)
     try:
-        state.active_id = _resolve_preset(conn, location_preset)
+        state.active_location_id = _resolve_preset(conn, location_preset)
         state.ensure_identity()
         state.ensure_addrs()
-        if location_preset is not None and state.active_id is None:
+        if location_preset is not None and state.active_location_id is None:
             state.set_toast(
                 "unknown preset %r; press `l` to pick" % (location_preset,))
+        if location_preset is None:
+            state.set_toast("no preset: rerun with --location or press `l`")
         stdscr.nodelay(False)
         poll_timeout_ms = _poll_timeout_ms(interval)
         stdscr.timeout(poll_timeout_ms)
@@ -809,11 +931,6 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
             has_col = False
         while True:
             state.poll()
-            try:
-                locs = store_mod.list_locations(conn)
-            except (sqlite3.Error, OSError) as exc:
-                state.set_toast("DB error: %s" % (exc,))
-                locs = []
             # render
             try:
                 stdscr.clear()
@@ -915,7 +1032,7 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                     _emit(_addr)
                 toast, pending = state.ui_snapshot()
                 _emit("loc: %s  pending: %d" % (
-                    _location_label(conn, state.active_id), pending))
+                    _location_label(conn, state.active_spot_id), pending))
                 _emit("keys: s snapshot | l switch | n new | "
                       "f floor | q quit")
                 if toast:
@@ -938,43 +1055,40 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                 if state.no_wifi:
                     state.try_snapshot()  # toasts NO-WIFI blocked hint
                     continue
-                # Always via picker prefilled with active (spec §1):
+                # Always via drilldown prefilled with active (spec §1):
                 # single Enter confirms instantly for fast walkthroughs.
-                picked = _picker_curses(
-                    stdscr, conn, state.active_id, poll_timeout_ms)
-                if picked == "new":
-                    picked = _create_location_curses(
-                        stdscr, conn, poll_timeout_ms)
-                if isinstance(picked, int):
-                    state.active_id = picked
-                else:
-                    state.set_toast("snapshot cancelled (no location)")
+                if not _pick_room_spot_curses(
+                        stdscr, conn, state, poll_timeout_ms):
+                    state.set_toast("snapshot cancelled (no spot)")
                     continue
                 state.try_snapshot()
             elif key == KEY_SWITCH:
-                picked = _picker_curses(
-                    stdscr, conn, state.active_id, poll_timeout_ms)
-                if picked == "new":
-                    picked = _create_location_curses(
-                        stdscr, conn, poll_timeout_ms)
-                if isinstance(picked, int):
-                    state.active_id = picked
+                if _pick_room_spot_curses(
+                        stdscr, conn, state, poll_timeout_ms):
                     state.set_toast("active: %s" % _location_label(
-                        conn, state.active_id))
-                elif picked is None:
-                    state.set_toast("location switch cancelled")
+                        conn, state.active_spot_id))
             elif key == KEY_NEW:
-                new_id = _create_location_curses(
-                    stdscr, conn, poll_timeout_ms)
-                if new_id is not None:
-                    state.active_id = new_id
+                if state.active_location_id is None:
+                    state.set_toast(
+                        "no preset location: rerun with --location")
+                    continue
+                room_id = _create_room_curses(
+                    stdscr, conn, state.active_location_id,
+                    poll_timeout_ms)
+                if room_id is None:
+                    state.set_toast("new room cancelled/invalid")
+                    continue
+                spot_id = _create_spot_curses(
+                    stdscr, conn, room_id, poll_timeout_ms)
+                if spot_id is not None:
+                    state.active_spot_id = spot_id
                     state.set_toast("active: %s" % _location_label(
-                        conn, state.active_id))
+                        conn, state.active_spot_id))
                 else:
-                    state.set_toast("new location cancelled/invalid")
+                    state.set_toast("new spot cancelled/invalid")
             elif key == KEY_FLOOR:
-                if state.active_id is None:
-                    state.set_toast("no active location")
+                if state.active_spot_id is None:
+                    state.set_toast("no active spot")
                 else:
                     raw = _prompt_curses(
                         stdscr, "floor (int): ", poll_timeout_ms)
@@ -1015,10 +1129,12 @@ def _walk_fallback(db_path: str, interval: float,
     state = WalkState(db_path, no_speedtest=no_speedtest,
                       ssid_override=ssid, history_max=cap)
     try:
-        state.active_id = _resolve_preset(conn, location_preset)
+        state.active_location_id = _resolve_preset(conn, location_preset)
         state.ensure_identity()
         state.ensure_addrs()
-        print("walk fallback (no curses): keys s/l/n/f/q + Enter", flush=True)
+        if location_preset is None:
+            print("walk fallback (no curses): keys s/l/n/f/q + Enter",
+                  flush=True)
         while True:
             state.poll()
             if state.no_wifi:
@@ -1100,7 +1216,7 @@ def _walk_fallback(db_path: str, interval: float,
                 print(_addr, flush=True)
             toast, pending = state.ui_snapshot()
             print("loc: %s pending: %d %s" % (
-                _location_label(conn, state.active_id), pending,
+                _location_label(conn, state.active_spot_id), pending,
                 ("» %s" % toast) if toast else ""))
             state.set_toast("")
             r, _, _ = select.select([sys.stdin], [], [], interval)
@@ -1135,64 +1251,133 @@ def _walk_fallback(db_path: str, interval: float,
         conn.close()
 
 
-def _fallback_pick(conn: sqlite3.Connection, state: WalkState) -> bool:
-    """Line-based picker prefilled with active; empty input confirms it.
+def _fallback_pick_level(prompt: str, rows: List[Tuple[int, str]],
+                         active: Optional[int],
+                         create_label: str) -> Optional[PickerSelection]:
+    """One-level line picker; empty input confirms prefilled active.
 
-    Returns True when a location is selected, False on cancel.
+    Returns id/``"new"``/None (cancel).
     """
+    ids = [rid for rid, _ in rows]
+    cursor = picker_start_cursor(ids, active)
+    for i, (rid, label) in enumerate(rows):
+        cur = ">" if i == cursor else " "
+        mark = "*" if rid == active else " "
+        print("%s%s%d. %s" % (cur, mark, i + 1, label))
+    print("%s  +. <%s>" % (">" if cursor == len(rows) else " ",
+                           create_label))
     try:
-        locs = store_mod.list_locations(conn)
+        raw = input("%s [Enter=active, 1-%d,+]: "
+                    % (prompt, len(rows))).strip()
+    except (EOFError, OSError):
+        return None
+    if raw == "":
+        if active is not None and active in ids:
+            return active  # Enter confirms prefilled active instantly
+        return None
+    if raw == KEY_CREATE:
+        return "new"
+    # Single digit path: picker_press owns all digit logic.
+    _, action, idx = picker_press(raw, cursor, len(rows))
+    if action == "cancel":
+        return None
+    if action == "confirm" and idx is not None and idx < len(rows):
+        return rows[idx][0]
+    return None
+
+
+def _fallback_pick(conn: sqlite3.Connection, state: WalkState) -> bool:
+    """Line-based room→spot drilldown scoped to the preset location.
+
+    Returns True when a spot is selected, False on cancel.
+    """
+    if state.active_location_id is None:
+        state.set_toast("no preset location: rerun with --location")
+        return False
+    try:
+        rooms = store_mod.list_rooms(conn,
+                                     location_id=state.active_location_id)
     except (sqlite3.Error, OSError) as exc:
         state.set_toast("DB error: %s" % (exc,))
         return False
-    ids = [loc.id for loc in locs]
-    cursor = picker_start_cursor(ids, state.active_id)
-    for i, loc in enumerate(locs):
-        cur = ">" if i == cursor else " "
-        mark = "*" if loc.id == state.active_id else " "
-        print("%s%s%d. %s (floor %d)" % (cur, mark, i + 1, loc.name, loc.floor))
-    print("%s  +. <new location>" % (">" if cursor == len(locs) else " ",))
+    room_rows = [(rm.id, "%s (floor %d%s)" % (
+        rm.name, rm.floor, ", outdoors" if rm.outdoors else ""))
+        for rm in rooms]
+    picked_room = _fallback_pick_level(
+        "room", room_rows, _active_room_id(conn, state), "new room")
+    if picked_room == "new":
+        picked_room = _fallback_create_room(conn, state)
+    if not isinstance(picked_room, int):
+        state.set_toast("cancelled")
+        return False
     try:
-        raw = input("pick [Enter=active, 1-%d,+]: " % len(locs)).strip()
-    except (EOFError, OSError):
+        spots = store_mod.list_spots(conn, room_id=picked_room)
+    except (sqlite3.Error, OSError) as exc:
+        state.set_toast("DB error: %s" % (exc,))
+        return False
+    spot_rows = [(sp.id, sp.name) for sp in spots]
+    picked_spot = _fallback_pick_level(
+        "spot", spot_rows, state.active_spot_id, "new spot")
+    if picked_spot == "new":
+        picked_spot = _fallback_create_spot(conn, picked_room, state)
+    if not isinstance(picked_spot, int):
         state.set_toast("cancelled")
         return False
-    if raw == "":
-        if state.active_id is not None and state.active_id in ids:
-            return True  # Enter confirms prefilled active instantly
-        state.set_toast("cancelled")
-        return False
-    if raw == KEY_CREATE:
-        before = state.active_id
-        _fallback_create(conn, state)
-        # create sets a fresh id on success, leaves active + error toast on fail
-        return state.active_id is not None and state.active_id != before
-    # Single digit path: picker_press owns all digit logic.
-    _, action, idx = picker_press(raw, cursor, len(locs))
-    if action == "cancel":
-        state.set_toast("cancelled")
-        return False
-    if action == "confirm" and idx is not None and idx < len(locs):
-        state.active_id = locs[idx].id
-        return True
-    state.set_toast("cancelled")
-    return False
+    state.active_spot_id = picked_spot
+    return True
 
 
-def _fallback_create(conn: sqlite3.Connection, state: WalkState) -> None:
+def _fallback_create_room(conn: sqlite3.Connection,
+                          state: WalkState) -> Optional[int]:
+    """Prompt name/floor/outdoors; create room in active location."""
+    if state.active_location_id is None:
+        state.set_toast("no preset location: rerun with --location")
+        return None
     try:
-        name = input("name: ").strip()
+        name = input("room name: ").strip()
         floor = parse_floor_input(input("floor (int): ") or "0")
         outdoors = input("outdoors? [y/N]: ").strip().lower() in (
             "y", "yes", "1")
     except (EOFError, OSError, ValueError) as exc:
         state.set_toast("cancelled/invalid: %s" % (exc,))
-        return
+        return None
     try:
-        state.active_id = store_mod.create_location(
-            conn, name, floor=floor, outdoors=outdoors)
+        return store_mod.create_room(
+            conn, state.active_location_id, name, floor=floor,
+            outdoors=outdoors)
     except (sqlite3.Error, OSError, ValueError) as exc:
         state.set_toast("DB error: %s" % (exc,))
+        return None
+
+
+def _fallback_create_spot(conn: sqlite3.Connection, room_id: int,
+                          state: WalkState) -> Optional[int]:
+    """Prompt name; create spot in the given room."""
+    try:
+        name = input("spot name: ").strip()
+    except (EOFError, OSError) as exc:
+        state.set_toast("cancelled/invalid: %s" % (exc,))
+        return None
+    try:
+        return store_mod.create_spot(conn, room_id, name)
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        state.set_toast("DB error: %s" % (exc,))
+        return None
+
+
+def _fallback_create(conn: sqlite3.Connection, state: WalkState) -> None:
+    """Create room (in active location) then spot (in new room)."""
+    room_id = _fallback_create_room(conn, state)
+    if room_id is None:
+        if not state.ui_snapshot()[0]:
+            state.set_toast("cancelled/invalid")
+        return
+    spot_id = _fallback_create_spot(conn, room_id, state)
+    if spot_id is None:
+        if not state.ui_snapshot()[0]:
+            state.set_toast("cancelled/invalid")
+        return
+    state.active_spot_id = spot_id
 
 
 def _fallback_floor(conn: sqlite3.Connection, state: WalkState) -> None:

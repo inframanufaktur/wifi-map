@@ -26,7 +26,8 @@ EXIT_STORAGE = 3
 _DEFAULT_DB = str(Path.home() / "wifi-map.db")
 
 _EXPORT_FIELDS = [
-    "id", "ts", "location_id", "location_name", "floor", "outdoors",
+    "id", "ts", "spot_id", "room_id", "location_id", "location_name",
+    "room_name", "spot_name", "floor", "outdoors",
     "ssid", "bssid", "rssi", "noise", "snr", "channel", "phy",
     "tx_rate", "ping_ms", "down_mbps", "up_mbps", "server", "note",
 ]
@@ -94,6 +95,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     li = sub.add_parser("list", help="History table (joins locations).")
     li.add_argument("--location", default=None, help="Filter ID|NAME")
+    li.add_argument("--room", default=None, help="Filter ID|NAME")
+    li.add_argument("--spot", default=None, help="Filter ID|NAME")
     li.add_argument("--floor", type=int, default=None)
     li.add_argument("--ssid", default=None, help="Filter by SSID")
     li.add_argument("--limit", type=int, default=50)
@@ -101,6 +104,8 @@ def _build_parser() -> argparse.ArgumentParser:
     ex = sub.add_parser("export", help="Dump CSV for plotting.")
     ex.add_argument("--csv", required=True, help="Output CSV path")
     ex.add_argument("--location", default=None, help="Filter ID|NAME")
+    ex.add_argument("--room", default=None, help="Filter ID|NAME")
+    ex.add_argument("--spot", default=None, help="Filter ID|NAME")
     ex.add_argument("--floor", type=int, default=None)
     ex.add_argument("--ssid", default=None, help="Filter by SSID")
     return p
@@ -350,17 +355,20 @@ def _cmd_list(db_path: str, args: argparse.Namespace) -> int:
                           file=sys.stderr)
                     return EXIT_STORAGE
             rows = store_mod.list_readings(
-                conn, location=args.location, floor=args.floor,
+                conn, location=args.location, room=args.room,
+                spot=args.spot, floor=args.floor,
                 ssid=ssid, limit=args.limit)
         except (sqlite3.Error, OSError, ValueError) as exc:
             print("Error: cannot list readings: %s" % (exc,),
                   file=sys.stderr)
             return EXIT_STORAGE
-        print("%-4s %-20s %-6s %-6s %-9s %-9s %s" % (
-            "id", "location", "floor", "rssi", "down", "up", "note"))
+        print("%-4s %-20s %-20s %-20s %-6s %-6s %-9s %-9s %s" % (
+            "id", "location", "room", "spot", "floor", "rssi",
+            "down", "up", "note"))
         for r in rows:
-            print("%-4s %-20s %-6s %-6s %-9s %-9s %s" % (
+            print("%-4s %-20s %-20s %-20s %-6s %-6s %-9s %-9s %s" % (
                 _disp(r.get("id")), _disp(r.get("location_name")),
+                _disp(r.get("room_name")), _disp(r.get("spot_name")),
                 _disp(r.get("floor")), _disp(r.get("rssi")),
                 _disp(r.get("down_mbps")), _disp(r.get("up_mbps")),
                 _disp(r.get("note"))))
@@ -385,7 +393,8 @@ def _cmd_export(db_path: str, args: argparse.Namespace) -> int:
                           file=sys.stderr)
                     return EXIT_STORAGE
             rows = store_mod.list_readings(
-                conn, location=args.location, floor=args.floor,
+                conn, location=args.location, room=args.room,
+                spot=args.spot, floor=args.floor,
                 ssid=ssid, limit=1000000)
         except (sqlite3.Error, OSError, ValueError) as exc:
             print("Error: cannot export readings: %s" % (exc,),

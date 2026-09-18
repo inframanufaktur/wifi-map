@@ -293,7 +293,8 @@ def test_walk_blank_ssid_rejected(capsys, tmp_path):
 def test_list_ssid_filter_passes_through(tmp_path, monkeypatch, capsys):
     seen = {}
 
-    def _fake(conn, location=None, floor=None, ssid=None, limit=50):
+    def _fake(conn, location=None, room=None, spot=None, floor=None,
+              ssid=None, limit=50):
         seen["ssid"] = ssid
         return []
 
@@ -321,3 +322,63 @@ def test_scan_location_room_spot(monkeypatch, tmp_path):
         assert rows[0]["spot_name"] == "window"
     finally:
         conn.close()
+
+
+def test_list_filter_room_spot(tmp_path):
+    from wifimap.store import get_db, create_location, create_room, create_spot, add_reading, list_readings
+    conn = get_db(str(tmp_path / "f.db"))
+    try:
+        home = create_location(conn, "home")
+        k = create_room(conn, home, "kitchen")
+        w = create_spot(conn, k, "window")
+        b = create_spot(conn, k, "bed")
+        add_reading(conn, w, rssi=-50)
+        add_reading(conn, b, rssi=-70)
+        assert len(list_readings(conn, spot="window")) == 1
+        assert len(list_readings(conn, room="kitchen")) == 2
+    finally:
+        conn.close()
+
+
+def test_list_cli_room_spot_flags(tmp_path, capsys):
+    db = str(tmp_path / "cli.db")
+    conn = store_mod.get_db(db)
+    try:
+        _seed_3level(conn, loc="home", room="kitchen", spot="window",
+                     rssi=-50, note="w1")
+        lid = store_mod.resolve_location(conn, "home")
+        rid = store_mod.resolve_room(conn, lid, "kitchen")
+        sid = store_mod.create_spot(conn, rid, "bed")
+        store_mod.add_reading(conn, sid, rssi=-70, note="b1")
+    finally:
+        conn.close()
+    rc, out, err = _run(capsys, "--db", db, "list", "--room", "kitchen")
+    assert rc == 0
+    assert "w1" in out and "b1" in out
+    rc, out, err = _run(capsys, "--db", db, "list", "--spot", "window")
+    assert rc == 0
+    assert "w1" in out
+    assert "b1" not in out
+    assert "kitchen" in out and "window" in out
+
+
+def test_export_csv_has_room_spot_columns(tmp_path, capsys):
+    db = str(tmp_path / "cli.db")
+    conn = store_mod.get_db(db)
+    try:
+        _seed_3level(conn, loc="home", room="kitchen", spot="window",
+                     rssi=-55, ssid="home")
+    finally:
+        conn.close()
+    csv_path = str(tmp_path / "out.csv")
+    rc, out, err = _run(capsys, "--db", db, "export", "--csv", csv_path,
+                        "--room", "kitchen", "--spot", "window")
+    assert rc == 0
+    with open(csv_path, newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    assert len(rows) == 1
+    for col in ("spot_id", "room_id", "location_id", "location_name",
+                "room_name", "spot_name"):
+        assert col in rows[0]
+    assert rows[0]["room_name"] == "kitchen"
+    assert rows[0]["spot_name"] == "window"
