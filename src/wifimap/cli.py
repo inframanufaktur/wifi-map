@@ -1,9 +1,9 @@
-"""CLI: scan/locations/list/export (no walk yet).
+"""CLI: scan/walk/locations/list/export.
 
 Exit codes: 0 ok, 2 no-wifi/signal-unavailable, 3 storage, 4 reserved.
 Note: signal-tool missing currently maps to 2 with an install hint;
 4 is reserved for speedtest-binary-missing when required (scan currently
-warns and proceeds signal-only instead).
+warns and proceeds signal-only instead; walk snapshots do the same).
 """
 from __future__ import annotations
 
@@ -56,6 +56,11 @@ def _build_parser() -> argparse.ArgumentParser:
                    default=0)
     s.add_argument("--no-speedtest", action="store_true")
     s.add_argument("--note", default=None)
+
+    w = sub.add_parser("walk", help="Live walkthrough TUI, snapshot with `s`.")
+    w.add_argument("--interval", type=float, default=1.0)
+    w.add_argument("--no-speedtest", action="store_true")
+    w.add_argument("--location", default=None, help="Preset ID|NAME")
 
     loc = sub.add_parser("locations", help="Locations CRUD.")
     loc_sub = loc.add_subparsers(dest="locations_cmd", required=False)
@@ -140,6 +145,16 @@ def _cmd_scan(db_path: str, args: argparse.Namespace) -> int:
         return EXIT_OK
     finally:
         conn.close()
+
+
+def _cmd_walk(db_path: str, args: argparse.Namespace) -> int:
+    from wifimap import tui as tui_mod
+
+    return tui_mod.run_walk(
+        db_path, interval=args.interval,
+        location_preset=args.location,
+        no_speedtest=args.no_speedtest,
+    )
 
 
 def _cmd_locations_list(db_path: str) -> int:
@@ -253,6 +268,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     db_path: str = args.db
     if args.cmd == "scan":
         return _cmd_scan(db_path, args)
+    if args.cmd == "walk":
+        return _cmd_walk(db_path, args)
     if args.cmd == "locations":
         if getattr(args, "locations_cmd", None) == "add":
             return _cmd_locations_add(db_path, args)
