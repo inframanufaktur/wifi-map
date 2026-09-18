@@ -560,3 +560,19 @@ def test_ansi_wrap_respects_no_color(monkeypatch):
     assert tui_mod.ansi_wrap("x", "32") == "\x1b[32mx\x1b[0m"
     monkeypatch.setenv("NO_COLOR", "1")
     assert tui_mod.ansi_wrap("x", "32") == "x"
+
+
+def test_graph_width_fits_w_minus_1():
+    # label(6) + bar + suffix(6) must fit w-1; old w-12 truncated "]".
+    for w in (40, 80, 100):
+        gw = tui_mod.graph_width(w, 6, 6)
+        assert 6 + gw + 6 <= w - 1
+        assert gw == max(10, w - 13)
+    assert tui_mod.graph_width(20, 6, 6) == 10
+
+
+def test_wide_graph_width_fits_w_minus_1():
+    left = len("RSSI -57 dBm [GREAT]")
+    for w in (100, 120, 200):
+        gw = tui_mod.wide_graph_width(w, left, 6, 3, 0)
+        assert len("RSSI -57 dBm [GREAT]") + 3 + 6 + gw <= w - 1

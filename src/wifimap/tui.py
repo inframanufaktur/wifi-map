@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 import math
 import os
+import shutil
 import sqlite3
 import sys
 import threading
@@ -121,6 +122,17 @@ def rating_style(rating: str) -> Tuple[int, str]:
 def layout_mode(width: int) -> str:
     """Wide side-by-side at >=100 cols, else stacked narrow."""
     return "wide" if width >= WIDE_MIN_WIDTH else "narrow"
+
+
+def graph_width(total_w: int, label_len: int = 6, suffix_len: int = 6) -> int:
+    """Width for narrow stacked graph line so label+bar+suffix fits w-1."""
+    return max(10, total_w - label_len - suffix_len - 1)
+
+
+def wide_graph_width(total_w: int, left_len: int, label_len: int = 6,
+                     sep_len: int = 3, suffix_len: int = 0) -> int:
+    """Width for wide side-by-side graph so full line fits w-1."""
+    return max(10, total_w - 1 - left_len - sep_len - label_len - suffix_len)
 
 
 def ansi_wrap(s: str, code: str) -> str:
@@ -714,22 +726,50 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                             pass
                         row += 1
 
+                def _emit_segs(segs: list) -> None:
+                    nonlocal row
+                    if row >= h - 1:
+                        return
+                    col = 0
+                    try:
+                        for text, attr in segs:
+                            if col >= w - 1 or not text:
+                                continue
+                            chunk = text[: max(0, w - 1 - col)]
+                            stdscr.addstr(row, col, chunk, attr)
+                            col += len(chunk)
+                    except Exception:
+                        pass
+                    row += 1
+
                 r_pair, _ = rating_style(rate_rssi(state.sig.rssi))
                 s_pair, _ = rating_style(rate_snr(state.sig.snr))
                 r_attr = curses.color_pair(r_pair) if (has_col and r_pair) else 0
                 s_attr = curses.color_pair(s_pair) if (has_col and s_pair) else 0
                 mode = layout_mode(w)
                 if mode == "wide" and h >= 10 and not state.no_wifi:
-                    gw = max(10, (w // 2) - 12)
-                    rssi_g = state.hist_rssi.sparkline(-90, -30, gw)
-                    snr_g = state.hist_snr.sparkline(0, 40, gw)
-                    noise_g = state.hist_noise.sparkline(-100, -60, gw)
                     rssi_s = "UNKNOWN" if state.sig.rssi is None else "%d dBm" % state.sig.rssi
                     snr_s = "UNKNOWN" if state.sig.snr is None else "%d dB" % state.sig.snr
                     noise_s = "UNKNOWN" if state.sig.noise is None else "%d dBm" % state.sig.noise
-                    _emit("RSSI %s [%s] | RSSI  %s" % (rssi_s, rate_rssi(state.sig.rssi), rssi_g), r_attr)
-                    _emit("SNR %s [%s] | SNR   %s" % (snr_s, rate_snr(state.sig.snr), snr_g), s_attr)
-                    _emit("noise %s ch %s | noise %s" % (noise_s, state.sig.channel or "-", noise_g), r_attr)
+                    r_rate = rate_rssi(state.sig.rssi)
+                    s_rate = rate_snr(state.sig.snr)
+                    left_rssi = "RSSI %s [%s]" % (rssi_s, r_rate)
+                    left_snr = "SNR %s [%s]" % (snr_s, s_rate)
+                    left_noise = "noise %s ch %s" % (noise_s, state.sig.channel or "-")
+                    gw_rssi = wide_graph_width(w, len(left_rssi), 6, 3, 0)
+                    gw_snr = wide_graph_width(w, len(left_snr), 6, 3, 0)
+                    gw_noise = wide_graph_width(w, len(left_noise), 6, 3, 0)
+                    rssi_g = state.hist_rssi.sparkline(-90, -30, gw_rssi)
+                    snr_g = state.hist_snr.sparkline(0, 40, gw_snr)
+                    noise_g = state.hist_noise.sparkline(-100, -60, gw_noise)
+                    _emit_segs([("RSSI ", 0), (rssi_s, r_attr),
+                                (" [%s]" % r_rate, r_attr),
+                                (" | ", 0), ("RSSI  ", 0), (rssi_g, r_attr)])
+                    _emit_segs([("SNR ", 0), (snr_s, s_attr),
+                                (" [%s]" % s_rate, s_attr),
+                                (" | ", 0), ("SNR   ", 0), (snr_g, s_attr)])
+                    _emit_segs([(left_noise, 0),
+                                (" | ", 0), ("noise ", 0), (noise_g, r_attr)])
                 elif state.no_wifi:
                     _emit("NO-WIFI: %s" % (state.no_wifi_msg,))
                     _emit("`s` blocked; fix WiFi or quit with `q`.")
@@ -737,21 +777,32 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                     rssi_s = "UNKNOWN" if state.sig.rssi is None else "%d dBm" % state.sig.rssi
                     snr_s = "UNKNOWN" if state.sig.snr is None else "%d dB" % state.sig.snr
                     noise_s = "UNKNOWN" if state.sig.noise is None else "%d dBm" % state.sig.noise
-                    _emit("RSSI %s [%s]" % (rssi_s, rate_rssi(state.sig.rssi)), r_attr)
-                    _emit("SNR %s [%s]  noise %s  ch %s  phy %s  tx %s" % (
-                        snr_s, rate_snr(state.sig.snr), noise_s,
-                        state.sig.channel or "-", state.sig.phy or "-",
-                        state.sig.tx_rate or "-"), s_attr)
+                    r_rate = rate_rssi(state.sig.rssi)
+                    s_rate = rate_snr(state.sig.snr)
+                    _emit_segs([("RSSI ", 0), (rssi_s, r_attr),
+                                (" [%s]" % r_rate, r_attr)])
+                    _emit_segs([("SNR ", 0), (snr_s, s_attr),
+                                (" [%s]" % s_rate, s_attr),
+                                ("  noise %s  ch %s  phy %s  tx %s" % (
+                                    noise_s, state.sig.channel or "-",
+                                    state.sig.phy or "-",
+                                    state.sig.tx_rate or "-"), 0)])
                 manual = " (manual)" if state.ssid_override else ""
                 _emit("Net: %s%s" % (state.net_ssid or "unknown", manual))
                 toast, pending = state.ui_snapshot()
                 _emit("loc: %s  pending: %d" % (
                     _location_label(conn, state.active_id), pending))
                 if mode == "narrow" and h >= 10 and not state.no_wifi:
-                    gw = max(10, w - 12)
-                    _emit("RSSI  %s [60s]" % state.hist_rssi.sparkline(-90, -30, gw))
-                    _emit("SNR   %s [60s]" % state.hist_snr.sparkline(0, 40, gw))
-                    _emit("noise %s [60s]" % state.hist_noise.sparkline(-100, -60, gw), r_attr)
+                    gw = graph_width(w, 6, 6)
+                    _emit_segs([("RSSI  ", 0),
+                                (state.hist_rssi.sparkline(-90, -30, gw), r_attr),
+                                (" [60s]", 0)])
+                    _emit_segs([("SNR   ", 0),
+                                (state.hist_snr.sparkline(0, 40, gw), s_attr),
+                                (" [60s]", 0)])
+                    _emit_segs([("noise ", 0),
+                                (state.hist_noise.sparkline(-100, -60, gw), r_attr),
+                                (" [60s]", 0)])
                 _emit("keys: s snapshot | l switch | n new | "
                       "f floor | q quit")
                 if toast:
@@ -865,8 +916,8 @@ def _walk_fallback(db_path: str, interval: float,
                 s_rating = rate_snr(state.sig.snr)
                 _, r_code = rating_style(r_rating)
                 _, s_code = rating_style(s_rating)
-                rssi_coloured = ansi_wrap("RSSI %s [%s]" % (rssi_s, r_rating), r_code)
-                snr_coloured = ansi_wrap("SNR %s [%s]" % (snr_s, s_rating), s_code)
+                rssi_coloured = "RSSI " + ansi_wrap("%s [%s]" % (rssi_s, r_rating), r_code)
+                snr_coloured = "SNR " + ansi_wrap("%s [%s]" % (snr_s, s_rating), s_code)
                 print(rssi_coloured, flush=True)
                 print("%s  noise %s  ch %s  phy %s  tx %s" % (
                     snr_coloured,
@@ -877,9 +928,24 @@ def _walk_fallback(db_path: str, interval: float,
             manual = " (manual)" if state.ssid_override else ""
             print("Net: %s%s" % (state.net_ssid or "unknown", manual), flush=True)
             gw = 40
-            print("RSSI  %s [60s]" % state.hist_rssi.sparkline(-90, -30, gw), flush=True)
-            print("SNR   %s [60s]" % state.hist_snr.sparkline(0, 40, gw), flush=True)
-            print("noise %s [60s]" % state.hist_noise.sparkline(-100, -60, gw), flush=True)
+            try:
+                tw = shutil.get_terminal_size((80, 24)).columns
+                gw = min(40, graph_width(tw, 6, 6))
+            except Exception:
+                pass
+            if not state.no_wifi:
+                _, r_code_g = rating_style(rate_rssi(state.sig.rssi))
+                _, s_code_g = rating_style(rate_snr(state.sig.snr))
+                print("RSSI  %s [60s]" % ansi_wrap(
+                    state.hist_rssi.sparkline(-90, -30, gw), r_code_g), flush=True)
+                print("SNR   %s [60s]" % ansi_wrap(
+                    state.hist_snr.sparkline(0, 40, gw), s_code_g), flush=True)
+                print("noise %s [60s]" % ansi_wrap(
+                    state.hist_noise.sparkline(-100, -60, gw), r_code_g), flush=True)
+            else:
+                print("RSSI  %s [60s]" % state.hist_rssi.sparkline(-90, -30, gw), flush=True)
+                print("SNR   %s [60s]" % state.hist_snr.sparkline(0, 40, gw), flush=True)
+                print("noise %s [60s]" % state.hist_noise.sparkline(-100, -60, gw), flush=True)
             toast, pending = state.ui_snapshot()
             print("loc: %s pending: %d %s" % (
                 _location_label(conn, state.active_id), pending,
@@ -1041,6 +1107,8 @@ __all__ = [
     "format_net_line",
     "format_signal_line",
     "history_cap",
+    "graph_width",
+    "wide_graph_width",
     "layout_mode",
     "parse_floor_input",
     "picker_move",
