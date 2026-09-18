@@ -5,6 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "wifimap"
 version = "0.1.0"
+description = "Map home WiFi: room-tagged signal + throughput snapshots in SQLite"
+readme = "README.md"
+license = { text = "MIT" }
+keywords = ["wifi", "site-survey", "signal", "speedtest"]
 requires-python = ">=3.9"
 
 [project.optional-dependencies]
