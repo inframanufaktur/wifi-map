@@ -30,7 +30,7 @@ def test_picker_press_digit_single_path():
     assert tui_mod.picker_press("1", 0, 3) == (0, "confirm", 0)
     assert tui_mod.picker_press("3", 0, 3) == (2, "confirm", 2)
     assert tui_mod.picker_press("4", 0, 3)[1] == "ignore"  # out of range
-    assert tui_mod.picker_press("+", 0, 3) == (3, "move", None)  # create row
+    assert tui_mod.picker_press("+", 0, 3) == (3, "confirm", 3)  # create row
     assert tui_mod.picker_press("q", 0, 3)[1] == "cancel"
     assert tui_mod.picker_press("x", 0, 3)[1] == "ignore"
 
@@ -60,7 +60,7 @@ def test_picker_press_enter_confirms_prefilled_cursor():
 def test_picker_press_arrows_and_create():
     assert tui_mod.picker_press("down", 0, 2) == (1, "move", None)
     assert tui_mod.picker_press("up", 0, 2) == (2, "move", None)
-    assert tui_mod.picker_press("+", 0, 2) == (2, "move", None)
+    assert tui_mod.picker_press("+", 0, 2) == (2, "confirm", 2)
     assert tui_mod.picker_press("1", 2, 3) == (0, "confirm", 0)
     assert tui_mod.picker_press("9", 0, 3)[1] == "ignore"
     assert tui_mod.picker_press("q", 1, 3) == (1, "cancel", None)

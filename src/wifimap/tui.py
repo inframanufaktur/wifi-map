@@ -45,6 +45,11 @@ PICKER_TIMEOUT_RESTORE_MS = 1000
 FALLBACK_SETTLE_SLEEP = 0.1
 DB_OPEN_FAIL_SLEEP = 2.0
 
+
+def _poll_timeout_ms(interval: float) -> int:
+    """Poll getch timeout for walk loop; floor keeps fast intervals usable."""
+    return max(POLL_TIMEOUT_MIN_MS, int(interval * 1000))
+
 #: Picker outcome: a location id, the ``"new"`` create row, or None (cancel).
 PickerSelection = Union[int, Literal["new"]]
 
@@ -100,10 +105,11 @@ def picker_press(keypress: str, cursor: int,
 
     Returns ``(new_cursor, action, index)`` with action one of:
     - ``"confirm"``: Enter (``""``/``"\\n"``/``"\\r"``/``"enter"``) confirms
-      the cursor, digits ``1``-``9`` jump to and confirm that row.
+      the cursor, digits ``1``-``9`` jump to and confirm that row,
+      ``"+"`` confirms the create row.
       ``index == count`` means the create row.
-    - ``"move"``: arrows (``"up"``/``"down"``) or ``"+"`` reposition the
-      cursor (``"+"`` jumps to the create row); keep waiting.
+    - ``"move"``: arrows (``"up"``/``"down"``) reposition the cursor;
+      keep waiting.
     - ``"cancel"``: ``q``/Escape; ``"ignore"``: anything else.
     """
     if keypress in ("", "\n", "\r", "enter"):
@@ -114,7 +120,7 @@ def picker_press(keypress: str, cursor: int,
         step = -1 if keypress == "up" else 1
         return (picker_move(cursor, step, count), "move", None)
     if keypress == "+":
-        return (count, "move", None)
+        return (count, "confirm", count)
     if len(keypress) == 1 and "1" <= keypress <= "9":
         idx = int(keypress) - 1
         if 0 <= idx < count:
@@ -412,12 +418,14 @@ def _location_label(conn: sqlite3.Connection, loc_id: Optional[int]) -> str:
 # ---------------------------------------------------------------------------
 
 def _picker_curses(stdscr: object, conn: sqlite3.Connection,
-                   active: Optional[int]) -> Optional[PickerSelection]:
+                   active: Optional[int],
+                   poll_timeout_ms: int = PICKER_TIMEOUT_RESTORE_MS,
+                   ) -> Optional[PickerSelection]:
     """Numbered-list picker prefilled with active; returns id/``"new"``/None.
 
     The cursor starts on the active row (spec §1 prefill), so a single
     Enter confirms instantly for fast walkthroughs. Arrows roam,
-    digits jump+confirm, ``+`` jumps to the create row, ``q`` cancels.
+    digits jump+confirm, ``+`` confirms the create row, ``q`` cancels.
     The ``"new"`` create row means the caller prompts for
     name/floor/outdoors. Cancel → None.
     """
@@ -470,14 +478,21 @@ def _picker_curses(stdscr: object, conn: sqlite3.Connection,
                 return locs[idx].id
             # "move"/"ignore" → re-render with updated cursor
     finally:
-        stdscr.timeout(PICKER_TIMEOUT_RESTORE_MS)  # type: ignore[attr-defined]
+        stdscr.timeout(poll_timeout_ms)  # type: ignore[attr-defined]
 
 
-def _prompt_curses(stdscr: object, prompt: str) -> str:
-    """One-line prompt via curses echo; falls back to '' on error."""
+def _prompt_curses(stdscr: object, prompt: str,
+                   poll_timeout_ms: int = PICKER_TIMEOUT_RESTORE_MS) -> str:
+    """One-line prompt via curses echo; falls back to '' on error.
+
+    Blocks for input (``timeout(-1)``): the walk loop's poll timeout
+    would otherwise abort ``getstr`` after ~1s, making typing impossible.
+    Restores the poll timeout on exit.
+    """
     import curses
 
     h, _w = stdscr.getmaxyx()  # type: ignore[attr-defined]
+    stdscr.timeout(-1)  # type: ignore[attr-defined]  # blocking for typing
     try:
         curses.echo()  # type: ignore[attr-defined]
         stdscr.addstr(h - 1, 0, prompt[: _w - 1])  # type: ignore[attr-defined]
@@ -492,18 +507,25 @@ def _prompt_curses(stdscr: object, prompt: str) -> str:
             curses.noecho()  # type: ignore[attr-defined]
         except Exception:
             pass
+        try:
+            stdscr.timeout(poll_timeout_ms)  # type: ignore[attr-defined]
+        except Exception:
+            pass
 
 
-def _create_location_curses(stdscr: object, conn: sqlite3.Connection) -> Optional[int]:
-    name = _prompt_curses(stdscr, "name: ").strip()
+def _create_location_curses(
+    stdscr: object, conn: sqlite3.Connection,
+    poll_timeout_ms: int = PICKER_TIMEOUT_RESTORE_MS,
+) -> Optional[int]:
+    name = _prompt_curses(stdscr, "name: ", poll_timeout_ms).strip()
     if not name:
         return None
-    floor_s = _prompt_curses(stdscr, "floor (int): ").strip()
+    floor_s = _prompt_curses(stdscr, "floor (int): ", poll_timeout_ms).strip()
     try:
         floor = parse_floor_input(floor_s or "0")
     except ValueError:
         return None
-    od_s = _prompt_curses(stdscr, "outdoors? [y/N]: ").strip().lower()
+    od_s = _prompt_curses(stdscr, "outdoors? [y/N]: ", poll_timeout_ms).strip().lower()
     outdoors = od_s in ("y", "yes", "1")
     try:
         return store_mod.create_location(
@@ -535,7 +557,8 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
             state.set_toast(
                 "unknown preset %r; press `l` to pick" % (location_preset,))
         stdscr.nodelay(False)
-        stdscr.timeout(max(POLL_TIMEOUT_MIN_MS, int(interval * 1000)))
+        poll_timeout_ms = _poll_timeout_ms(interval)
+        stdscr.timeout(poll_timeout_ms)
         try:
             curses.curs_set(0)
         except Exception:
@@ -595,9 +618,11 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                     continue
                 # Always via picker prefilled with active (spec §1):
                 # single Enter confirms instantly for fast walkthroughs.
-                picked = _picker_curses(stdscr, conn, state.active_id)
+                picked = _picker_curses(
+                    stdscr, conn, state.active_id, poll_timeout_ms)
                 if picked == "new":
-                    picked = _create_location_curses(stdscr, conn)
+                    picked = _create_location_curses(
+                        stdscr, conn, poll_timeout_ms)
                 if isinstance(picked, int):
                     state.active_id = picked
                 else:
@@ -605,9 +630,11 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                     continue
                 state.try_snapshot()
             elif key == KEY_SWITCH:
-                picked = _picker_curses(stdscr, conn, state.active_id)
+                picked = _picker_curses(
+                    stdscr, conn, state.active_id, poll_timeout_ms)
                 if picked == "new":
-                    picked = _create_location_curses(stdscr, conn)
+                    picked = _create_location_curses(
+                        stdscr, conn, poll_timeout_ms)
                 if isinstance(picked, int):
                     state.active_id = picked
                     state.set_toast("active: %s" % _location_label(
@@ -615,7 +642,8 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                 elif picked is None:
                     state.set_toast("location switch cancelled")
             elif key == KEY_NEW:
-                new_id = _create_location_curses(stdscr, conn)
+                new_id = _create_location_curses(
+                    stdscr, conn, poll_timeout_ms)
                 if new_id is not None:
                     state.active_id = new_id
                     state.set_toast("active: %s" % _location_label(
@@ -626,7 +654,8 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                 if state.active_id is None:
                     state.set_toast("no active location")
                 else:
-                    raw = _prompt_curses(stdscr, "floor (int): ")
+                    raw = _prompt_curses(
+                        stdscr, "floor (int): ", poll_timeout_ms)
                     try:
                         floor = parse_floor_input(raw)
                     except ValueError as exc:
