@@ -441,3 +441,42 @@ def test_rooms_spots_list_unknown_no_create(tmp_path, capsys):
         assert len(store_mod.list_rooms(conn)) == n_room
     finally:
         conn.close()
+
+
+def test_benchmark_set_and_show(monkeypatch, tmp_path, capsys):
+    db = str(tmp_path / "bench.db")
+    monkeypatch.setattr(
+        signal_mod, "read_signal",
+        lambda timeout=2.0: signal_mod.Signal(
+            ssid="h", bssid="aa", rssi=-45, noise=-90, snr=45,
+            channel="36", phy="802.11ax", tx_rate="1200"),
+    )
+    rc = main(["--db", db, "benchmark", "set", "--location", "HOME",
+               "--no-speedtest"])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "benchmark" in out.out.lower()
+    rc2 = main(["--db", db, "benchmark", "show", "--location", "HOME"])
+    out2 = capsys.readouterr()
+    assert rc2 == 0
+    assert "-45" in out2.out
+
+
+def test_scan_shows_delta_when_benchmark(monkeypatch, tmp_path, capsys):
+    db = str(tmp_path / "delta.db")
+    conn = store_mod.get_db(db)
+    lid = store_mod.resolve_location(conn, "HOME")
+    store_mod.set_benchmark(conn, lid, rssi=-45, snr=32,
+                            down_mbps=300.0, up_mbps=40.0)
+    conn.close()
+    monkeypatch.setattr(
+        signal_mod, "read_signal",
+        lambda timeout=2.0: signal_mod.Signal(
+            ssid="h", bssid="aa", rssi=-67, noise=-91, snr=24,
+            channel="36", phy="802.11ax", tx_rate="800"),
+    )
+    rc = main(["--db", db, "scan", "--location", "HOME",
+               "--room", "K", "--spot", "W", "--no-speedtest"])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "vs bench" in out.out
