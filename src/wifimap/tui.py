@@ -220,11 +220,11 @@ class SparkHistory:
                 out.append(" ")
                 continue
             if span <= 0:
-                lvl = 7
+                lvl = 6
             else:
                 frac = (v - lo) / span
                 frac = 0.0 if frac < 0.0 else (1.0 if frac > 1.0 else frac)
-                lvl = int(round(frac * 7))
+                lvl = int(round(frac * 6))
             out.append(_SPARK_CHARS[lvl])
         s = "".join(out)
         if align == "right" and len(s) < width:
@@ -840,9 +840,9 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                                     (s_val_pad + "[%s]" % s_rate, s_attr),
                                     (pad2 + " | ", 0),
                                     (snr_g, s_attr), (" [60s]", 0)])
-                        _emit_segs([("noise ", 0), (n_val_pad, r_attr),
+                        _emit_segs([("noise ", 0), (n_val_pad, 0),
                                     (pad3 + " | ", 0),
-                                    (noise_g, r_attr), (" [60s]", 0)])
+                                    (noise_g, 0), (" [60s]", 0)])
                         _emit(format_extra_line(ch_s, phy_s, tx_s))
                     else:
                         _emit_segs([("RSSI  ", 0),
@@ -851,7 +851,7 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                         _emit_segs([("SNR   ", 0),
                                     (s_val_pad + "[%s]" % s_rate, s_attr),
                                     (pad2, 0)])
-                        _emit_segs([("noise ", 0), (n_val_pad, r_attr),
+                        _emit_segs([("noise ", 0), (n_val_pad, 0),
                                     (pad3, 0)])
                         _emit(format_extra_line(ch_s, phy_s, tx_s))
                 manual = " (manual)" if state.ssid_override else ""
@@ -984,7 +984,7 @@ def _walk_fallback(db_path: str, interval: float,
                 print(("SNR   " + ansi_wrap(
                     snr_s.ljust(METER_VAL_W) + "[%s]" % s_rating,
                     s_code) + " " * (max_left - len(lefts[1]))), flush=True)
-                print(("noise " + ansi_wrap(noise_s.ljust(METER_VAL_W), r_code)
+                print(("noise " + noise_s.ljust(METER_VAL_W)
                        + " " * (max_left - len(lefts[2]))), flush=True)
                 print(format_extra_line(
                     state.sig.channel or "-", state.sig.phy or "-",
@@ -1025,8 +1025,8 @@ def _walk_fallback(db_path: str, interval: float,
                     snr_s.ljust(METER_VAL_W) + "[%s]" % s_rating, s_code)
                     + pad2 + " | " + ansi_wrap(snr_g, s_code)
                     + " [60s]", flush=True)
-                print("noise " + ansi_wrap(noise_s.ljust(METER_VAL_W), r_code)
-                      + pad3 + " | " + ansi_wrap(noise_g, r_code)
+                print("noise " + noise_s.ljust(METER_VAL_W)
+                      + pad3 + " | " + noise_g
                       + " [60s]", flush=True)
                 print(format_extra_line(ch_s, phy_s, tx_s), flush=True)
             manual = " (manual)" if state.ssid_override else ""
