@@ -553,3 +553,10 @@ def test_curses_pair_for_rating_uses_rating_style():
     assert pair == 1
     pair, _ = tui_mod.rating_style(tui_mod.rate_rssi(-80))
     assert pair == 3
+
+
+def test_ansi_wrap_respects_no_color(monkeypatch):
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    assert tui_mod.ansi_wrap("x", "32") == "\x1b[32mx\x1b[0m"
+    monkeypatch.setenv("NO_COLOR", "1")
+    assert tui_mod.ansi_wrap("x", "32") == "x"

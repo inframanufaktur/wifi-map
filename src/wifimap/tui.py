@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import math
+import os
 import sqlite3
 import sys
 import threading
@@ -120,6 +121,13 @@ def rating_style(rating: str) -> Tuple[int, str]:
 def layout_mode(width: int) -> str:
     """Wide side-by-side at >=100 cols, else stacked narrow."""
     return "wide" if width >= WIDE_MIN_WIDTH else "narrow"
+
+
+def ansi_wrap(s: str, code: str) -> str:
+    """Wrap s in ANSI colour; plain when NO_COLOR is set."""
+    if os.environ.get("NO_COLOR"):
+        return s
+    return "\x1b[%sm%s\x1b[0m" % (code, s)
 
 
 _SPARK_CHARS = "▁▂▃▄▅▆▇█"
@@ -852,10 +860,16 @@ def _walk_fallback(db_path: str, interval: float,
                 print("NO-WIFI: %s (`s` blocked)" % state.no_wifi_msg)
             else:
                 rssi_s = "UNKNOWN" if state.sig.rssi is None else "%d dBm" % state.sig.rssi
-                print("RSSI %s [%s]" % (rssi_s, rate_rssi(state.sig.rssi)), flush=True)
-                print("SNR %s [%s]  noise %s  ch %s  phy %s  tx %s" % (
-                    "UNKNOWN" if state.sig.snr is None else "%d dB" % state.sig.snr,
-                    rate_snr(state.sig.snr),
+                snr_s = "UNKNOWN" if state.sig.snr is None else "%d dB" % state.sig.snr
+                r_rating = rate_rssi(state.sig.rssi)
+                s_rating = rate_snr(state.sig.snr)
+                _, r_code = rating_style(r_rating)
+                _, s_code = rating_style(s_rating)
+                rssi_coloured = ansi_wrap("RSSI %s [%s]" % (rssi_s, r_rating), r_code)
+                snr_coloured = ansi_wrap("SNR %s [%s]" % (snr_s, s_rating), s_code)
+                print(rssi_coloured, flush=True)
+                print("%s  noise %s  ch %s  phy %s  tx %s" % (
+                    snr_coloured,
                     "UNKNOWN" if state.sig.noise is None else "%d dBm" % state.sig.noise,
                     state.sig.channel or "-", state.sig.phy or "-",
                     state.sig.tx_rate or "-"),
@@ -1022,6 +1036,7 @@ __all__ = [
     "KEY_QUIT",
     "KEY_CREATE",
     "attempt_read",
+    "ansi_wrap",
     "finish_snapshot",
     "format_net_line",
     "format_signal_line",
