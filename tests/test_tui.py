@@ -498,3 +498,11 @@ def test_sparkline_vectors_gaps_and_window():
         h3.append(v)
     assert h3.sparkline(1, 4, 10) == "▃▆█"
     assert tui_mod.SparkHistory(maxlen=4).sparkline(0, 1, 4) == ""
+
+
+def test_poll_appends_history(tmp_path):
+    st = tui_mod.WalkState(str(tmp_path / "w.db"), history_max=5)
+    st.poll(read_fn=lambda: signal_mod.Signal(rssi=-60, noise=-90, snr=30))
+    st.poll(read_fn=lambda: signal_mod.Signal(rssi=-61, noise=-91, snr=29))
+    assert st.hist_rssi.sparkline(-90, -30, 5) != ""
+    assert len(st.hist_rssi.sparkline(-90, -30, 5)) == 2
