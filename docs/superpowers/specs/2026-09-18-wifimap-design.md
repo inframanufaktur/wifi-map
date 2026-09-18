@@ -68,6 +68,8 @@ CREATE TABLE readings(
   server TEXT, note TEXT
 );
 ```
+Note (macOS 26): SSID/BSSID redacted without Location permission → NULL is normal. Readings keyed by manual location tags, not SSID.
+```
 One row per `s` / per `scan`. No updates to readings; locations editable (`f`, `locations add`). Query joins floor+name+time for room/storey comparison. Positioning: manual location rows only — no GPS/elevation (Mac has no GPS chip, indoor WiFi geolocation 20-100m, no barometer; phone GPS still can't separate rooms/floors).
 
 ## 4. Error handling
