@@ -213,3 +213,14 @@ def test_get_db_enables_wal_and_fk(tmp_path):
         assert {"locations", "readings"} <= tables
     finally:
         conn.close()
+
+
+def test_new_schema_tables(tmp_path):
+    from wifimap.store import get_db
+    conn = get_db(str(tmp_path / "s.db"))
+    try:
+        tables = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        assert {"locations", "rooms", "spots", "readings"} <= tables
+    finally:
+        conn.close()

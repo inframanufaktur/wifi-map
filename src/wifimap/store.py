@@ -10,52 +10,53 @@ from typing import Any, List, Optional, Union
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS locations(
   id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE
+);
+CREATE TABLE IF NOT EXISTS rooms(
+  id INTEGER PRIMARY KEY,
+  location_id INTEGER NOT NULL REFERENCES locations(id),
   name TEXT NOT NULL,
   floor INTEGER NOT NULL DEFAULT 0,
   outdoors INTEGER NOT NULL DEFAULT 0 CHECK(outdoors IN (0, 1)),
-  UNIQUE(name, floor)
+  UNIQUE(location_id, name, floor)
+);
+CREATE TABLE IF NOT EXISTS spots(
+  id INTEGER PRIMARY KEY,
+  room_id INTEGER NOT NULL REFERENCES rooms(id),
+  name TEXT NOT NULL,
+  UNIQUE(room_id, name)
 );
 CREATE TABLE IF NOT EXISTS readings(
   id INTEGER PRIMARY KEY,
   ts TEXT NOT NULL,
-  location_id INTEGER NOT NULL REFERENCES locations(id),
+  spot_id INTEGER NOT NULL REFERENCES spots(id),
   ssid TEXT, bssid TEXT,
   rssi INTEGER, noise INTEGER, snr INTEGER,
   channel TEXT, phy TEXT, tx_rate TEXT,
   ping_ms REAL, down_mbps REAL, up_mbps REAL,
   server TEXT, note TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_readings_location ON readings(location_id);
+CREATE INDEX IF NOT EXISTS idx_rooms_location ON rooms(location_id);
+CREATE INDEX IF NOT EXISTS idx_spots_room ON spots(room_id);
+CREATE INDEX IF NOT EXISTS idx_readings_spot ON readings(spot_id);
 CREATE INDEX IF NOT EXISTS idx_readings_ssid ON readings(ssid);
 """
-
-
 @dataclass
 class Location:
     id: int
     name: str
+@dataclass
+class Room:
+    id: int
+    location_id: int
+    name: str
     floor: int = 0
     outdoors: bool = False
-
-
 @dataclass
-class Reading:
-    id: int = 0
-    ts: str = ""
-    location_id: int = 0
-    ssid: Optional[str] = None
-    bssid: Optional[str] = None
-    rssi: Optional[int] = None
-    noise: Optional[int] = None
-    snr: Optional[int] = None
-    channel: Optional[str] = None
-    phy: Optional[str] = None
-    tx_rate: Optional[str] = None
-    ping_ms: Optional[float] = None
-    down_mbps: Optional[float] = None
-    up_mbps: Optional[float] = None
-    server: Optional[str] = None
-    note: Optional[str] = None
+class Spot:
+    id: int
+    room_id: int
+    name: str
 
 
 def get_db(path: Union[str, Path]) -> sqlite3.Connection:
