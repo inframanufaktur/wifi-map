@@ -1,31 +1,41 @@
 # wifimap
 
 Map home WiFi for connectivity planning. Walk room to room, snapshot
-signal strength (+ internet throughput), tag by location/floor. Rows land
+signal strength (+ internet throughput), tag by location/room/spot. Rows land
 in SQLite; CSV export feeds plotting/heatmap later.
+
+Model: `location` = physical site (bare name, e.g. HOME); `room` =
+room/place with floor + outdoors flag; `spot` = precise point
+(window/bed/corner/desk).
 
 macOS only. Python 3.9+ (3.9-compatible code). Stdlib-first — no TUI
 framework deps.
 
 ## Commands
 
-- `wifimap walk [--interval 1.0] [--no-speedtest] [--location ID|NAME]` —
-  live RSSI/noise/SNR/BSSID/channel table. Keys: `s` snapshot (pick or
-  create location inline), `l` switch location, `n` new location,
-  `f` edit active floor, `q` quit. DB writes only on `s`.
-- `wifimap scan --location ID|NAME [--location-floor N] [--location-outdoors 0|1] [--no-speedtest] [--note TEXT]` —
-  single snapshot row, print, exit. Unknown names auto-create the location.
-- `wifimap locations list|add` — `list` prints id/name/floor/outdoors;
-  `add --name X --floor N [--outdoors]` creates.
-- `wifimap list [--location ID|NAME] [--floor N] [--limit 50]` — history,
-  joined with locations.
-- `wifimap export --csv out.csv [--location ID|NAME] [--floor N]` — CSV dump.
+- `wifimap scan --location HOME --room KITCHEN --spot WINDOW [--room-floor N] [--room-outdoors 0|1] [--no-speedtest] [--note TEXT]` —
+  single snapshot row, print, exit. Unknown location/room/spot names
+  auto-create (room uses `--room-floor`/`--room-outdoors`).
+- `wifimap locations list|add --name X` — `list` prints id/name;
+  `add --name X` creates a site.
+- `wifimap rooms list|add --location HOME --name X --floor N [--outdoors]` —
+  `list` prints id/name/floor/outdoors for the site; `add` creates a room.
+- `wifimap spots list|add --location HOME --room KITCHEN --name X` —
+  `list` prints id/name for the room; `add` creates a spot.
+- `wifimap walk [--interval 1.0] [--no-speedtest] [--location HOME]` —
+  live RSSI/noise/SNR/BSSID/channel table, preset site. Keys: `s` snapshot
+  (room→spot drilldown), `l` switch room/spot, `n` new room/spot,
+  `f` edit room floor, `q` quit. DB writes only on `s`.
+- `wifimap list [--location HOME] [--room K] [--spot WINDOW] [--floor N] [--limit 50]` —
+  history, joined with location/room/spot.
+- `wifimap export --csv out.csv [--location HOME] [--room K] [--spot WINDOW] [--floor N]` —
+  CSV dump.
 
 DB default `~/wifi-map.db`, override with `--db PATH`.
 Exit codes: 0 ok, 2 no-wifi/signal-unavailable, 3 storage,
 4 speedtest binary missing (when required).
 
-Floor convention: 0 ground, -1 first basement, +1 first upper.
+Floor convention (on room): 0 ground, -1 first basement, +1 first upper.
 `outdoors`: 1 = garden/balcony/etc. Readings are keyed by manual location
 tags — on macOS 26 SSID/BSSID come back NULL without Location permission;
 that is normal.
@@ -79,22 +89,24 @@ Throughput (optional):
 
 ```sh
 wifimap --help
-wifimap --db /tmp/demo.db scan --no-speedtest --location office --location-floor 0
+wifimap --db /tmp/demo.db scan --no-speedtest --location home --room kitchen --spot window --room-floor 0
 wifimap --db /tmp/demo.db locations list
+wifimap --db /tmp/demo.db rooms list --location home
+wifimap --db /tmp/demo.db spots list --location home --room kitchen
 wifimap --db /tmp/demo.db list
 wifimap --db /tmp/demo.db export --csv readings.csv
-wifimap walk --no-speedtest --location office   # house walkthrough
+wifimap walk --no-speedtest --location home   # house walkthrough
 ```
 
 ## Smoke test (verified 2026-09-18, clean venv)
 
 ```
 pip install -e . && wifimap --help                                  # ok
-scan --no-speedtest --location test --location-floor 0               # exit 2 without PyObjC (hint shown)
+scan --no-speedtest --location test --room r1 --spot s1 --room-floor 0  # exit 2 without PyObjC (hint shown)
 pip install pyobjc-framework-CoreWLAN                                # pyobjc 11.1, fast after pip upgrade
 scan ...                                                             # exit 0: #1 test rssi=-60 snr=32
-locations list / list / export --csv                                 # 1 row, CSV has location+floor columns
-pytest                                                               # 77 passed
+locations list / rooms list / spots list / list / export --csv       # 1 row, CSV has location+room+spot+floor columns
+pytest                                                               # 140 passed
 ```
 
 ## Tests
