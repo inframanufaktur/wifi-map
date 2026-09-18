@@ -102,6 +102,26 @@ def rate_snr(v: Optional[int]) -> str:
     return "WEAK"
 
 
+_RATING_STYLE = {
+    "GREAT": (1, "32"),
+    "OK": (2, "33"),
+    "WEAK": (3, "31"),
+    "UNKNOWN": (0, "37"),
+}
+
+WIDE_MIN_WIDTH = 100
+
+
+def rating_style(rating: str) -> Tuple[int, str]:
+    """Map GREAT/OK/WEAK/UNKNOWN to (curses_pair, ansi_code)."""
+    return _RATING_STYLE.get(rating, (0, "37"))
+
+
+def layout_mode(width: int) -> str:
+    """Wide side-by-side at >=100 cols, else stacked narrow."""
+    return "wide" if width >= WIDE_MIN_WIDTH else "narrow"
+
+
 _SPARK_CHARS = "▁▂▃▄▅▆▇█"
 
 
@@ -979,14 +999,17 @@ __all__ = [
     "format_net_line",
     "format_signal_line",
     "history_cap",
+    "layout_mode",
     "parse_floor_input",
     "picker_move",
     "picker_press",
     "picker_start_cursor",
     "rate_rssi",
     "rate_snr",
+    "rating_style",
     "snapshot_payload",
     "SparkHistory",
     "start_snapshot_thread",
+    "WIDE_MIN_WIDTH",
     "run_walk",
 ]

@@ -533,3 +533,16 @@ def test_history_cap_windows():
     assert tui_mod.history_cap(1.0) == 60
     assert tui_mod.history_cap(0.5) == 120
     assert tui_mod.history_cap(90.0) == 1
+
+
+def test_rating_style_maps_all_ratings():
+    assert tui_mod.rating_style("GREAT") == (1, "32")
+    assert tui_mod.rating_style("OK") == (2, "33")
+    assert tui_mod.rating_style("WEAK") == (3, "31")
+    assert tui_mod.rating_style("UNKNOWN") == (0, "37")
+
+
+def test_layout_mode_boundary():
+    assert tui_mod.layout_mode(99) == "narrow"
+    assert tui_mod.layout_mode(100) == "wide"
+    assert tui_mod.layout_mode(200) == "wide"
