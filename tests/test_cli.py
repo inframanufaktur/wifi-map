@@ -382,3 +382,62 @@ def test_export_csv_has_room_spot_columns(tmp_path, capsys):
         assert col in rows[0]
     assert rows[0]["room_name"] == "kitchen"
     assert rows[0]["spot_name"] == "window"
+
+
+def test_rooms_spots_list_via_main(tmp_path, capsys):
+    """Regression: rooms/spots list dispatch must pass args (was TypeError)."""
+    db = str(tmp_path / "cli.db")
+    conn = store_mod.get_db(db)
+    try:
+        _seed_3level(conn, loc="schwarze-witwe", room="kitchen",
+                      spot="window", rssi=-55)
+    finally:
+        conn.close()
+    rc, out, err = _run(capsys, "--db", db, "rooms", "list",
+                        "--location", "schwarze-witwe")
+    assert rc == 0
+    assert "kitchen" in out
+    rc, out, err = _run(capsys, "--db", db, "spots", "list",
+                        "--location", "schwarze-witwe",
+                        "--room", "kitchen")
+    assert rc == 0
+    assert "window" in out
+
+
+def test_rooms_spots_bare_subcommand_exits_2(tmp_path, capsys):
+    """Regression: bare rooms/spots must usage-error, not AttributeError."""
+    import pytest as _pytest
+    db = str(tmp_path / "cli.db")
+    with _pytest.raises(SystemExit) as exc:
+        main(["--db", db, "rooms"])
+    assert exc.value.code == 2
+    with _pytest.raises(SystemExit) as exc:
+        main(["--db", db, "spots"])
+    assert exc.value.code == 2
+
+
+def test_rooms_spots_list_unknown_no_create(tmp_path, capsys):
+    """List on unknown names errors (exit 3) and writes no rows."""
+    db = str(tmp_path / "cli.db")
+    conn = store_mod.get_db(db)
+    try:
+        _seed_3level(conn, loc="home", room="kitchen", spot="window",
+                      rssi=-55)
+        n_loc = len(store_mod.list_locations(conn))
+        n_room = len(store_mod.list_rooms(conn))
+    finally:
+        conn.close()
+    rc, out, err = _run(capsys, "--db", db, "rooms", "list",
+                        "--location", "TYPO")
+    assert rc == 3
+    assert "unknown" in err.lower()
+    rc, out, err = _run(capsys, "--db", db, "spots", "list",
+                        "--location", "home", "--room", "TYPO")
+    assert rc == 3
+    assert "unknown" in err.lower()
+    conn = store_mod.get_db(db)
+    try:
+        assert len(store_mod.list_locations(conn)) == n_loc
+        assert len(store_mod.list_rooms(conn)) == n_room
+    finally:
+        conn.close()

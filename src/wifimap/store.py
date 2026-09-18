@@ -151,6 +151,45 @@ def resolve_location(
     return create_location(conn, name)
 
 
+def lookup_location(
+    conn: sqlite3.Connection,
+    id_or_name: Union[int, str],
+) -> int:
+    """Resolve id|name to a location id without creating anything.
+
+    Same routing as ``resolve_location`` but unknown names/ids raise
+    ValueError instead of auto-creating. Read paths (list) must use
+    this so a typo can't silently insert rows.
+    """
+    if isinstance(id_or_name, bool):
+        raise ValueError("invalid location: %r" % (id_or_name,))
+    if isinstance(id_or_name, int):
+        row = conn.execute(
+            "SELECT id FROM locations WHERE id = ?", (id_or_name,)
+        ).fetchone()
+        if row is None:
+            raise ValueError("unknown location id: %r" % (id_or_name,))
+        return row[0]
+    name = str(id_or_name)
+    try:
+        as_id = int(name)
+    except ValueError:
+        as_id = None
+    if as_id is not None:
+        row = conn.execute(
+            "SELECT id FROM locations WHERE id = ?", (as_id,)
+        ).fetchone()
+        if row is not None:
+            return row[0]
+    row = conn.execute(
+        "SELECT id FROM locations WHERE name = ?",
+        (name,),
+    ).fetchone()
+    if row is not None:
+        return row[0]
+    raise ValueError("unknown location: %r" % (id_or_name,))
+
+
 def create_room(
     conn: sqlite3.Connection,
     location_id: int,
@@ -263,6 +302,48 @@ def resolve_room(
         return row[0]
     return create_room(conn, location_id, label, floor=floor,
                        outdoors=outdoors)
+
+
+def lookup_room(
+    conn: sqlite3.Connection,
+    location_id: int,
+    name: Union[int, str],
+) -> int:
+    """Resolve room id|name (scoped to location) without creating anything.
+
+    Same routing as ``resolve_room`` but unknown names/ids raise
+    ValueError instead of auto-creating. Read paths (list) must use
+    this so a typo can't silently insert rows.
+    """
+    if isinstance(name, bool):
+        raise ValueError("invalid room: %r" % (name,))
+    if isinstance(name, int):
+        row = conn.execute(
+            "SELECT id FROM rooms WHERE id = ? AND location_id = ?",
+            (name, location_id),
+        ).fetchone()
+        if row is None:
+            raise ValueError("unknown room id: %r" % (name,))
+        return row[0]
+    label = str(name)
+    try:
+        as_id = int(label)
+    except ValueError:
+        as_id = None
+    if as_id is not None:
+        row = conn.execute(
+            "SELECT id FROM rooms WHERE id = ? AND location_id = ?",
+            (as_id, location_id),
+        ).fetchone()
+        if row is not None:
+            return row[0]
+    row = conn.execute(
+        "SELECT id FROM rooms WHERE location_id = ? AND name = ?",
+        (location_id, label),
+    ).fetchone()
+    if row is not None:
+        return row[0]
+    raise ValueError("unknown room: %r" % (name,))
 
 
 def update_room_floor(

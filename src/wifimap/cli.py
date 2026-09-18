@@ -74,7 +74,7 @@ def _build_parser() -> argparse.ArgumentParser:
     ladd.add_argument("--name", required=True)
 
     rm = sub.add_parser("rooms", help="Rooms CRUD.")
-    rm_sub = rm.add_subparsers(dest="rooms_cmd", required=False)
+    rm_sub = rm.add_subparsers(dest="rooms_cmd", required=True)
     rmlist = rm_sub.add_parser("list", help="Print id/name/floor/outdoors.")
     rmlist.add_argument("--location", required=True, help="Location ID|NAME")
     rmadd = rm_sub.add_parser("add", help="Create a room.")
@@ -84,7 +84,7 @@ def _build_parser() -> argparse.ArgumentParser:
     rmadd.add_argument("--outdoors", action="store_true")
 
     sp = sub.add_parser("spots", help="Spots CRUD.")
-    sp_sub = sp.add_subparsers(dest="spots_cmd", required=False)
+    sp_sub = sp.add_subparsers(dest="spots_cmd", required=True)
     splist = sp_sub.add_parser("list", help="Print id/name.")
     splist.add_argument("--location", required=True, help="Location ID|NAME")
     splist.add_argument("--room", required=True, help="Room ID|NAME")
@@ -257,7 +257,7 @@ def _cmd_rooms_list(db_path: str, args: argparse.Namespace) -> int:
         return EXIT_STORAGE
     try:
         try:
-            loc_id = store_mod.resolve_location(conn, args.location)
+            loc_id = store_mod.lookup_location(conn, args.location)
             rooms = store_mod.list_rooms(conn, location_id=loc_id)
         except (sqlite3.Error, OSError, ValueError) as exc:
             print("Error: cannot list rooms: %s" % (exc,),
@@ -303,8 +303,8 @@ def _cmd_spots_list(db_path: str, args: argparse.Namespace) -> int:
         return EXIT_STORAGE
     try:
         try:
-            loc_id = store_mod.resolve_location(conn, args.location)
-            room_id = store_mod.resolve_room(conn, loc_id, args.room)
+            loc_id = store_mod.lookup_location(conn, args.location)
+            room_id = store_mod.lookup_room(conn, loc_id, args.room)
             spots = store_mod.list_spots(conn, room_id=room_id)
         except (sqlite3.Error, OSError, ValueError) as exc:
             print("Error: cannot list spots: %s" % (exc,),
@@ -433,11 +433,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.cmd == "rooms":
         if getattr(args, "rooms_cmd", None) == "add":
             return _cmd_rooms_add(db_path, args)
-        return _cmd_rooms_list(db_path)
+        return _cmd_rooms_list(db_path, args)
     if args.cmd == "spots":
         if getattr(args, "spots_cmd", None) == "add":
             return _cmd_spots_add(db_path, args)
-        return _cmd_spots_list(db_path)
+        return _cmd_spots_list(db_path, args)
     if args.cmd == "list":
         return _cmd_list(db_path, args)
     if args.cmd == "export":

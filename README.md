@@ -50,6 +50,8 @@ auto-create on `scan`.
 | `wifimap export --csv out.csv [same filters as list]` | CSV dump (up to 1M rows) |
 
 All location/room/spot arguments accept ID or NAME. Filters accept ID or NAME.
+`scan` and `add` auto-create unknown names (parents included);
+`rooms list` / `spots list` never write — unknown names exit 3.
 
 Exit codes: 0 ok, 2 no-wifi/signal-unavailable (missing signal backend
 maps here with an install hint), 3 storage error. Code 4 is reserved —
