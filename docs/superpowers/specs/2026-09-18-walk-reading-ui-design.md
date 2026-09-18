@@ -15,7 +15,7 @@ Decisions from user: newest sample at right edge, empty space left until 60s fil
 
 ## 2. Right-aligned graphs
 
-- `SparkHistory.sparkline(lo, hi, width)` left-pads with spaces to `width` so newest sample sticks to right edge.
+- `SparkHistory.sparkline(lo, hi, width)` left-pads with spaces to `width` so newest sample sticks to right edge. Top block capped at `▇` (not `█`) so adjacent GREAT rows don't visually fuse in tight line spacing.
 - Partial fill (walk start): e.g. 5 samples in 40-wide graph renders 35 spaces + 5 blocks.
 - Full (60s): no padding, scrolls left as now (oldest drops).
 - Gaps (None / NO-WIFI): space char, same as now, padding indistinguishable from gaps by design.
