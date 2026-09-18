@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS readings(
   server TEXT, note TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_readings_location ON readings(location_id);
+CREATE INDEX IF NOT EXISTS idx_readings_ssid ON readings(ssid);
 """
 
 
@@ -219,6 +220,7 @@ def list_readings(
     conn: sqlite3.Connection,
     location: Optional[Union[int, str]] = None,
     floor: Optional[int] = None,
+    ssid: Optional[str] = None,
     limit: int = 50,
 ) -> List[dict]:
     """List readings newest-first as joined dicts (location_name/floor).
@@ -258,6 +260,11 @@ def list_readings(
     if floor is not None:
         clauses.append("l.floor = ?")
         params.append(floor)
+    if ssid is not None:
+        if isinstance(ssid, bool):
+            raise ValueError("invalid ssid filter: %r" % (ssid,))
+        clauses.append("r.ssid = ?")
+        params.append(ssid)
     if clauses:
         query += " WHERE " + " AND ".join(clauses)
     query += " ORDER BY r.id DESC LIMIT ?"

@@ -10,10 +10,12 @@ callbacks and UI-thread reads are serialized by ``WalkState._lock``.
 from __future__ import annotations
 
 import copy
+import math
 import sqlite3
 import sys
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Literal, Optional, Tuple, Union
 
@@ -76,6 +78,65 @@ def format_signal_line(sig: signal_mod.Signal) -> str:
 def format_net_line(ssid: Optional[str]) -> str:
     """Session header: ``Net: <ssid>`` or ``Net: unknown``."""
     return "Net: %s" % (ssid if ssid else "unknown")
+
+
+def rate_rssi(v: Optional[int]) -> str:
+    """Rate RSSI: >=-60 GREAT, >=-70 OK, else WEAK, None UNKNOWN."""
+    if v is None:
+        return "UNKNOWN"
+    if v >= -60:
+        return "GREAT"
+    if v >= -70:
+        return "OK"
+    return "WEAK"
+
+
+def rate_snr(v: Optional[int]) -> str:
+    """Rate SNR: >=25 GREAT, >=15 OK, else WEAK, None UNKNOWN."""
+    if v is None:
+        return "UNKNOWN"
+    if v >= 25:
+        return "GREAT"
+    if v >= 15:
+        return "OK"
+    return "WEAK"
+
+
+_SPARK_CHARS = "▁▂▃▄▅▆▇█"
+
+
+class SparkHistory:
+    """Fixed-length sample ring; renders ASCII block sparkline."""
+
+    def __init__(self, maxlen: int = 60) -> None:
+        self._buf: deque = deque(maxlen=max(1, maxlen))
+
+    def append(self, v: Optional[float]) -> None:
+        self._buf.append(v)
+
+    def sparkline(self, lo: float, hi: float, width: int) -> str:
+        vals = list(self._buf)[-width:] if width > 0 else []
+        if not vals:
+            return ""
+        span = hi - lo
+        out = []
+        for v in vals:
+            if v is None:
+                out.append(" ")
+                continue
+            if span <= 0:
+                lvl = 7
+            else:
+                frac = (v - lo) / span
+                frac = 0.0 if frac < 0.0 else (1.0 if frac > 1.0 else frac)
+                lvl = int(round(frac * 7))
+            out.append(_SPARK_CHARS[lvl])
+        return "".join(out)
+
+
+def history_cap(interval: float) -> int:
+    """Samples covering ~60s at the poll interval; at least 1."""
+    return max(1, int(math.ceil(60.0 / interval)))
 
 
 def picker_start_cursor(loc_ids: List[int],
@@ -285,9 +346,16 @@ class WalkState:
     worker threads; all mutation and UI reads go through the lock.
     """
 
-    def __init__(self, db_path: str, no_speedtest: bool = False) -> None:
+    def __init__(self, db_path: str, no_speedtest: bool = False,
+                 ssid_override: Optional[str] = None,
+                 history_max: int = 60) -> None:
         self.db_path = db_path
         self.no_speedtest = no_speedtest
+        self.ssid_override = (ssid_override.strip() or None) if ssid_override is not None else None
+        self.history_max = max(1, history_max)
+        self.hist_rssi: SparkHistory = SparkHistory(maxlen=self.history_max)
+        self.hist_noise: SparkHistory = SparkHistory(maxlen=self.history_max)
+        self.hist_snr: SparkHistory = SparkHistory(maxlen=self.history_max)
         self.active_id: Optional[int] = None
         self.sig: signal_mod.Signal = signal_mod.Signal()
         self.no_wifi: bool = False
@@ -303,6 +371,10 @@ class WalkState:
         identity_fn: Optional[Callable[[], Optional[Tuple[str, str]]]] = None,
     ) -> Optional[Tuple[str, str]]:
         """One-shot session lookup; backfills polls; abort → toast + None."""
+        if self.ssid_override is not None:
+            self.net_ssid = self.ssid_override
+            self._backfill_identity()
+            return (self.net_ssid, self.net_bssid)
         fn = identity_fn or signal_mod.read_network_identity
         try:
             ident = fn()
@@ -319,6 +391,9 @@ class WalkState:
         return ident
 
     def _backfill_identity(self) -> None:
+        if self.ssid_override is not None:
+            self.sig.ssid = self.ssid_override
+            return
         if self.net_ssid is not None and self.sig.ssid is None:
             self.sig.ssid = self.net_ssid
         if self.net_bssid is not None and self.sig.bssid is None:
@@ -349,6 +424,13 @@ class WalkState:
         except signal_mod.NoWiFiError as exc:
             self.no_wifi = True
             self.no_wifi_msg = str(exc)
+            self.hist_rssi.append(None)
+            self.hist_noise.append(None)
+            self.hist_snr.append(None)
+            return
+        self.hist_rssi.append(self.sig.rssi)
+        self.hist_noise.append(self.sig.noise)
+        self.hist_snr.append(self.sig.snr)
 
     def try_snapshot(
         self,
@@ -365,6 +447,8 @@ class WalkState:
             self.pending += 1
         loc_id = self.active_id
         sig_copy = copy.deepcopy(self.sig)
+        if self.ssid_override is not None:
+            sig_copy.ssid = self.ssid_override
         result_box: List[SnapshotResult] = []
 
         def _cb(res: SnapshotResult) -> None:
@@ -536,7 +620,8 @@ def _create_location_curses(
 
 def _walk_curses(stdscr: object, db_path: str, interval: float,
                  location_preset: Optional[str],
-                 no_speedtest: bool) -> int:
+                 no_speedtest: bool,
+                 ssid: Optional[str] = None) -> int:
     import curses
 
     try:
@@ -549,7 +634,9 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
         except Exception:
             pass
         return 3
-    state = WalkState(db_path, no_speedtest=no_speedtest)
+    cap = history_cap(interval)
+    state = WalkState(db_path, no_speedtest=no_speedtest,
+                      ssid_override=ssid, history_max=cap)
     try:
         state.active_id = _resolve_preset(conn, location_preset)
         state.ensure_identity()
@@ -589,11 +676,24 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                     _emit("NO-WIFI: %s" % (state.no_wifi_msg,))
                     _emit("`s` blocked; fix WiFi or quit with `q`.")
                 else:
-                    _emit(format_signal_line(state.sig))
-                _emit(format_net_line(state.net_ssid))
+                    rssi_s = "UNKNOWN" if state.sig.rssi is None else "%d dBm" % state.sig.rssi
+                    snr_s = "UNKNOWN" if state.sig.snr is None else "%d dB" % state.sig.snr
+                    noise_s = "UNKNOWN" if state.sig.noise is None else "%d dBm" % state.sig.noise
+                    _emit("RSSI %s [%s]" % (rssi_s, rate_rssi(state.sig.rssi)))
+                    _emit("SNR %s [%s]  noise %s  ch %s  phy %s  tx %s" % (
+                        snr_s, rate_snr(state.sig.snr), noise_s,
+                        state.sig.channel or "-", state.sig.phy or "-",
+                        state.sig.tx_rate or "-"))
+                manual = " (manual)" if state.ssid_override else ""
+                _emit("Net: %s%s" % (state.net_ssid or "unknown", manual))
                 toast, pending = state.ui_snapshot()
                 _emit("loc: %s  pending: %d" % (
                     _location_label(conn, state.active_id), pending))
+                if h >= 10 and not state.no_wifi:
+                    gw = max(10, w - 12)
+                    _emit("RSSI  %s [60s]" % state.hist_rssi.sparkline(-90, -30, gw))
+                    _emit("SNR   %s [60s]" % state.hist_snr.sparkline(0, 40, gw))
+                    _emit("noise %s [60s]" % state.hist_noise.sparkline(-100, -60, gw))
                 _emit("keys: s snapshot | l switch | n new | "
                       "f floor | q quit")
                 if toast:
@@ -675,7 +775,8 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
 
 def _walk_fallback(db_path: str, interval: float,
                    location_preset: Optional[str],
-                   no_speedtest: bool) -> int:
+                   no_speedtest: bool,
+                   ssid: Optional[str] = None) -> int:
     """ANSI fallback when curses/tty unavailable.
 
     Limit: keys are line-buffered (type a key + Enter); no live refresh
@@ -688,7 +789,9 @@ def _walk_fallback(db_path: str, interval: float,
     except (sqlite3.Error, OSError) as exc:
         print("Error: cannot open DB: %s" % (exc,), file=sys.stderr)
         return 3
-    state = WalkState(db_path, no_speedtest=no_speedtest)
+    cap = history_cap(interval)
+    state = WalkState(db_path, no_speedtest=no_speedtest,
+                      ssid_override=ssid, history_max=cap)
     try:
         state.active_id = _resolve_preset(conn, location_preset)
         state.ensure_identity()
@@ -698,8 +801,21 @@ def _walk_fallback(db_path: str, interval: float,
             if state.no_wifi:
                 print("NO-WIFI: %s (`s` blocked)" % state.no_wifi_msg)
             else:
-                print(format_signal_line(state.sig), flush=True)
-            print(format_net_line(state.net_ssid), flush=True)
+                rssi_s = "UNKNOWN" if state.sig.rssi is None else "%d dBm" % state.sig.rssi
+                print("RSSI %s [%s]" % (rssi_s, rate_rssi(state.sig.rssi)), flush=True)
+                print("SNR %s [%s]  noise %s  ch %s  phy %s  tx %s" % (
+                    "UNKNOWN" if state.sig.snr is None else "%d dB" % state.sig.snr,
+                    rate_snr(state.sig.snr),
+                    "UNKNOWN" if state.sig.noise is None else "%d dBm" % state.sig.noise,
+                    state.sig.channel or "-", state.sig.phy or "-",
+                    state.sig.tx_rate or "-"),
+                    flush=True)
+            manual = " (manual)" if state.ssid_override else ""
+            print("Net: %s%s" % (state.net_ssid or "unknown", manual), flush=True)
+            gw = 40
+            print("RSSI  %s [60s]" % state.hist_rssi.sparkline(-90, -30, gw), flush=True)
+            print("SNR   %s [60s]" % state.hist_snr.sparkline(0, 40, gw), flush=True)
+            print("noise %s [60s]" % state.hist_noise.sparkline(-100, -60, gw), flush=True)
             toast, pending = state.ui_snapshot()
             print("loc: %s pending: %d %s" % (
                 _location_label(conn, state.active_id), pending,
@@ -813,10 +929,14 @@ def _fallback_floor(conn: sqlite3.Connection, state: WalkState) -> None:
 
 def run_walk(db_path: str, interval: float = 1.0,
              location_preset: Optional[str] = None,
-             no_speedtest: bool = False) -> int:
+             no_speedtest: bool = False,
+             ssid: Optional[str] = None) -> int:
     """Run walk loop; curses when tty available else ANSI fallback."""
     if interval <= 0:
         print("Error: --interval must be > 0", file=sys.stderr)
+        return 3
+    if ssid is not None and not ssid.strip():
+        print("Error: --ssid must not be blank", file=sys.stderr)
         return 3
     try:
         import curses  # noqa: F401
@@ -828,7 +948,7 @@ def run_walk(db_path: str, interval: float = 1.0,
 
         def _main(stdscr: object) -> int:
             return _walk_curses(
-                stdscr, db_path, interval, location_preset, no_speedtest)
+                stdscr, db_path, interval, location_preset, no_speedtest, ssid)
 
         try:
             return _c.wrapper(_main)
@@ -837,7 +957,7 @@ def run_walk(db_path: str, interval: float = 1.0,
         except Exception as exc:  # curses init failed → fallback
             print("curses unavailable (%s); using fallback" % (exc,),
                   file=sys.stderr)
-    return _walk_fallback(db_path, interval, location_preset, no_speedtest)
+    return _walk_fallback(db_path, interval, location_preset, no_speedtest, ssid)
 
 
 __all__ = [
@@ -855,11 +975,15 @@ __all__ = [
     "finish_snapshot",
     "format_net_line",
     "format_signal_line",
+    "history_cap",
     "parse_floor_input",
     "picker_move",
     "picker_press",
     "picker_start_cursor",
+    "rate_rssi",
+    "rate_snr",
     "snapshot_payload",
+    "SparkHistory",
     "start_snapshot_thread",
     "run_walk",
 ]

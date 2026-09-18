@@ -429,3 +429,97 @@ def test_fallback_floor_valid_and_invalid(monkeypatch, tmp_path):
         assert "integer" in st.ui_snapshot()[0].lower()
     finally:
         conn.close()
+
+
+def test_ssid_override_skips_autodetect(tmp_path):
+    st = tui_mod.WalkState(str(tmp_path / "w.db"), ssid_override="home-5g")
+    calls = []
+
+    def _boom():
+        calls.append(1)
+        raise AssertionError("autodetect must not run")
+
+    st.ensure_identity(identity_fn=_boom)
+    assert st.net_ssid == "home-5g"
+    assert calls == []
+
+
+def test_ssid_override_backfills_and_tags_snapshot(tmp_path):
+    db = str(tmp_path / "w.db")
+    conn = store_mod.get_db(db)
+    try:
+        lid = store_mod.create_location(conn, "den", floor=0)
+    finally:
+        conn.close()
+    st = tui_mod.WalkState(db, no_speedtest=True, ssid_override="home-5g")
+    st.active_id = lid
+    st.poll(read_fn=lambda: signal_mod.Signal(ssid="other", rssi=-60))
+    assert st.sig.ssid == "home-5g"
+    t = st.try_snapshot()
+    assert t is not None
+    t.join(timeout=10)
+    conn = store_mod.get_db(db)
+    try:
+        rows = store_mod.list_readings(conn)
+        assert rows[0]["ssid"] == "home-5g"
+    finally:
+        conn.close()
+
+
+def test_ssid_override_blank_normalizes_to_none(tmp_path):
+    st = tui_mod.WalkState(str(tmp_path / "w.db"), ssid_override="   ")
+    assert st.ssid_override is None
+
+
+def test_rate_rssi_snr_thresholds():
+    assert tui_mod.rate_rssi(-55) == "GREAT"
+    assert tui_mod.rate_rssi(-65) == "OK"
+    assert tui_mod.rate_rssi(-80) == "WEAK"
+    assert tui_mod.rate_rssi(None) == "UNKNOWN"
+    assert tui_mod.rate_snr(30) == "GREAT"
+    assert tui_mod.rate_snr(20) == "OK"
+    assert tui_mod.rate_snr(5) == "WEAK"
+    assert tui_mod.rate_snr(None) == "UNKNOWN"
+
+
+def test_sparkline_vectors_gaps_and_window():
+    h = tui_mod.SparkHistory(maxlen=8)
+    for v in [-90, -70, -50, -30]:
+        h.append(v)
+    line = h.sparkline(-90, -30, 4)
+    assert line == "▁▃▆█"
+    h2 = tui_mod.SparkHistory(maxlen=8)
+    h2.append(-50)
+    h2.append(None)
+    h2.append(-50)
+    assert h2.sparkline(-90, -30, 3)[1] == " "
+    h3 = tui_mod.SparkHistory(maxlen=3)
+    for v in [1, 2, 3, 4]:
+        h3.append(v)
+    assert h3.sparkline(1, 4, 10) == "▃▆█"
+    assert tui_mod.SparkHistory(maxlen=4).sparkline(0, 1, 4) == ""
+
+
+def test_poll_appends_history(tmp_path):
+    st = tui_mod.WalkState(str(tmp_path / "w.db"), history_max=5)
+    st.poll(read_fn=lambda: signal_mod.Signal(rssi=-60, noise=-90, snr=30))
+    st.poll(read_fn=lambda: signal_mod.Signal(rssi=-61, noise=-91, snr=29))
+    assert st.hist_rssi.sparkline(-90, -30, 5) != ""
+    assert len(st.hist_rssi.sparkline(-90, -30, 5)) == 2
+
+
+def test_poll_nowifi_appends_gap(tmp_path):
+    def _off():
+        raise signal_mod.NoWiFiError("off")
+
+    st = tui_mod.WalkState(str(tmp_path / "w.db"), history_max=5)
+    for _ in range(3):
+        st.poll(read_fn=_off)
+    assert st.no_wifi is True
+    assert st.hist_rssi.sparkline(-90, -30, 3) == "   "
+
+
+def test_history_cap_windows():
+    assert tui_mod.history_cap(1.0) == 60
+    assert tui_mod.history_cap(0.5) == 120
+    assert tui_mod.history_cap(90.0) == 1

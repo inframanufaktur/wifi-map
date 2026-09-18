@@ -9,6 +9,7 @@ import pytest
 from wifimap import signal as signal_mod
 from wifimap import speed as speed_mod
 from wifimap import store as store_mod
+from wifimap import cli as cli_mod
 from wifimap.cli import main
 
 
@@ -254,3 +255,28 @@ def test_list_nulls_show_dash(tmp_path, capsys):
     assert rc == 0
     assert "None" not in out
     assert "-" in out
+
+
+def test_walk_ssid_flag_parses():
+    args = cli_mod._build_parser().parse_args(["walk", "--ssid", "home-5g"])
+    assert args.ssid == "home-5g"
+
+
+def test_walk_blank_ssid_rejected(capsys, tmp_path):
+    rc = cli_mod.main(["--db", str(tmp_path / "w.db"), "walk",
+                       "--ssid", "  ", "--no-speedtest"])
+    assert rc == cli_mod.EXIT_STORAGE
+
+
+def test_list_ssid_filter_passes_through(tmp_path, monkeypatch, capsys):
+    seen = {}
+
+    def _fake(conn, location=None, floor=None, ssid=None, limit=50):
+        seen["ssid"] = ssid
+        return []
+
+    monkeypatch.setattr(store_mod, "list_readings", _fake)
+    rc = cli_mod.main(["--db", str(tmp_path / "w.db"), "list",
+                       "--ssid", "home-5g"])
+    assert rc == cli_mod.EXIT_OK
+    assert seen["ssid"] == "home-5g"

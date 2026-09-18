@@ -184,6 +184,16 @@ def test_update_location_floor_unique_conflict(db):
     assert get_location(db, a).floor == 0
 
 
+def test_list_readings_ssid_filter(db):
+    a = create_location(db, "den", floor=0)
+    add_reading(db, a, ssid="home-5g", rssi=-55)
+    add_reading(db, a, ssid="iot-2g", rssi=-80)
+    rows = list_readings(db, ssid="home-5g")
+    assert len(rows) == 1
+    assert rows[0]["ssid"] == "home-5g"
+    assert len(list_readings(db)) == 2
+
+
 def test_get_db_enables_wal_and_fk(tmp_path):
     path = str(tmp_path / "pragma.db")
     conn = get_db(path)
