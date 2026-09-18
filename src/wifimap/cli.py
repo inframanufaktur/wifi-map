@@ -61,6 +61,8 @@ def _build_parser() -> argparse.ArgumentParser:
     w.add_argument("--interval", type=float, default=1.0)
     w.add_argument("--no-speedtest", action="store_true")
     w.add_argument("--location", default=None, help="Preset ID|NAME")
+    w.add_argument("--ssid", default=None,
+                   help="Session SSID override (manual)")
 
     loc = sub.add_parser("locations", help="Locations CRUD.")
     loc_sub = loc.add_subparsers(dest="locations_cmd", required=False)
@@ -73,12 +75,14 @@ def _build_parser() -> argparse.ArgumentParser:
     li = sub.add_parser("list", help="History table (joins locations).")
     li.add_argument("--location", default=None, help="Filter ID|NAME")
     li.add_argument("--floor", type=int, default=None)
+    li.add_argument("--ssid", default=None, help="Filter by SSID")
     li.add_argument("--limit", type=int, default=50)
 
     ex = sub.add_parser("export", help="Dump CSV for plotting.")
     ex.add_argument("--csv", required=True, help="Output CSV path")
     ex.add_argument("--location", default=None, help="Filter ID|NAME")
     ex.add_argument("--floor", type=int, default=None)
+    ex.add_argument("--ssid", default=None, help="Filter by SSID")
     return p
 
 
@@ -162,10 +166,17 @@ def _cmd_scan(db_path: str, args: argparse.Namespace) -> int:
 def _cmd_walk(db_path: str, args: argparse.Namespace) -> int:
     from wifimap import tui as tui_mod
 
+    ssid = getattr(args, "ssid", None)
+    if ssid is not None:
+        ssid = ssid.strip()
+        if not ssid:
+            print("Error: --ssid must not be blank", file=sys.stderr)
+            return EXIT_STORAGE
     return tui_mod.run_walk(
         db_path, interval=args.interval,
         location_preset=args.location,
         no_speedtest=args.no_speedtest,
+        ssid=ssid,
     )
 
 
@@ -221,9 +232,16 @@ def _cmd_list(db_path: str, args: argparse.Namespace) -> int:
         return EXIT_STORAGE
     try:
         try:
+            ssid = getattr(args, "ssid", None)
+            if ssid is not None:
+                ssid = ssid.strip()
+                if not ssid:
+                    print("Error: --ssid must not be blank",
+                          file=sys.stderr)
+                    return EXIT_STORAGE
             rows = store_mod.list_readings(
                 conn, location=args.location, floor=args.floor,
-                limit=args.limit)
+                ssid=ssid, limit=args.limit)
         except (sqlite3.Error, OSError, ValueError) as exc:
             print("Error: cannot list readings: %s" % (exc,),
                   file=sys.stderr)
@@ -249,9 +267,16 @@ def _cmd_export(db_path: str, args: argparse.Namespace) -> int:
         return EXIT_STORAGE
     try:
         try:
+            ssid = getattr(args, "ssid", None)
+            if ssid is not None:
+                ssid = ssid.strip()
+                if not ssid:
+                    print("Error: --ssid must not be blank",
+                          file=sys.stderr)
+                    return EXIT_STORAGE
             rows = store_mod.list_readings(
                 conn, location=args.location, floor=args.floor,
-                limit=1000000)
+                ssid=ssid, limit=1000000)
         except (sqlite3.Error, OSError, ValueError) as exc:
             print("Error: cannot export readings: %s" % (exc,),
                   file=sys.stderr)
