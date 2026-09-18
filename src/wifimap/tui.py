@@ -4,7 +4,8 @@ Thread safety (M1 concern): ``store.list_readings`` toggles
 ``conn.row_factory`` on the passed connection, so connections are NOT
 thread-safe to share. The snapshot background thread MUST open its own
 ``store.get_db(db_path)`` connection and close it; it never touches the
-UI thread's connection.
+UI thread's connection. ``WalkState`` toast/pending mutations from worker
+callbacks and UI-thread reads are serialized by ``WalkState._lock``.
 """
 from __future__ import annotations
 
@@ -14,11 +15,38 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Literal, Optional, Tuple, Union
 
 from wifimap import signal as signal_mod
 from wifimap import speed as speed_mod
 from wifimap import store as store_mod
+
+
+# ---------------------------------------------------------------------------
+# Module constants: walk keys, key codes, timeouts
+# ---------------------------------------------------------------------------
+
+KEY_SNAPSHOT = "s"
+KEY_SWITCH = "l"
+KEY_NEW = "n"
+KEY_FLOOR = "f"
+KEY_QUIT = "q"
+KEY_QUIT_UPPER = "Q"
+KEY_CREATE = "+"
+QUIT_WORDS = ("q", "quit", "exit")
+
+KEY_ESC = 27
+KEY_CTRL_C = 3
+KEY_NO_INPUT = -1
+KEY_ENTER_CODES = (10, 13)  # LF / CR; curses.KEY_ENTER handled alongside
+
+POLL_TIMEOUT_MIN_MS = 50
+PICKER_TIMEOUT_RESTORE_MS = 1000
+FALLBACK_SETTLE_SLEEP = 0.1
+DB_OPEN_FAIL_SLEEP = 2.0
+
+#: Picker outcome: a location id, the ``"new"`` create row, or None (cancel).
+PickerSelection = Union[int, Literal["new"]]
 
 
 # ---------------------------------------------------------------------------
@@ -38,24 +66,6 @@ def format_signal_line(sig: signal_mod.Signal) -> str:
         rssi, noise, snr, _v(sig.ssid), _v(sig.bssid),
         _v(sig.channel), _v(sig.phy), _v(sig.tx_rate),
     )
-
-
-def pick_location_index(keypress: str, count: int, active: Optional[int]) -> Optional[int]:
-    """Map a picker keypress to a 0-based location index.
-
-    Numbered list (``1``-``9``) selects; ``+`` selects the create row
-    (returned as ``count`` sentinel); anything else (``q``/Escape
-    cancel included) returns ``None``. ``active`` is unused for
-    selection, kept for API parity with the picker UI prefill.
-    """
-    _ = active
-    if keypress == "+":
-        return count
-    if len(keypress) == 1 and "1" <= keypress <= "9":
-        idx = int(keypress) - 1
-        if 0 <= idx < count:
-            return idx
-    return None
 
 
 def picker_start_cursor(loc_ids: List[int],
@@ -258,7 +268,11 @@ def start_snapshot_thread(
 # ---------------------------------------------------------------------------
 
 class WalkState:
-    """Mutable walk session: active location, last signal, toast, counters."""
+    """Mutable walk session: active location, last signal, toast, counters.
+
+    ``toast``/``pending`` are shared between the UI thread and snapshot
+    worker threads; all mutation and UI reads go through the lock.
+    """
 
     def __init__(self, db_path: str, no_speedtest: bool = False) -> None:
         self.db_path = db_path
@@ -269,14 +283,22 @@ class WalkState:
         self.no_wifi_msg: str = ""
         self.toast: str = ""
         self.pending: int = 0
+        self._lock = threading.Lock()
 
     def set_toast(self, msg: str) -> None:
-        self.toast = msg
+        with self._lock:
+            self.toast = msg
+
+    def ui_snapshot(self) -> Tuple[str, int]:
+        """Locked (toast, pending) read for the render loop."""
+        with self._lock:
+            return (self.toast, self.pending)
 
     def on_snapshot_done(self, res: SnapshotResult) -> None:
-        self.pending = max(0, self.pending - 1)
-        self.set_toast(res.message if res.message else (
-            "saved #%s" % res.reading_id))
+        with self._lock:
+            self.pending = max(0, self.pending - 1)
+            self.toast = (res.message if res.message else (
+                "saved #%s" % res.reading_id))
 
     def poll(self, read_fn: Optional[Callable[[], signal_mod.Signal]] = None) -> None:
         fn = read_fn or signal_mod.read_signal
@@ -299,7 +321,8 @@ class WalkState:
         if self.active_id is None:
             self.set_toast("no active location: press `l` to pick one")
             return None
-        self.pending += 1
+        with self._lock:
+            self.pending += 1
         loc_id = self.active_id
         sig_copy = copy.deepcopy(self.sig)
         result_box: List[SnapshotResult] = []
@@ -355,14 +378,14 @@ def _location_label(conn: sqlite3.Connection, loc_id: Optional[int]) -> str:
 # ---------------------------------------------------------------------------
 
 def _picker_curses(stdscr: object, conn: sqlite3.Connection,
-                   active: Optional[int]) -> Optional[int]:
+                   active: Optional[int]) -> Optional[PickerSelection]:
     """Numbered-list picker prefilled with active; returns id/``"new"``/None.
 
     The cursor starts on the active row (spec §1 prefill), so a single
     Enter confirms instantly for fast walkthroughs. Arrows roam,
     digits jump+confirm, ``+`` jumps to the create row, ``q`` cancels.
-    Returns ``"new"`` string sentinel when the create row is confirmed
-    (caller prompts for name/floor/outdoors). Cancel → None.
+    The ``"new"`` create row means the caller prompts for
+    name/floor/outdoors. Cancel → None.
     """
     import curses
 
@@ -395,9 +418,9 @@ def _picker_curses(stdscr: object, conn: sqlite3.Connection,
                 key = "up"
             elif ch == curses.KEY_DOWN:
                 key = "down"
-            elif ch in (10, 13, curses.KEY_ENTER):
+            elif ch in KEY_ENTER_CODES + (curses.KEY_ENTER,):
                 key = "\n"
-            elif ch == 27:
+            elif ch == KEY_ESC:
                 key = "\x1b"
             else:
                 try:
@@ -409,11 +432,11 @@ def _picker_curses(stdscr: object, conn: sqlite3.Connection,
                 return None
             if action == "confirm" and idx is not None:
                 if idx == len(locs):
-                    return "new"  # type: ignore[return-value]
+                    return "new"
                 return locs[idx].id
             # "move"/"ignore" → re-render with updated cursor
     finally:
-        stdscr.timeout(1000)  # type: ignore[attr-defined]
+        stdscr.timeout(PICKER_TIMEOUT_RESTORE_MS)  # type: ignore[attr-defined]
 
 
 def _prompt_curses(stdscr: object, prompt: str) -> str:
@@ -466,7 +489,7 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
         try:
             stdscr.addstr(0, 0, "DB error: %s" % (exc,))
             stdscr.refresh()
-            time.sleep(2)
+            time.sleep(DB_OPEN_FAIL_SLEEP)
         except Exception:
             pass
         return 3
@@ -477,7 +500,7 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
             state.set_toast(
                 "unknown preset %r; press `l` to pick" % (location_preset,))
         stdscr.nodelay(False)
-        stdscr.timeout(max(50, int(interval * 1000)))
+        stdscr.timeout(max(POLL_TIMEOUT_MIN_MS, int(interval * 1000)))
         try:
             curses.curs_set(0)
         except Exception:
@@ -509,27 +532,28 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                     _emit("`s` blocked; fix WiFi or quit with `q`.")
                 else:
                     _emit(format_signal_line(state.sig))
+                toast, pending = state.ui_snapshot()
                 _emit("loc: %s  pending: %d" % (
-                    _location_label(conn, state.active_id), state.pending))
+                    _location_label(conn, state.active_id), pending))
                 _emit("keys: s snapshot | l switch | n new | "
                       "f floor | q quit")
-                if state.toast:
-                    _emit("» %s" % state.toast)
+                if toast:
+                    _emit("» %s" % toast)
                 stdscr.refresh()
             except Exception:
                 pass
             ch = stdscr.getch()
-            if ch == -1:
+            if ch == KEY_NO_INPUT:
                 continue
-            if ch in (3,):  # Ctrl-C via getch if delivered
+            if ch == KEY_CTRL_C:  # Ctrl-C via getch if delivered
                 return 0
             try:
                 key = chr(ch)
             except (ValueError, OverflowError):
                 continue
-            if key in ("q", "Q"):
+            if key in (KEY_QUIT, KEY_QUIT_UPPER):
                 return 0
-            elif key == "s":
+            elif key == KEY_SNAPSHOT:
                 if state.no_wifi:
                     state.try_snapshot()  # toasts NO-WIFI blocked hint
                     continue
@@ -544,7 +568,7 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                     state.set_toast("snapshot cancelled (no location)")
                     continue
                 state.try_snapshot()
-            elif key == "l":
+            elif key == KEY_SWITCH:
                 picked = _picker_curses(stdscr, conn, state.active_id)
                 if picked == "new":
                     picked = _create_location_curses(stdscr, conn)
@@ -554,7 +578,7 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                         conn, state.active_id))
                 elif picked is None:
                     state.set_toast("location switch cancelled")
-            elif key == "n":
+            elif key == KEY_NEW:
                 new_id = _create_location_curses(stdscr, conn)
                 if new_id is not None:
                     state.active_id = new_id
@@ -562,7 +586,7 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                         conn, state.active_id))
                 else:
                     state.set_toast("new location cancelled/invalid")
-            elif key == "f":
+            elif key == KEY_FLOOR:
                 if state.active_id is None:
                     state.set_toast("no active location")
                 else:
@@ -609,9 +633,10 @@ def _walk_fallback(db_path: str, interval: float,
                 print("NO-WIFI: %s (`s` blocked)" % state.no_wifi_msg)
             else:
                 print(format_signal_line(state.sig), flush=True)
+            toast, pending = state.ui_snapshot()
             print("loc: %s pending: %d %s" % (
-                _location_label(conn, state.active_id), state.pending,
-                ("» %s" % state.toast) if state.toast else ""))
+                _location_label(conn, state.active_id), pending,
+                ("» %s" % toast) if toast else ""))
             state.set_toast("")
             r, _, _ = select.select([sys.stdin], [], [], interval)
             key = ""
@@ -622,22 +647,22 @@ def _walk_fallback(db_path: str, interval: float,
                     key = ""
             else:
                 continue
-            if key in ("q", "quit", "exit"):
+            if key in QUIT_WORDS:
                 return 0
-            elif key == "s":
+            elif key == KEY_SNAPSHOT:
                 if state.no_wifi:
                     state.try_snapshot()  # toasts NO-WIFI blocked hint
-                    time.sleep(0.1)
+                    time.sleep(FALLBACK_SETTLE_SLEEP)
                     continue
                 if not _fallback_pick(conn, state):
                     continue  # picker toasted already ("cancelled", ...)
                 state.try_snapshot()
-                time.sleep(0.1)  # let fast mocks finish for toast ordering
-            elif key == "l":
+                time.sleep(FALLBACK_SETTLE_SLEEP)  # fast mocks → toast order
+            elif key == KEY_SWITCH:
                 _fallback_pick(conn, state)
-            elif key == "n":
+            elif key == KEY_NEW:
                 _fallback_create(conn, state)
-            elif key == "f":
+            elif key == KEY_FLOOR:
                 _fallback_floor(conn, state)
     except KeyboardInterrupt:
         return 0
@@ -672,24 +697,29 @@ def _fallback_pick(conn: sqlite3.Connection, state: WalkState) -> bool:
             return True  # Enter confirms prefilled active instantly
         state.set_toast("cancelled")
         return False
-    idx = pick_location_index(raw, len(locs), state.active_id)
-    if idx is None:
-        state.set_toast("cancelled")
-        return False
-    if idx == len(locs):
+    if raw == KEY_CREATE:
         before = state.active_id
         _fallback_create(conn, state)
         # create sets a fresh id on success, leaves active + error toast on fail
         return state.active_id is not None and state.active_id != before
-    state.active_id = locs[idx].id
-    return True
+    # Single digit path: picker_press owns all digit logic.
+    _, action, idx = picker_press(raw, cursor, len(locs))
+    if action == "cancel":
+        state.set_toast("cancelled")
+        return False
+    if action == "confirm" and idx is not None and idx < len(locs):
+        state.active_id = locs[idx].id
+        return True
+    state.set_toast("cancelled")
+    return False
 
 
 def _fallback_create(conn: sqlite3.Connection, state: WalkState) -> None:
     try:
         name = input("name: ").strip()
         floor = parse_floor_input(input("floor (int): ") or "0")
-        od = input("outdoors? [y/N]: ").strip().lower() in ("y", "yes", "1")
+        outdoors = input("outdoors? [y/N]: ").strip().lower() in (
+            "y", "yes", "1")
     except (EOFError, OSError, ValueError) as exc:
         state.set_toast("cancelled/invalid: %s" % (exc,))
         return
@@ -746,11 +776,18 @@ def run_walk(db_path: str, interval: float = 1.0,
 __all__ = [
     "WalkState",
     "SnapshotResult",
+    "PickerSelection",
+    "QUIT_WORDS",
+    "KEY_SNAPSHOT",
+    "KEY_SWITCH",
+    "KEY_NEW",
+    "KEY_FLOOR",
+    "KEY_QUIT",
+    "KEY_CREATE",
     "attempt_read",
     "finish_snapshot",
     "format_signal_line",
     "parse_floor_input",
-    "pick_location_index",
     "picker_move",
     "picker_press",
     "picker_start_cursor",

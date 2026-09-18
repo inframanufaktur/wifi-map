@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import threading
 
 import pytest
 
@@ -24,14 +25,14 @@ def test_format_signal_line_unknown():
     assert "None" not in line
 
 
-def test_pick_location_index_digits_and_create():
-    assert tui_mod.pick_location_index("1", 3, None) == 0
-    assert tui_mod.pick_location_index("3", 3, None) == 2
-    assert tui_mod.pick_location_index("4", 3, None) is None
-    assert tui_mod.pick_location_index("+", 3, None) == 3  # create-row sentinel
-    assert tui_mod.pick_location_index("q", 3, None) is None
-    assert tui_mod.pick_location_index("x", 3, None) is None
-    assert tui_mod.pick_location_index("", 3, None) is None
+def test_picker_press_digit_single_path():
+    # digits go through picker_press only (no parallel helper logic)
+    assert tui_mod.picker_press("1", 0, 3) == (0, "confirm", 0)
+    assert tui_mod.picker_press("3", 0, 3) == (2, "confirm", 2)
+    assert tui_mod.picker_press("4", 0, 3)[1] == "ignore"  # out of range
+    assert tui_mod.picker_press("+", 0, 3) == (3, "move", None)  # create row
+    assert tui_mod.picker_press("q", 0, 3)[1] == "cancel"
+    assert tui_mod.picker_press("x", 0, 3)[1] == "ignore"
 
 
 def test_picker_start_cursor_prefills_active():
@@ -292,3 +293,139 @@ def test_walk_state_poll_unknown_after_retries(monkeypatch, tmp_path):
     st.poll()
     assert st.sig == signal_mod.Signal()  # UNKNOWN, no crash
     assert st.no_wifi is False
+
+
+def test_concurrent_snapshot_callbacks_counter_exact(tmp_path):
+    st = tui_mod.WalkState(str(tmp_path / "w.db"))
+    n = 50
+    with st._lock:
+        st.pending = n
+    threads = [
+        threading.Thread(
+            target=st.on_snapshot_done,
+            args=(tui_mod.SnapshotResult(ok=True, reading_id=i,
+                                         message="saved #%d" % i),),
+        )
+        for i in range(n)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+    assert not any(t.is_alive() for t in threads)
+    toast, pending = st.ui_snapshot()
+    assert pending == 0  # no lost decrement under lock
+    assert toast.startswith("saved #")
+
+
+def test_resolve_preset_routes(tmp_path):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        lid = store_mod.create_location(conn, "den", floor=0)
+        assert tui_mod._resolve_preset(conn, None) is None
+        assert tui_mod._resolve_preset(conn, "den") == lid
+        assert tui_mod._resolve_preset(conn, str(lid)) == lid
+        # unknown int id → None (caller toasts "unknown preset ...")
+        assert tui_mod._resolve_preset(conn, 9999) is None
+        # unknown name auto-creates per resolve_location semantics
+        new_id = tui_mod._resolve_preset(conn, "brand-new-room")
+        assert isinstance(new_id, int) and new_id != lid
+    finally:
+        conn.close()
+
+
+def test_location_label_states(tmp_path, monkeypatch):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        assert tui_mod._location_label(conn, None) == "(none)"
+        lid = store_mod.create_location(conn, "lab", floor=1)
+        assert tui_mod._location_label(conn, lid) == "#%d lab (floor 1)" % lid
+        assert "deleted" in tui_mod._location_label(conn, lid + 999)
+
+        def _boom(conn_arg, loc_id):
+            import sqlite3
+            raise sqlite3.Error("locked")
+
+        monkeypatch.setattr(store_mod, "get_location", _boom)
+        assert "db error" in tui_mod._location_label(conn, lid)
+    finally:
+        conn.close()
+
+
+def test_try_snapshot_success_path(tmp_path):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        lid = store_mod.create_location(conn, "den", floor=0)
+    finally:
+        conn.close()
+    st = tui_mod.WalkState(db, no_speedtest=True)
+    st.active_id = lid
+    st.sig = signal_mod.Signal(ssid="h", rssi=-60, noise=-90, snr=30)
+    t = st.try_snapshot()
+    assert t is not None
+    t.join(timeout=10)
+    toast, pending = st.ui_snapshot()
+    assert pending == 0
+    assert "saved #" in toast
+    conn = store_mod.get_db(db)
+    try:
+        rows = store_mod.list_readings(conn)
+        assert len(rows) == 1
+        assert rows[0]["rssi"] == -60
+        assert rows[0]["location_id"] == lid
+    finally:
+        conn.close()
+
+
+def test_run_walk_rejects_bad_interval(capsys, tmp_path):
+    assert tui_mod.run_walk(str(tmp_path / "w.db"), interval=0) == 3
+    _, err = capsys.readouterr()
+    assert "--interval" in err
+    assert tui_mod.run_walk(str(tmp_path / "w.db"), interval=-1.0) == 3
+
+
+def test_fallback_create_valid_and_invalid(monkeypatch, tmp_path):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        st = tui_mod.WalkState(db)
+        answers = iter(["garden", "0", "y"])
+        monkeypatch.setattr("builtins.input",
+                            lambda *args: next(answers))
+        tui_mod._fallback_create(conn, st)
+        assert st.active_id is not None
+        loc = store_mod.get_location(conn, st.active_id)
+        assert loc is not None and loc.name == "garden"
+        assert loc.outdoors is True
+        # invalid floor → toast, active untouched
+        before = st.active_id
+        answers = iter(["shed", "notanint", "n"])
+        monkeypatch.setattr("builtins.input",
+                            lambda *args: next(answers))
+        tui_mod._fallback_create(conn, st)
+        assert st.active_id == before
+        assert "cancelled" in st.ui_snapshot()[0].lower()
+    finally:
+        conn.close()
+
+
+def test_fallback_floor_valid_and_invalid(monkeypatch, tmp_path):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        lid = store_mod.create_location(conn, "office", floor=0)
+        st = tui_mod.WalkState(db)
+        st.active_id = lid
+        monkeypatch.setattr("builtins.input", lambda *args: "2")
+        tui_mod._fallback_floor(conn, st)
+        assert store_mod.get_location(conn, lid).floor == 2
+        assert "2" in st.ui_snapshot()[0]
+        monkeypatch.setattr("builtins.input", lambda *args: "bad")
+        tui_mod._fallback_floor(conn, st)
+        assert store_mod.get_location(conn, lid).floor == 2
+        assert "integer" in st.ui_snapshot()[0].lower()
+    finally:
+        conn.close()
