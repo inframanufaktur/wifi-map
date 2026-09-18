@@ -6,9 +6,11 @@ from wifimap.store import (
     add_reading,
     create_location,
     get_db,
+    get_location,
     list_locations,
     list_readings,
     resolve_location,
+    update_location_floor,
 )
 
 
@@ -150,6 +152,36 @@ def test_create_location_empty_name_raises(db):
         create_location(db, "")
     with pytest.raises(ValueError):
         resolve_location(db, "")
+
+
+def test_get_location_existing_and_missing(db):
+    lid = create_location(db, "nook", floor=2, outdoors=True)
+    loc = get_location(db, lid)
+    assert loc is not None
+    assert (loc.id, loc.name, loc.floor, loc.outdoors) == (lid, "nook", 2, True)
+    assert get_location(db, 9999) is None
+
+
+def test_update_location_floor_persists(db):
+    lid = create_location(db, "attic", floor=0)
+    update_location_floor(db, lid, -1)
+    loc = get_location(db, lid)
+    assert loc is not None and loc.floor == -1
+
+
+def test_update_location_floor_unknown_raises(db):
+    with pytest.raises(ValueError):
+        update_location_floor(db, 9999, 1)
+
+
+def test_update_location_floor_unique_conflict(db):
+    a = create_location(db, "dup", floor=0)
+    b = create_location(db, "dup", floor=1)
+    with pytest.raises(sqlite3.IntegrityError):
+        update_location_floor(db, b, 0)
+    # failed update left the row untouched
+    assert get_location(db, b).floor == 1
+    assert get_location(db, a).floor == 0
 
 
 def test_get_db_enables_wal_and_fk(tmp_path):

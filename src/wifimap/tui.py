@@ -58,6 +58,56 @@ def pick_location_index(keypress: str, count: int, active: Optional[int]) -> Opt
     return None
 
 
+def picker_start_cursor(loc_ids: List[int],
+                        active: Optional[int]) -> int:
+    """Cursor position with the active location preselected (spec §1).
+
+    Positions ``0..count-1`` are locations, ``count`` is the create row.
+    Returns the active index, or 0 when active is unset/missing/empty.
+    """
+    if active is not None:
+        try:
+            return loc_ids.index(active)
+        except ValueError:
+            pass
+    return 0
+
+
+def picker_move(cursor: int, direction: int, count: int) -> int:
+    """Move cursor ±1 with wraparound over locations + create row."""
+    total = count + 1  # create row always exists, even with zero locations
+    return (cursor + direction) % total
+
+
+def picker_press(keypress: str, cursor: int,
+                 count: int) -> Tuple[int, str, Optional[int]]:
+    """Pure picker key model; cursor roams ``0..count`` (``count`` = create).
+
+    Returns ``(new_cursor, action, index)`` with action one of:
+    - ``"confirm"``: Enter (``""``/``"\\n"``/``"\\r"``/``"enter"``) confirms
+      the cursor, digits ``1``-``9`` jump to and confirm that row.
+      ``index == count`` means the create row.
+    - ``"move"``: arrows (``"up"``/``"down"``) or ``"+"`` reposition the
+      cursor (``"+"`` jumps to the create row); keep waiting.
+    - ``"cancel"``: ``q``/Escape; ``"ignore"``: anything else.
+    """
+    if keypress in ("", "\n", "\r", "enter"):
+        return (cursor, "confirm", cursor)
+    if keypress in ("q", "Q", "\x1b", "esc"):
+        return (cursor, "cancel", None)
+    if keypress in ("up", "down"):
+        step = -1 if keypress == "up" else 1
+        return (picker_move(cursor, step, count), "move", None)
+    if keypress == "+":
+        return (count, "move", None)
+    if len(keypress) == 1 and "1" <= keypress <= "9":
+        idx = int(keypress) - 1
+        if 0 <= idx < count:
+            return (idx, "confirm", idx)
+        return (cursor, "ignore", None)
+    return (cursor, "ignore", None)
+
+
 def parse_floor_input(s: str) -> int:
     """Parse floor int (negative = basement); raises ValueError on bad input."""
     t = s.strip()
@@ -271,15 +321,11 @@ class WalkState:
         if self.active_id is None:
             return "no active location"
         try:
-            cur = conn.execute(
-                "UPDATE locations SET floor = ? WHERE id = ?",
-                (floor, self.active_id),
-            )
-            conn.commit()
+            store_mod.update_location_floor(conn, self.active_id, floor)
+        except ValueError:
+            return "unknown location id: %r" % (self.active_id,)
         except (sqlite3.Error, OSError) as exc:
             return "DB error: %s" % (exc,)
-        if cur.rowcount == 0:
-            return "unknown location id: %r" % (self.active_id,)
         return "floor set to %d" % floor
 
 
@@ -296,15 +342,12 @@ def _location_label(conn: sqlite3.Connection, loc_id: Optional[int]) -> str:
     if loc_id is None:
         return "(none)"
     try:
-        row = conn.execute(
-            "SELECT name, floor FROM locations WHERE id = ?",
-            (loc_id,),
-        ).fetchone()
-    except (sqlite3.Error, OSError):
+        loc = store_mod.get_location(conn, loc_id)
+    except (sqlite3.Error, OSError, ValueError):
         return "#%s (db error)" % loc_id
-    if row is None:
+    if loc is None:
         return "#%s (deleted?)" % loc_id
-    return "#%s %s (floor %s)" % (loc_id, row[0], row[1])
+    return "#%s %s (floor %s)" % (loc.id, loc.name, loc.floor)
 
 
 # ---------------------------------------------------------------------------
@@ -313,43 +356,62 @@ def _location_label(conn: sqlite3.Connection, loc_id: Optional[int]) -> str:
 
 def _picker_curses(stdscr: object, conn: sqlite3.Connection,
                    active: Optional[int]) -> Optional[int]:
-    """Numbered-list picker; returns location id, 'new' sentinel, or None.
+    """Numbered-list picker prefilled with active; returns id/``"new"``/None.
 
-    Returns ``"new"`` string sentinel when the ``+`` create row is chosen
-    (caller prompts for name/floor/outdoors). Any other cancel → None.
+    The cursor starts on the active row (spec §1 prefill), so a single
+    Enter confirms instantly for fast walkthroughs. Arrows roam,
+    digits jump+confirm, ``+`` jumps to the create row, ``q`` cancels.
+    Returns ``"new"`` string sentinel when the create row is confirmed
+    (caller prompts for name/floor/outdoors). Cancel → None.
     """
+    import curses
+
     locs = store_mod.list_locations(conn)
-    lines = ["Pick location (1-%d, + new, q cancel):" % len(locs)]
-    for i, loc in enumerate(locs):
-        mark = "*" if loc.id == active else " "
-        lines.append("%s%d. %s (floor %d%s)" % (
-            mark, i + 1, loc.name, loc.floor,
-            ", outdoors" if loc.outdoors else ""))
-    lines.append("  +. <new location>")
-    h, w = stdscr.getmaxyx()  # type: ignore[attr-defined]
-    stdscr.clear()  # type: ignore[attr-defined]
-    for r, ln in enumerate(lines[: h - 1]):
-        try:
-            stdscr.addstr(r, 0, ln[: w - 1])  # type: ignore[attr-defined]
-        except Exception:
-            pass
-    stdscr.refresh()  # type: ignore[attr-defined]
+    ids = [loc.id for loc in locs]
+    cursor = picker_start_cursor(ids, active)
     stdscr.timeout(-1)  # type: ignore[attr-defined]  # blocking for picker
     try:
         while True:
+            h, w = stdscr.getmaxyx()  # type: ignore[attr-defined]
+            lines = ["Pick location (Enter=active, 1-%d, + new, q cancel):"
+                     % len(locs)]
+            for i, loc in enumerate(locs):
+                cur = ">" if i == cursor else " "
+                mark = "*" if loc.id == active else " "
+                lines.append("%s%s%d. %s (floor %d%s)" % (
+                    cur, mark, i + 1, loc.name, loc.floor,
+                    ", outdoors" if loc.outdoors else ""))
+            lines.append("%s  +. <new location>" % (
+                ">" if cursor == len(locs) else " ",))
+            stdscr.clear()  # type: ignore[attr-defined]
+            for r, ln in enumerate(lines[: h - 1]):
+                try:
+                    stdscr.addstr(r, 0, ln[: w - 1])  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+            stdscr.refresh()  # type: ignore[attr-defined]
             ch = stdscr.getch()  # type: ignore[attr-defined]
-            if ch in (27, ord("q"), ord("Q")):
+            if ch == curses.KEY_UP:
+                key = "up"
+            elif ch == curses.KEY_DOWN:
+                key = "down"
+            elif ch in (10, 13, curses.KEY_ENTER):
+                key = "\n"
+            elif ch == 27:
+                key = "\x1b"
+            else:
+                try:
+                    key = chr(ch)
+                except (ValueError, OverflowError):
+                    continue
+            cursor, action, idx = picker_press(key, cursor, len(locs))
+            if action == "cancel":
                 return None
-            try:
-                key = chr(ch)
-            except (ValueError, OverflowError):
-                continue
-            idx = pick_location_index(key, len(locs), active)
-            if idx is None:
-                continue
-            if idx == len(locs):
-                return "new"  # type: ignore[return-value]
-            return locs[idx].id
+            if action == "confirm" and idx is not None:
+                if idx == len(locs):
+                    return "new"  # type: ignore[return-value]
+                return locs[idx].id
+            # "move"/"ignore" → re-render with updated cursor
     finally:
         stdscr.timeout(1000)  # type: ignore[attr-defined]
 
@@ -468,15 +530,19 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
             if key in ("q", "Q"):
                 return 0
             elif key == "s":
-                if state.active_id is None and not state.no_wifi:
-                    picked = _picker_curses(stdscr, conn, state.active_id)
-                    if picked == "new":
-                        picked = _create_location_curses(stdscr, conn)
-                    if isinstance(picked, int):
-                        state.active_id = picked
-                    else:
-                        state.set_toast("snapshot cancelled (no location)")
-                        continue
+                if state.no_wifi:
+                    state.try_snapshot()  # toasts NO-WIFI blocked hint
+                    continue
+                # Always via picker prefilled with active (spec §1):
+                # single Enter confirms instantly for fast walkthroughs.
+                picked = _picker_curses(stdscr, conn, state.active_id)
+                if picked == "new":
+                    picked = _create_location_curses(stdscr, conn)
+                if isinstance(picked, int):
+                    state.active_id = picked
+                else:
+                    state.set_toast("snapshot cancelled (no location)")
+                    continue
                 state.try_snapshot()
             elif key == "l":
                 picked = _picker_curses(stdscr, conn, state.active_id)
@@ -559,11 +625,12 @@ def _walk_fallback(db_path: str, interval: float,
             if key in ("q", "quit", "exit"):
                 return 0
             elif key == "s":
-                if state.active_id is None and not state.no_wifi:
-                    _fallback_pick(conn, state)
-                    if state.active_id is None:
-                        state.set_toast("snapshot cancelled")
-                        continue
+                if state.no_wifi:
+                    state.try_snapshot()  # toasts NO-WIFI blocked hint
+                    time.sleep(0.1)
+                    continue
+                if not _fallback_pick(conn, state):
+                    continue  # picker toasted already ("cancelled", ...)
                 state.try_snapshot()
                 time.sleep(0.1)  # let fast mocks finish for toast ordering
             elif key == "l":
@@ -578,27 +645,44 @@ def _walk_fallback(db_path: str, interval: float,
         conn.close()
 
 
-def _fallback_pick(conn: sqlite3.Connection, state: WalkState) -> None:
+def _fallback_pick(conn: sqlite3.Connection, state: WalkState) -> bool:
+    """Line-based picker prefilled with active; empty input confirms it.
+
+    Returns True when a location is selected, False on cancel.
+    """
     try:
         locs = store_mod.list_locations(conn)
     except (sqlite3.Error, OSError) as exc:
         state.set_toast("DB error: %s" % (exc,))
-        return
+        return False
+    ids = [loc.id for loc in locs]
+    cursor = picker_start_cursor(ids, state.active_id)
     for i, loc in enumerate(locs):
-        print("%d. %s (floor %d)" % (i + 1, loc.name, loc.floor))
-    print("+. <new location>")
+        cur = ">" if i == cursor else " "
+        mark = "*" if loc.id == state.active_id else " "
+        print("%s%s%d. %s (floor %d)" % (cur, mark, i + 1, loc.name, loc.floor))
+    print("%s  +. <new location>" % (">" if cursor == len(locs) else " ",))
     try:
-        raw = input("pick [1-%d,+]: " % len(locs)).strip()
+        raw = input("pick [Enter=active, 1-%d,+]: " % len(locs)).strip()
     except (EOFError, OSError):
         state.set_toast("cancelled")
-        return
+        return False
+    if raw == "":
+        if state.active_id is not None and state.active_id in ids:
+            return True  # Enter confirms prefilled active instantly
+        state.set_toast("cancelled")
+        return False
     idx = pick_location_index(raw, len(locs), state.active_id)
     if idx is None:
         state.set_toast("cancelled")
-    elif idx == len(locs):
+        return False
+    if idx == len(locs):
+        before = state.active_id
         _fallback_create(conn, state)
-    else:
-        state.active_id = locs[idx].id
+        # create sets a fresh id on success, leaves active + error toast on fail
+        return state.active_id is not None and state.active_id != before
+    state.active_id = locs[idx].id
+    return True
 
 
 def _fallback_create(conn: sqlite3.Connection, state: WalkState) -> None:
@@ -667,6 +751,9 @@ __all__ = [
     "format_signal_line",
     "parse_floor_input",
     "pick_location_index",
+    "picker_move",
+    "picker_press",
+    "picker_start_cursor",
     "snapshot_payload",
     "start_snapshot_thread",
     "run_walk",

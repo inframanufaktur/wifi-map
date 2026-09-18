@@ -34,6 +34,67 @@ def test_pick_location_index_digits_and_create():
     assert tui_mod.pick_location_index("", 3, None) is None
 
 
+def test_picker_start_cursor_prefills_active():
+    assert tui_mod.picker_start_cursor([10, 20, 30], 20) == 1
+    assert tui_mod.picker_start_cursor([10, 20, 30], None) == 0
+    assert tui_mod.picker_start_cursor([10, 20, 30], 9999) == 0
+    assert tui_mod.picker_start_cursor([], None) == 0
+
+
+def test_picker_move_wraps_over_create_row():
+    assert tui_mod.picker_move(0, 1, 2) == 1
+    assert tui_mod.picker_move(2, 1, 2) == 0  # last loc wraps (create row is 2)
+    assert tui_mod.picker_move(0, -1, 2) == 2  # up from top → create row
+    assert tui_mod.picker_move(0, 1, 0) == 0  # empty list: only create row
+
+
+def test_picker_press_enter_confirms_prefilled_cursor():
+    # single Enter confirms the prefilled active instantly (spec §1)
+    assert tui_mod.picker_press("", 1, 3) == (1, "confirm", 1)
+    assert tui_mod.picker_press("\n", 1, 3) == (1, "confirm", 1)
+    assert tui_mod.picker_press("\r", 2, 3) == (2, "confirm", 2)
+    assert tui_mod.picker_press("enter", 0, 0) == (0, "confirm", 0)
+
+
+def test_picker_press_arrows_and_create():
+    assert tui_mod.picker_press("down", 0, 2) == (1, "move", None)
+    assert tui_mod.picker_press("up", 0, 2) == (2, "move", None)
+    assert tui_mod.picker_press("+", 0, 2) == (2, "move", None)
+    assert tui_mod.picker_press("1", 2, 3) == (0, "confirm", 0)
+    assert tui_mod.picker_press("9", 0, 3)[1] == "ignore"
+    assert tui_mod.picker_press("q", 1, 3) == (1, "cancel", None)
+    assert tui_mod.picker_press("\x1b", 1, 3) == (1, "cancel", None)
+    assert tui_mod.picker_press("x", 1, 3) == (1, "ignore", None)
+
+
+def test_fallback_pick_enter_confirms_active(monkeypatch, tmp_path):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        a = store_mod.create_location(conn, "room-a", floor=0)
+        store_mod.create_location(conn, "room-b", floor=1)
+        st = tui_mod.WalkState(db)
+        st.active_id = a
+        monkeypatch.setattr("builtins.input", lambda *args: "")
+        assert tui_mod._fallback_pick(conn, st) is True
+        assert st.active_id == a  # prefilled active kept
+    finally:
+        conn.close()
+
+
+def test_fallback_pick_cancel(monkeypatch, tmp_path):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        store_mod.create_location(conn, "room-a", floor=0)
+        st = tui_mod.WalkState(db)
+        monkeypatch.setattr("builtins.input", lambda *args: "q")
+        assert tui_mod._fallback_pick(conn, st) is False
+        assert st.active_id is None
+    finally:
+        conn.close()
+
+
 def test_parse_floor_input_ok_and_negative():
     assert tui_mod.parse_floor_input("0") == 0
     assert tui_mod.parse_floor_input(" 2 ") == 2
@@ -204,6 +265,20 @@ def test_walk_state_set_floor(tmp_path):
         assert locs["attic"].floor == 1
         with pytest.raises(ValueError):
             tui_mod.parse_floor_input("bad")
+    finally:
+        conn.close()
+
+
+def test_walk_state_set_floor_unique_conflict_toasts(tmp_path):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        store_mod.create_location(conn, "dup", floor=0)
+        other = store_mod.create_location(conn, "dup", floor=1)
+        st = tui_mod.WalkState(db)
+        st.active_id = other
+        assert "DB error" in st.set_floor(conn, 0)
+        assert store_mod.get_location(conn, other).floor == 1
     finally:
         conn.close()
 

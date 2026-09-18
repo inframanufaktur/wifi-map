@@ -97,6 +97,44 @@ def list_locations(conn: sqlite3.Connection) -> List[Location]:
     ]
 
 
+def get_location(
+    conn: sqlite3.Connection,
+    location_id: int,
+) -> Optional[Location]:
+    """Return a Location by id, or None if no such row."""
+    if isinstance(location_id, bool):
+        raise ValueError("invalid location id: %r" % (location_id,))
+    row = conn.execute(
+        "SELECT id, name, floor, outdoors FROM locations WHERE id = ?",
+        (location_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return Location(id=row[0], name=row[1], floor=row[2],
+                    outdoors=bool(row[3]))
+
+
+def update_location_floor(
+    conn: sqlite3.Connection,
+    location_id: int,
+    floor: int,
+) -> None:
+    """Set a location's floor; raises ValueError if the id is unknown.
+
+    UNIQUE(name, floor) conflicts surface as ``sqlite3.IntegrityError``
+    (the failed update leaves the row untouched).
+    """
+    if isinstance(location_id, bool):
+        raise ValueError("invalid location id: %r" % (location_id,))
+    cur = conn.execute(
+        "UPDATE locations SET floor = ? WHERE id = ?",
+        (floor, location_id),
+    )
+    conn.commit()
+    if cur.rowcount == 0:
+        raise ValueError("unknown location id: %r" % (location_id,))
+
+
 def resolve_location(
     conn: sqlite3.Connection,
     id_or_name: Union[int, str],
