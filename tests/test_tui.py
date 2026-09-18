@@ -480,3 +480,21 @@ def test_rate_rssi_snr_thresholds():
     assert tui_mod.rate_snr(20) == "OK"
     assert tui_mod.rate_snr(5) == "WEAK"
     assert tui_mod.rate_snr(None) == "UNKNOWN"
+
+
+def test_sparkline_vectors_gaps_and_window():
+    h = tui_mod.SparkHistory(maxlen=8)
+    for v in [-90, -70, -50, -30]:
+        h.append(v)
+    line = h.sparkline(-90, -30, 4)
+    assert line == "▁▃▆█"
+    h2 = tui_mod.SparkHistory(maxlen=8)
+    h2.append(-50)
+    h2.append(None)
+    h2.append(-50)
+    assert h2.sparkline(-90, -30, 3)[1] == " "
+    h3 = tui_mod.SparkHistory(maxlen=3)
+    for v in [1, 2, 3, 4]:
+        h3.append(v)
+    assert h3.sparkline(1, 4, 10) == "▃▆█"
+    assert tui_mod.SparkHistory(maxlen=4).sparkline(0, 1, 4) == ""

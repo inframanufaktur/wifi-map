@@ -10,10 +10,12 @@ callbacks and UI-thread reads are serialized by ``WalkState._lock``.
 from __future__ import annotations
 
 import copy
+import math
 import sqlite3
 import sys
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Literal, Optional, Tuple, Union
 
@@ -98,6 +100,43 @@ def rate_snr(v: Optional[int]) -> str:
     if v >= 15:
         return "OK"
     return "WEAK"
+
+
+_SPARK_CHARS = "▁▂▃▄▅▆▇█"
+
+
+class SparkHistory:
+    """Fixed-length sample ring; renders ASCII block sparkline."""
+
+    def __init__(self, maxlen: int = 60) -> None:
+        self._buf: deque = deque(maxlen=max(1, maxlen))
+
+    def append(self, v: Optional[float]) -> None:
+        self._buf.append(v)
+
+    def sparkline(self, lo: float, hi: float, width: int) -> str:
+        vals = list(self._buf)[-width:] if width > 0 else []
+        if not vals:
+            return ""
+        span = hi - lo
+        out = []
+        for v in vals:
+            if v is None:
+                out.append(" ")
+                continue
+            if span <= 0:
+                lvl = 7
+            else:
+                frac = (v - lo) / span
+                frac = 0.0 if frac < 0.0 else (1.0 if frac > 1.0 else frac)
+                lvl = int(round(frac * 7))
+            out.append(_SPARK_CHARS[lvl])
+        return "".join(out)
+
+
+def history_cap(interval: float) -> int:
+    """Samples covering ~60s at the poll interval; at least 1."""
+    return max(1, int(math.ceil(60.0 / interval)))
 
 
 def picker_start_cursor(loc_ids: List[int],
@@ -888,6 +927,7 @@ __all__ = [
     "finish_snapshot",
     "format_net_line",
     "format_signal_line",
+    "history_cap",
     "parse_floor_input",
     "picker_move",
     "picker_press",
@@ -895,6 +935,7 @@ __all__ = [
     "rate_rssi",
     "rate_snr",
     "snapshot_payload",
+    "SparkHistory",
     "start_snapshot_thread",
     "run_walk",
 ]
