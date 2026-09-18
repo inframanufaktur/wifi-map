@@ -31,6 +31,7 @@ from wifimap import store as store_mod
 # ---------------------------------------------------------------------------
 
 KEY_SNAPSHOT = "s"
+KEY_BENCHMARK = "b"
 KEY_SWITCH = "l"
 KEY_NEW = "n"
 KEY_FLOOR = "f"
@@ -450,6 +451,68 @@ def start_snapshot_thread(
     return t
 
 
+def _finish_benchmark(
+    db_path: str,
+    location_id: int,
+    sig_dict: Dict[str, object],
+    note: str = "",
+    run_speedtest_fn: Optional[Callable[[], speed_mod.Speed]] = None,
+    no_speedtest: bool = False,
+) -> SnapshotResult:
+    """Run speedtest (unless skipped) + upsert benchmark on fresh connection.
+
+    Mirrors ``finish_snapshot`` but writes the per-location benchmark row
+    instead of a reading. Always opens/closes its OWN ``store.get_db``
+    connection — never share the UI thread's connection.
+    """
+    ping_ms = down = up = None
+    server: Optional[str] = None
+    if not no_speedtest:
+        fn = run_speedtest_fn or speed_mod.run_speedtest
+        try:
+            sp = fn()
+            ping_ms, down, up, server = (
+                sp.ping_ms, sp.down_mbps, sp.up_mbps, sp.server)
+        except speed_mod.SpeedtestUnavailableError:
+            ping_ms, down, up, server = None, None, None, None
+        except speed_mod.SpeedtestFailedError:
+            ping_ms, down, up, server = None, None, None, "ERROR"
+    try:
+        conn = store_mod.get_db(db_path)
+    except (sqlite3.Error, OSError) as exc:
+        return SnapshotResult(ok=False, message="DB error: %s" % (exc,))
+    try:
+        try:
+            store_mod.set_benchmark(
+                conn, location_id,
+                ssid=sig_dict.get("ssid"),  # type: ignore[arg-type]
+                bssid=sig_dict.get("bssid"),  # type: ignore[arg-type]
+                rssi=sig_dict.get("rssi"),  # type: ignore[arg-type]
+                noise=sig_dict.get("noise"),  # type: ignore[arg-type]
+                snr=sig_dict.get("snr"),  # type: ignore[arg-type]
+                channel=sig_dict.get("channel"),  # type: ignore[arg-type]
+                phy=sig_dict.get("phy"),  # type: ignore[arg-type]
+                tx_rate=sig_dict.get("tx_rate"),  # type: ignore[arg-type]
+                ping_ms=ping_ms, down_mbps=down,  # type: ignore[arg-type]
+                up_mbps=up,  # type: ignore[arg-type]
+                server=server,
+                note=note or None,
+            )
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            return SnapshotResult(ok=False, message="DB error: %s" % (exc,))
+    finally:
+        conn.close()
+
+    def _d(v: object) -> str:
+        return "-" if v is None else str(v)
+
+    return SnapshotResult(
+        ok=True,
+        message="benchmark set for #%d rssi=%s snr=%s down=%s up=%s" % (
+            location_id, _d(sig_dict.get("rssi")), _d(sig_dict.get("snr")),
+            _d(down), _d(up)))
+
+
 # ---------------------------------------------------------------------------
 # Walk state (shared by curses + fallback loops)
 # ---------------------------------------------------------------------------
@@ -482,6 +545,8 @@ class WalkState:
         self.no_wifi_msg: str = ""
         self.toast: str = ""
         self.pending: int = 0
+        self.last_result: str = ""
+        self.benchmark: Optional[dict] = None
         self.net_ssid: Optional[str] = None
         self.net_bssid: Optional[str] = None
         self.ip: Optional[str] = None
@@ -572,6 +637,21 @@ class WalkState:
             self.pending = max(0, self.pending - 1)
             self.toast = (res.message if res.message else (
                 "saved #%s" % res.reading_id))
+            self.last_result = self.toast
+
+    def refresh_benchmark(self, conn: sqlite3.Connection) -> None:
+        """Reload benchmark for the active location; keeps old on DB error."""
+        lid = self.active_location_id
+        if lid is None:
+            with self._lock:
+                self.benchmark = None
+            return
+        try:
+            bench = store_mod.get_benchmark(conn, lid)
+        except Exception:  # noqa: BLE001 - bench line is best-effort
+            return
+        with self._lock:
+            self.benchmark = bench
 
     def poll(self, read_fn: Optional[Callable[[], signal_mod.Signal]] = None) -> None:
         fn = read_fn or signal_mod.read_signal
@@ -613,6 +693,21 @@ class WalkState:
         def _cb(res: SnapshotResult) -> None:
             result_box.append(res)
             self.on_snapshot_done(res)
+            if res.ok:
+                try:
+                    frozen = snapshot_payload(sig_copy)
+                    cur = {"rssi": frozen.get("rssi"),
+                           "snr": frozen.get("snr"),
+                           "down_mbps": None, "up_mbps": None}
+                    with self._lock:
+                        bench = self.benchmark
+                    delta = store_mod.format_benchmark_delta(cur, bench)
+                    if delta:
+                        with self._lock:
+                            self.last_result = "%s vs bench (%s)" % (
+                                self.last_result, delta)
+                except Exception:  # noqa: BLE001 - delta is best-effort
+                    pass
 
         t = start_snapshot_thread(
             self.db_path, loc_id, sig_copy,
@@ -904,6 +999,7 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                       ssid_override=ssid, history_max=cap)
     try:
         state.active_location_id = _resolve_preset(conn, location_preset)
+        state.refresh_benchmark(conn)
         state.ensure_identity()
         state.ensure_addrs()
         if location_preset is not None and state.active_location_id is None:
@@ -1033,7 +1129,22 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                 toast, pending = state.ui_snapshot()
                 _emit("loc: %s  pending: %d" % (
                     _location_label(conn, state.active_spot_id), pending))
-                _emit("keys: s snapshot | l switch | n new | "
+                with state._lock:
+                    _bench = state.benchmark
+                    _last = state.last_result
+                if _bench is not None:
+                    _emit("bench: rssi %s snr %s down %s up %s" % (
+                        "-" if _bench.get("rssi") is None
+                        else _bench.get("rssi"),
+                        "-" if _bench.get("snr") is None
+                        else _bench.get("snr"),
+                        "-" if _bench.get("down_mbps") is None
+                        else _bench.get("down_mbps"),
+                        "-" if _bench.get("up_mbps") is None
+                        else _bench.get("up_mbps")))
+                if _last:
+                    _emit("last: %s" % _last)
+                _emit("keys: s snapshot | b benchmark | l switch | n new | "
                       "f floor | q quit")
                 if toast:
                     _emit("» %s" % toast)
@@ -1062,6 +1173,40 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                     state.set_toast("snapshot cancelled (no spot)")
                     continue
                 state.try_snapshot()
+            elif key == KEY_BENCHMARK:
+                if state.no_wifi:
+                    state.set_toast(
+                        "NO-WIFI: `b` blocked (WiFi off/not associated)")
+                    continue
+                if state.active_location_id is None:
+                    state.set_toast(
+                        "no preset location: rerun with --location")
+                    continue
+                bench_sig = copy.deepcopy(state.sig)
+                if state.ssid_override is not None:
+                    bench_sig.ssid = state.ssid_override
+                note = _prompt_curses(
+                    stdscr, "benchmark note: ",
+                    poll_timeout_ms).strip()
+                try:
+                    existing = store_mod.get_benchmark(
+                        conn, state.active_location_id)
+                except (sqlite3.Error, OSError, ValueError):
+                    existing = None
+                if existing is not None:
+                    ans = _prompt_curses(
+                        stdscr, "Overwrite benchmark? [y/N] ",
+                        poll_timeout_ms).strip().lower()
+                    if ans not in ("y", "yes"):
+                        state.set_toast("benchmark kept")
+                        continue
+                res = _finish_benchmark(
+                    state.db_path, state.active_location_id,
+                    snapshot_payload(bench_sig), note=note,
+                    no_speedtest=state.no_speedtest)
+                state.set_toast(res.message)
+                if res.ok:
+                    state.refresh_benchmark(conn)
             elif key == KEY_SWITCH:
                 if _pick_room_spot_curses(
                         stdscr, conn, state, poll_timeout_ms):
@@ -1116,7 +1261,7 @@ def _walk_fallback(db_path: str, interval: float,
     """ANSI fallback when curses/tty unavailable.
 
     Limit: keys are line-buffered (type a key + Enter); no live refresh
-    while waiting for input. Same ``s``/``l``/``n``/``f``/``q`` keys.
+    while waiting for input. Same ``s``/``b``/``l``/``n``/``f``/``q`` keys.
     """
     import select
 
@@ -1130,10 +1275,11 @@ def _walk_fallback(db_path: str, interval: float,
                       ssid_override=ssid, history_max=cap)
     try:
         state.active_location_id = _resolve_preset(conn, location_preset)
+        state.refresh_benchmark(conn)
         state.ensure_identity()
         state.ensure_addrs()
         if location_preset is None:
-            print("walk fallback (no curses): keys s/l/n/f/q + Enter",
+            print("walk fallback (no curses): keys s/b/l/n/f/q + Enter",
                   flush=True)
         while True:
             state.poll()
@@ -1218,6 +1364,20 @@ def _walk_fallback(db_path: str, interval: float,
             print("loc: %s pending: %d %s" % (
                 _location_label(conn, state.active_spot_id), pending,
                 ("» %s" % toast) if toast else ""))
+            with state._lock:
+                _bench = state.benchmark
+                _last = state.last_result
+            if _bench is not None:
+                print("bench: rssi %s snr %s down %s up %s" % (
+                    "-" if _bench.get("rssi") is None
+                    else _bench.get("rssi"),
+                    "-" if _bench.get("snr") is None else _bench.get("snr"),
+                    "-" if _bench.get("down_mbps") is None
+                    else _bench.get("down_mbps"),
+                    "-" if _bench.get("up_mbps") is None
+                    else _bench.get("up_mbps")), flush=True)
+            if _last:
+                print("last: %s" % _last, flush=True)
             state.set_toast("")
             r, _, _ = select.select([sys.stdin], [], [], interval)
             key = ""
@@ -1239,6 +1399,44 @@ def _walk_fallback(db_path: str, interval: float,
                     continue  # picker toasted already ("cancelled", ...)
                 state.try_snapshot()
                 time.sleep(FALLBACK_SETTLE_SLEEP)  # fast mocks → toast order
+            elif key == KEY_BENCHMARK:
+                if state.no_wifi:
+                    state.set_toast(
+                        "NO-WIFI: `b` blocked (WiFi off/not associated)")
+                    time.sleep(FALLBACK_SETTLE_SLEEP)
+                    continue
+                if state.active_location_id is None:
+                    state.set_toast(
+                        "no preset location: rerun with --location")
+                    continue
+                bench_sig = copy.deepcopy(state.sig)
+                if state.ssid_override is not None:
+                    bench_sig.ssid = state.ssid_override
+                try:
+                    note = input("benchmark note: ").strip()
+                except (EOFError, OSError):
+                    note = ""
+                try:
+                    existing = store_mod.get_benchmark(
+                        conn, state.active_location_id)
+                except (sqlite3.Error, OSError, ValueError):
+                    existing = None
+                if existing is not None:
+                    try:
+                        ans = input(
+                            "Overwrite benchmark? [y/N] ").strip().lower()
+                    except (EOFError, OSError):
+                        ans = ""
+                    if ans not in ("y", "yes"):
+                        state.set_toast("benchmark kept")
+                        continue
+                res = _finish_benchmark(
+                    state.db_path, state.active_location_id,
+                    snapshot_payload(bench_sig), note=note,
+                    no_speedtest=state.no_speedtest)
+                state.set_toast(res.message)
+                if res.ok:
+                    state.refresh_benchmark(conn)
             elif key == KEY_SWITCH:
                 _fallback_pick(conn, state)
             elif key == KEY_NEW:
@@ -1433,6 +1631,7 @@ __all__ = [
     "PickerSelection",
     "QUIT_WORDS",
     "KEY_SNAPSHOT",
+    "KEY_BENCHMARK",
     "KEY_SWITCH",
     "KEY_NEW",
     "KEY_FLOOR",

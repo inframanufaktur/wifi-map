@@ -759,3 +759,15 @@ def test_snapshot_payload_excludes_display_only():
     payload = tui_mod.snapshot_payload(sig)
     assert "mcs" not in payload and "band" not in payload
     assert "security" not in payload
+
+
+def test_walk_state_last_result_delta(tmp_path):
+    assert tui_mod.KEY_BENCHMARK == "b"
+    st = tui_mod.WalkState(str(tmp_path / "w.db"))
+    assert st.last_result == ""
+    cur = {"rssi": -60, "snr": 30, "down_mbps": 80.0, "up_mbps": 10.0}
+    bench = {"rssi": -70, "snr": 20, "down_mbps": 100.0, "up_mbps": 20.0}
+    delta = store_mod.format_benchmark_delta(cur, bench)
+    assert delta != ""
+    st.last_result = "saved #1 vs bench (%s)" % delta
+    assert "vs bench" in st.last_result
