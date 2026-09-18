@@ -285,9 +285,11 @@ class WalkState:
     worker threads; all mutation and UI reads go through the lock.
     """
 
-    def __init__(self, db_path: str, no_speedtest: bool = False) -> None:
+    def __init__(self, db_path: str, no_speedtest: bool = False,
+                 ssid_override: Optional[str] = None) -> None:
         self.db_path = db_path
         self.no_speedtest = no_speedtest
+        self.ssid_override = ssid_override.strip() if ssid_override else None
         self.active_id: Optional[int] = None
         self.sig: signal_mod.Signal = signal_mod.Signal()
         self.no_wifi: bool = False
@@ -303,6 +305,10 @@ class WalkState:
         identity_fn: Optional[Callable[[], Optional[Tuple[str, str]]]] = None,
     ) -> Optional[Tuple[str, str]]:
         """One-shot session lookup; backfills polls; abort → toast + None."""
+        if self.ssid_override is not None:
+            self.net_ssid = self.ssid_override
+            self._backfill_identity()
+            return (self.net_ssid, self.net_bssid)
         fn = identity_fn or signal_mod.read_network_identity
         try:
             ident = fn()
@@ -319,6 +325,9 @@ class WalkState:
         return ident
 
     def _backfill_identity(self) -> None:
+        if self.ssid_override is not None:
+            self.sig.ssid = self.ssid_override
+            return
         if self.net_ssid is not None and self.sig.ssid is None:
             self.sig.ssid = self.net_ssid
         if self.net_bssid is not None and self.sig.bssid is None:
@@ -365,6 +374,8 @@ class WalkState:
             self.pending += 1
         loc_id = self.active_id
         sig_copy = copy.deepcopy(self.sig)
+        if self.ssid_override is not None:
+            sig_copy.ssid = self.ssid_override
         result_box: List[SnapshotResult] = []
 
         def _cb(res: SnapshotResult) -> None:

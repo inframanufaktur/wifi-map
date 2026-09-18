@@ -429,3 +429,38 @@ def test_fallback_floor_valid_and_invalid(monkeypatch, tmp_path):
         assert "integer" in st.ui_snapshot()[0].lower()
     finally:
         conn.close()
+
+
+def test_ssid_override_skips_autodetect(tmp_path):
+    st = tui_mod.WalkState(str(tmp_path / "w.db"), ssid_override="home-5g")
+    calls = []
+
+    def _boom():
+        calls.append(1)
+        raise AssertionError("autodetect must not run")
+
+    st.ensure_identity(identity_fn=_boom)
+    assert st.net_ssid == "home-5g"
+    assert calls == []
+
+
+def test_ssid_override_backfills_and_tags_snapshot(tmp_path):
+    db = str(tmp_path / "w.db")
+    conn = store_mod.get_db(db)
+    try:
+        lid = store_mod.create_location(conn, "den", floor=0)
+    finally:
+        conn.close()
+    st = tui_mod.WalkState(db, no_speedtest=True, ssid_override="home-5g")
+    st.active_id = lid
+    st.poll(read_fn=lambda: signal_mod.Signal(ssid="other", rssi=-60))
+    assert st.sig.ssid == "home-5g"
+    t = st.try_snapshot()
+    assert t is not None
+    t.join(timeout=10)
+    conn = store_mod.get_db(db)
+    try:
+        rows = store_mod.list_readings(conn)
+        assert rows[0]["ssid"] == "home-5g"
+    finally:
+        conn.close()
