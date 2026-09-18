@@ -15,16 +15,17 @@ Goal: map home WiFi for connectivity planning. Capture signal strength + interne
 Single Python package, no server, no daemon. DB default `~/wifi-map.db` (override `--db`).
 
 Commands:
-- `wifimap walk [--interval 1.0] [--no-speedtest] [--location X]`
+- `wifimap walk [--interval 1.0] [--no-speedtest] [--location X] [--floor EG]`
   Primary mode for house walkthrough. Live RSSI/noise/SNR/BSSID/channel table, no fixed room. Keys:
-  - `s` — snapshot now: prompt location (prefill last tag), signal saved instant, speedtest in background thread, DB write on completion, walk keeps refreshing
+  - `s` — snapshot now: prompt location + floor (both prefill last tags), signal saved instant, speedtest in background thread, DB write on completion, walk keeps refreshing
   - `l` — set default location tag (skips prompt on next `s`)
+  - `f` — set default floor tag (e.g. basement, EG, OG1, OG2)
   - `q` / Ctrl-C — quit
-  Walk writes DB only on `s`. `--location` presets initial tag.
-- `wifimap scan --location "living-room" [--no-speedtest] [--note TEXT]`
-  Single snapshot row, print, exit. For scripting only.
-- `wifimap list [--location X] [--limit 50]` — history table per room.
-- `wifimap export --csv out.csv [--location X]` — dump for plotting/heatmap later.
+  Walk writes DB only on `s`. `--location` / `--floor` preset initial tags.
+- `wifimap scan --location "living-room" --floor EG [--no-speedtest] [--note TEXT]`
+  Single snapshot row, print, exit. For scripting only. `--floor` optional, defaults to last used or empty.
+- `wifimap list [--location X] [--floor EG] [--limit 50]` — history table per room/floor.
+- `wifimap export --csv out.csv [--location X] [--floor EG]` — dump for plotting/heatmap later (floor column joins storeys).
 
 ## 2. Components
 - `signal.py`: CoreWLAN via PyObjC if available, fallback `airport -I` parse.
@@ -38,7 +39,7 @@ Interface rule: `signal.py` and `speed.py` return plain dataclasses; `store.py` 
 
 ## 3. Data flow + schema
 Scan: parse location → poll signal once → optional speedtest → insert → print row.
-Walk: live poll+render (no fixed room) → `s` prompts location (prefill last) + freezes signal copy + spawns speedtest thread → on done insert + toast → `l` sets default tag.
+Walk: live poll+render (no fixed room) → `s` prompts location+floor (prefill lasts) + freezes signal copy + spawns speedtest thread → on done insert + toast → `l` sets default location, `f` sets default floor.
 
 Table `readings`:
 ```sql
@@ -46,6 +47,7 @@ CREATE TABLE readings(
   id INTEGER PRIMARY KEY,
   ts TEXT NOT NULL,
   location TEXT NOT NULL,
+  floor TEXT NOT NULL DEFAULT '',
   ssid TEXT, bssid TEXT,
   rssi INTEGER, noise INTEGER, snr INTEGER,
   channel TEXT, phy TEXT, tx_rate TEXT,
@@ -53,7 +55,7 @@ CREATE TABLE readings(
   server TEXT, note TEXT
 );
 ```
-One row per `s` / per `scan`. No updates. Query by location+time for room comparison.
+One row per `s` / per `scan`. No updates. Query by floor+location+time for room/storey comparison. Positioning: manual floor+room tags only — no GPS/elevation (Mac has no GPS chip, indoor WiFi geolocation 20-100m, no barometer; phone GPS still can't separate rooms/floors).
 
 ## 4. Error handling
 - WiFi off / no assoc → `NO-WIFI` display, `s` blocked with hint, `scan` exit 2.
