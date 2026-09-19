@@ -61,7 +61,8 @@ a signal-only row instead.
 
 Benchmarks: capture an ideal-conditions reference reading per location
 (e.g. right next to the router) with `benchmark set`; later snapshots and
-walk reads print the delta against it as `(vs bench: +5dBm/-12Mbps …)`.
+walk reads print the delta against it as
+`(vs bench: rssi -22, snr -8, down -262.4, up -41.0 …)`.
 Walk shows the benchmark in its header and keeps a persistent `last:`
 line with the last speedtest result + delta. While the Ookla binary runs
 (both `scan` capture and `benchmark set`), `speedtest running...` prints

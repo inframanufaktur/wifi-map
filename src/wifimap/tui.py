@@ -1197,9 +1197,6 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                 bench_sig = copy.deepcopy(state.sig)
                 if state.ssid_override is not None:
                     bench_sig.ssid = state.ssid_override
-                note = _prompt_curses(
-                    stdscr, "benchmark note: ",
-                    poll_timeout_ms).strip()
                 try:
                     existing = store_mod.get_benchmark(
                         conn, state.active_location_id)
@@ -1212,7 +1209,18 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                     if ans not in ("y", "yes"):
                         state.set_toast("benchmark kept")
                         continue
+                note = _prompt_curses(
+                    stdscr, "benchmark note: ",
+                    poll_timeout_ms).strip()
                 state.set_toast("benchmark running (speedtest)...")
+                try:
+                    _h, _w = stdscr.getmaxyx()
+                    stdscr.addstr(
+                        _h - 1, 0,
+                        "» benchmark running (speedtest)..."[:_w - 1])
+                    stdscr.refresh()
+                except Exception:
+                    pass
                 res = _finish_benchmark(
                     state.db_path, state.active_location_id,
                     snapshot_payload(bench_sig), note=note,
@@ -1426,10 +1434,6 @@ def _walk_fallback(db_path: str, interval: float,
                 if state.ssid_override is not None:
                     bench_sig.ssid = state.ssid_override
                 try:
-                    note = input("benchmark note: ").strip()
-                except (EOFError, OSError):
-                    note = ""
-                try:
                     existing = store_mod.get_benchmark(
                         conn, state.active_location_id)
                 except (sqlite3.Error, OSError, ValueError):
@@ -1443,7 +1447,12 @@ def _walk_fallback(db_path: str, interval: float,
                     if ans not in ("y", "yes"):
                         state.set_toast("benchmark kept")
                         continue
+                try:
+                    note = input("benchmark note: ").strip()
+                except (EOFError, OSError):
+                    note = ""
                 state.set_toast("benchmark running (speedtest)...")
+                print("» benchmark running (speedtest)...", flush=True)
                 res = _finish_benchmark(
                     state.db_path, state.active_location_id,
                     snapshot_payload(bench_sig), note=note,
