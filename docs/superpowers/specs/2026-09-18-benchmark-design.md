@@ -37,7 +37,13 @@ Decisions from user: location-only scope; full snapshot (signal + speedtest + no
 - DB open/store failure: CLI exit 3; walk toast `DB error`, loop continues.
 - Blank `--note` allowed (NULL); blank `--ssid` still rejected as today.
 
-## 5. Testing
+## 5. Signal sampling (5s average, all captures)
+
+- `signal.sample_signal(seconds=5.0, read_fn=read_signal) -> Signal`: polls every 0.5s, averages rssi + noise (rounded ints), snr recomputed from averages; channel/phy/tx_rate/mcs/band/security/ssid/bssid from last sample. `NoWiFiError`/`SignalUnavailableError` propagate immediately.
+- Used by every capture path: `scan` (CLI prints countdown `sampling 5s... 3` to stderr), walk snapshot worker thread (UI stays live), benchmark set (CLI countdown + walk `b`).
+- Stored rows contain averaged values; schema unchanged.
+
+## 6. Testing
 
 - Store: upsert overwrites single row per location; FK violation on unknown location; `get_benchmark` None when missing.
 - Delta formatter: full fields, NULL fields skipped, zero-delta renders `+0`.
