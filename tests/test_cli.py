@@ -462,6 +462,25 @@ def test_benchmark_set_and_show(monkeypatch, tmp_path, capsys):
     assert "-45" in out2.out
 
 
+def test_benchmark_set_stderr_speedtest_notice(monkeypatch, tmp_path, capsys):
+    db = str(tmp_path / "bench_notice.db")
+    monkeypatch.setattr(
+        signal_mod, "read_signal",
+        lambda timeout=2.0: signal_mod.Signal(
+            ssid="h", bssid="aa", rssi=-45, noise=-90, snr=45,
+            channel="36", phy="802.11ax", tx_rate="1200"),
+    )
+    monkeypatch.setattr(
+        speed_mod, "run_speedtest",
+        lambda timeout=120.0: speed_mod.Speed(
+            ping_ms=10.0, down_mbps=100.0, up_mbps=20.0, server="x"),
+    )
+    rc = main(["--db", db, "benchmark", "set", "--location", "HOME"])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "speedtest running" in out.err
+
+
 def test_scan_shows_delta_when_benchmark(monkeypatch, tmp_path, capsys):
     db = str(tmp_path / "delta.db")
     conn = store_mod.get_db(db)

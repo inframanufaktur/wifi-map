@@ -461,6 +461,28 @@ def test_try_snapshot_no_spot_toasts(tmp_path):
     assert "no active spot" in st.ui_snapshot()[0].lower()
 
 
+def test_try_snapshot_sets_running_toast(tmp_path, monkeypatch):
+    st = tui_mod.WalkState(str(tmp_path / "w.db"), no_speedtest=True)
+    st.active_spot_id = 1
+    st.sig = signal_mod.Signal(ssid="h", rssi=-60, noise=-90, snr=30)
+    captured = {}
+
+    def fake_thread(*args, **kwargs):
+        captured["called"] = True
+
+        class _T:
+            def join(self, timeout=None):
+                pass
+        return _T()
+
+    monkeypatch.setattr(tui_mod, "start_snapshot_thread", fake_thread)
+    t = st.try_snapshot()
+    assert t is not None
+    assert captured["called"]
+    toast, _ = st.ui_snapshot()
+    assert "snapshot running" in toast.lower()
+
+
 def test_run_walk_rejects_bad_interval(capsys, tmp_path):
     assert tui_mod.run_walk(str(tmp_path / "w.db"), interval=0) == 3
     _, err = capsys.readouterr()

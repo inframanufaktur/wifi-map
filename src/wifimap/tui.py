@@ -720,6 +720,7 @@ class WalkState:
                 except Exception:  # noqa: BLE001 - delta is best-effort
                     pass
 
+        self.set_toast("snapshot running (speedtest)...")
         t = start_snapshot_thread(
             self.db_path, loc_id, sig_copy,
             no_speedtest=self.no_speedtest,
@@ -1211,6 +1212,7 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                     if ans not in ("y", "yes"):
                         state.set_toast("benchmark kept")
                         continue
+                state.set_toast("benchmark running (speedtest)...")
                 res = _finish_benchmark(
                     state.db_path, state.active_location_id,
                     snapshot_payload(bench_sig), note=note,
@@ -1441,6 +1443,7 @@ def _walk_fallback(db_path: str, interval: float,
                     if ans not in ("y", "yes"):
                         state.set_toast("benchmark kept")
                         continue
+                state.set_toast("benchmark running (speedtest)...")
                 res = _finish_benchmark(
                     state.db_path, state.active_location_id,
                     snapshot_payload(bench_sig), note=note,

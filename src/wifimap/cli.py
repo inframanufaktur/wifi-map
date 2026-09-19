@@ -175,6 +175,7 @@ def _cmd_scan(db_path: str, args: argparse.Namespace) -> int:
         up_mbps: Optional[float] = None
         server: Optional[str] = None
         if not args.no_speedtest:
+            print("speedtest running...", file=sys.stderr, flush=True)
             try:
                 sp = speed_mod.run_speedtest()
                 ping_ms, down_mbps, up_mbps, server = (
@@ -489,6 +490,7 @@ def _cmd_benchmark_set(db_path: str, args: argparse.Namespace) -> int:
         up_mbps: Optional[float] = None
         server: Optional[str] = None
         if not args.no_speedtest:
+            print("speedtest running...", file=sys.stderr, flush=True)
             try:
                 sp = speed_mod.run_speedtest()
                 ping_ms, down_mbps, up_mbps, server = (
