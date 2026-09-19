@@ -19,6 +19,12 @@ def _run(capsys, *argv):
     return rc, out.out, out.err
 
 
+@pytest.fixture(autouse=True)
+def _no_countdown_sleep(monkeypatch):
+    """Kill real sleeps from the scan sampling countdown (cli tests)."""
+    monkeypatch.setattr(cli_mod.time, "sleep", lambda s: None)
+
+
 def _db_path(monkeypatch, tmp_path):
     return str(tmp_path / "cli.db")
 
@@ -73,7 +79,25 @@ def test_scan_prints_sampling_notice(monkeypatch, tmp_path, capsys):
                         "--location", "home", "--room", "kitchen",
                         "--spot", "window", "--no-speedtest")
     assert rc == 0
-    assert "sampling signal" in err
+    assert "sampling 5s... 5" in err
+    assert "sampling 5s... 1" in err
+
+
+def test_scan_sampling_countdown_ticks(monkeypatch, tmp_path, capsys):
+    db = _db_path(monkeypatch, tmp_path)
+    slept = []
+    monkeypatch.setattr(cli_mod.time, "sleep", lambda s: slept.append(s))
+    monkeypatch.setattr(
+        signal_mod, "sample_signal",
+        lambda *a, **k: signal_mod.Signal(rssi=-55, noise=-95, snr=40),
+    )
+    rc, out, err = _run(capsys, "--db", db, "scan",
+                        "--location", "home", "--room", "kitchen",
+                        "--spot", "window", "--no-speedtest")
+    assert rc == 0
+    assert "sampling 5s... 5" in err
+    assert "sampling 5s... 1" in err
+    assert slept == [1.0] * 4
 
 
 def test_scan_no_wifi_exit_2(monkeypatch, tmp_path, capsys):

@@ -11,6 +11,7 @@ import argparse
 import csv
 import sqlite3
 import sys
+import time
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -36,6 +37,18 @@ _EXPORT_FIELDS = [
 def _disp(v: object) -> str:
     """Human-table cell: NULL shows as ``-`` (CSV export keeps ``""``)."""
     return "-" if v is None else str(v)
+
+
+def _sample_countdown(seconds: float = 5.0, tick: float = 1.0,
+                      write=None, _sleep=None) -> None:
+    """Tick a countdown to stderr before the blocking sampling call."""
+    w = write if write is not None else sys.stderr.write
+    sleep = _sleep if _sleep is not None else time.sleep
+    n = max(1, int(round(seconds / tick)))
+    for i in range(n, 0, -1):
+        w("sampling %gs... %d\n" % (seconds, i))
+        if i > 1:
+            sleep(tick)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -152,7 +165,7 @@ def _cmd_scan(db_path: str, args: argparse.Namespace) -> int:
             identity = signal_mod.read_network_identity()
         except Exception:  # noqa: BLE001 - identity is best-effort
             identity = None
-        print("sampling signal 5s...", file=sys.stderr, flush=True)
+        _sample_countdown()
         try:
             sig = signal_mod.sample_signal()
         except signal_mod.NoWiFiError as exc:
@@ -477,7 +490,7 @@ def _cmd_benchmark_set(db_path: str, args: argparse.Namespace) -> int:
             if ans not in ("y", "yes"):
                 print("benchmark kept")
                 return EXIT_OK
-        print("sampling signal 5s...", file=sys.stderr, flush=True)
+        _sample_countdown()
         try:
             sig = signal_mod.sample_signal()
         except signal_mod.NoWiFiError as exc:

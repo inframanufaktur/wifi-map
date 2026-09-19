@@ -192,6 +192,7 @@ def test_sample_signal_nowifi_propagates_no_partial(monkeypatch):
     with pytest.raises(sig_mod.NoWiFiError):
         sig_mod.sample_signal(seconds=2.0, read_fn=_read,
                               sleep_fn=lambda s: None)
+    assert calls["n"] == 2  # early abort, no partial average
 
 
 def test_sample_signal_unavailable_propagates():
