@@ -31,7 +31,15 @@ _EXPORT_FIELDS = [
     "room_name", "spot_name", "floor", "outdoors",
     "ssid", "bssid", "rssi", "noise", "snr", "channel", "phy",
     "tx_rate", "ping_ms", "down_mbps", "up_mbps", "server", "note",
+    "delta_rssi", "delta_snr", "delta_down_mbps", "delta_up_mbps",
 ]
+
+_DELTA_SPECS = (
+    ("rssi", "delta_rssi", round),
+    ("snr", "delta_snr", round),
+    ("down_mbps", "delta_down_mbps", lambda d: round(d, 1)),
+    ("up_mbps", "delta_up_mbps", lambda d: round(d, 1)),
+)
 
 
 def _disp(v: object) -> str:
@@ -437,6 +445,15 @@ def _cmd_export(db_path: str, args: argparse.Namespace) -> int:
                 conn, location=args.location, room=args.room,
                 spot=args.spot, floor=args.floor,
                 ssid=ssid, limit=1000000)
+            bench_cache = {}
+            for r in rows:
+                lid = r.get("location_id")
+                if lid not in bench_cache:
+                    try:
+                        bench_cache[lid] = store_mod.get_benchmark(
+                            conn, lid)
+                    except Exception:  # noqa: BLE001 - delta is best-effort
+                        bench_cache[lid] = None
         except (sqlite3.Error, OSError, ValueError) as exc:
             print("Error: cannot export readings: %s" % (exc,),
                   file=sys.stderr)
@@ -449,8 +466,20 @@ def _cmd_export(db_path: str, args: argparse.Namespace) -> int:
                                extrasaction="ignore")
             w.writeheader()
             for r in rows:
-                w.writerow({k: ("" if r.get(k) is None else r.get(k))
-                            for k in _EXPORT_FIELDS})
+                row = {k: ("" if r.get(k) is None else r.get(k))
+                       for k in _EXPORT_FIELDS}
+                bench = bench_cache.get(r.get("location_id"))
+                for key, col, rnd in _DELTA_SPECS:
+                    row[col] = ""
+                    c = r.get(key)
+                    b = bench.get(key) if isinstance(bench, dict) else None
+                    if (c is None or b is None
+                            or isinstance(c, bool) or isinstance(b, bool)
+                            or not isinstance(c, (int, float))
+                            or not isinstance(b, (int, float))):
+                        continue
+                    row[col] = rnd(c - b)
+                w.writerow(row)
     except OSError as exc:
         print("Error: cannot write CSV: %s" % (exc,), file=sys.stderr)
         return EXIT_STORAGE

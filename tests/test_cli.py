@@ -258,6 +258,45 @@ def test_export_csv_content(monkeypatch, tmp_path, capsys):
     assert "floor" in rows[0] and "outdoors" in rows[0]
 
 
+def test_export_csv_includes_benchmark_delta(tmp_path, capsys):
+    """Export rows carry deltas vs the location benchmark (blank if none)."""
+    db = str(tmp_path / "cli.db")
+    conn = store_mod.get_db(db)
+    try:
+        lid = store_mod.create_location(conn, "home")
+        store_mod.set_benchmark(
+            conn, lid, rssi=-50, snr=45,
+            down_mbps=100.0, up_mbps=20.0)
+        rid = store_mod.create_room(conn, lid, "kitchen")
+        sid = store_mod.create_spot(conn, rid, "window")
+        store_mod.add_reading(
+            conn, sid, rssi=-55, snr=40,
+            down_mbps=90.0, up_mbps=18.0)
+        other = store_mod.create_location(conn, "away")
+        rid2 = store_mod.create_room(conn, other, "garden")
+        sid2 = store_mod.create_spot(conn, rid2, "bench")
+        store_mod.add_reading(conn, sid2, rssi=-70, snr=30)
+    finally:
+        conn.close()
+    csv_path = str(tmp_path / "out.csv")
+    rc, out, err = _run(capsys, "--db", db, "export", "--csv", csv_path)
+    assert rc == 0
+    with open(csv_path, newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    assert len(rows) == 2
+    by_loc = {r["location_name"]: r for r in rows}
+    home = by_loc["home"]
+    assert home["delta_rssi"] == "-5"
+    assert home["delta_snr"] == "-5"
+    assert home["delta_down_mbps"] == "-10.0"
+    assert home["delta_up_mbps"] == "-2.0"
+    away = by_loc["away"]
+    assert away["delta_rssi"] == ""
+    assert away["delta_snr"] == ""
+    assert away["delta_down_mbps"] == ""
+    assert away["delta_up_mbps"] == ""
+
+
 def test_scan_db_error_exit_3(monkeypatch, tmp_path, capsys):
     def _boom(path):
         raise sqlite3.Error("locked")
