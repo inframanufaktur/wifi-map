@@ -9,7 +9,6 @@ callbacks and UI-thread reads are serialized by ``WalkState._lock``.
 """
 from __future__ import annotations
 
-import copy
 import math
 import os
 import shutil
@@ -365,23 +364,48 @@ class SnapshotResult:
     ping_ms: Optional[float] = None
     down_mbps: Optional[float] = None
     up_mbps: Optional[float] = None
+    rssi: Optional[int] = None
+    snr: Optional[int] = None
+
+
+def _sample_guarded() -> Tuple[Optional[signal_mod.Signal], str]:
+    """sample_signal with attempt_read-style guards; (sig, error_msg).
+
+    ``NoWiFiError`` → (None, "NO-WIFI: ...") — caller aborts the
+    capture with that message. Any other error → (empty Signal, "")
+    so the capture still stores an UNKNOWN row (walk must never crash).
+    """
+    try:
+        return (signal_mod.sample_signal(), "")
+    except signal_mod.NoWiFiError as exc:
+        return (None, "NO-WIFI: %s" % (exc,))
+    except Exception:  # noqa: BLE001 - walk must never crash
+        return (signal_mod.Signal(), "")
 
 
 def finish_snapshot(
     db_path: str,
     spot_id: int,
-    sig_dict: Dict[str, object],
+    ssid_override: Optional[str] = None,
     run_speedtest_fn: Optional[Callable[[], speed_mod.Speed]] = None,
     no_speedtest: bool = False,
 ) -> SnapshotResult:
-    """Run speedtest (unless skipped) + insert reading on a fresh connection.
+    """Sample signal, run speedtest (unless skipped), insert reading.
 
-    Always opens/closes its OWN ``store.get_db`` connection — never share
-    the UI thread's connection (row_factory toggling is not thread-safe).
-    Speedtest fail → NULLs + server="ERROR", signal kept (spec 4).
-    Missing binary → signal-only row + warning message (same as scan).
-    DB error → ok=False + error message (caller toasts, walk continues).
+    Samples via ``signal_mod.sample_signal`` (5s average) BEFORE the
+    speedtest. Always opens/closes its OWN ``store.get_db`` connection —
+    never share the UI thread's connection (row_factory toggling is not
+    thread-safe). ``NoWiFiError`` → ok=False + "NO-WIFI" message; other
+    sampling errors → empty Signal (UNKNOWN row). Speedtest fail →
+    NULLs + server="ERROR", signal kept (spec 4). Missing binary →
+    signal-only row + warning message (same as scan). DB error →
+    ok=False + error message (caller toasts, walk continues).
     """
+    sig, err = _sample_guarded()
+    if sig is None:
+        return SnapshotResult(ok=False, message=err)
+    if ssid_override is not None:
+        sig.ssid = ssid_override
     ping_ms = down = up = None
     server: Optional[str] = None
     notice = ""
@@ -404,16 +428,16 @@ def finish_snapshot(
         try:
             rid = store_mod.add_reading(
                 conn, spot_id,
-                ssid=sig_dict.get("ssid"),  # type: ignore[arg-type]
-                bssid=sig_dict.get("bssid"),  # type: ignore[arg-type]
-                rssi=sig_dict.get("rssi"),  # type: ignore[arg-type]
-                noise=sig_dict.get("noise"),  # type: ignore[arg-type]
-                snr=sig_dict.get("snr"),  # type: ignore[arg-type]
-                channel=sig_dict.get("channel"),  # type: ignore[arg-type]
-                phy=sig_dict.get("phy"),  # type: ignore[arg-type]
-                tx_rate=sig_dict.get("tx_rate"),  # type: ignore[arg-type]
-                ping_ms=ping_ms, down_mbps=down,  # type: ignore[arg-type]
-                up_mbps=up,  # type: ignore[arg-type]
+                ssid=sig.ssid,
+                bssid=sig.bssid,
+                rssi=sig.rssi,
+                noise=sig.noise,
+                snr=sig.snr,
+                channel=sig.channel,
+                phy=sig.phy,
+                tx_rate=sig.tx_rate,
+                ping_ms=ping_ms, down_mbps=down,
+                up_mbps=up,
                 server=server,
             )
         except (sqlite3.Error, OSError, ValueError) as exc:
@@ -424,26 +448,28 @@ def finish_snapshot(
     if notice:
         msg += " (%s)" % notice
     return SnapshotResult(ok=True, reading_id=rid, message=msg,
-                          ping_ms=ping_ms, down_mbps=down, up_mbps=up)
+                          ping_ms=ping_ms, down_mbps=down, up_mbps=up,
+                          rssi=sig.rssi, snr=sig.snr)
 
 
 def start_snapshot_thread(
     db_path: str,
     location_id: int,
-    sig: signal_mod.Signal,
     no_speedtest: bool = False,
+    ssid_override: Optional[str] = None,
     on_done: Optional[Callable[[SnapshotResult], None]] = None,
     run_speedtest_fn: Optional[Callable[[], speed_mod.Speed]] = None,
 ) -> "threading.Thread":
-    """Freeze signal copy, spawn daemon thread; on done insert + callback.
+    """Spawn daemon thread: sample signal + insert on its own connection.
 
-    The thread opens its own DB connection via ``finish_snapshot``.
+    The worker calls ``finish_snapshot`` (samples + opens its own DB
+    connection), so the UI thread only hands over ids/overrides.
     """
-    frozen = snapshot_payload(copy.deepcopy(sig))
 
     def _work() -> None:
         res = finish_snapshot(
-            db_path, location_id, frozen,
+            db_path, location_id,
+            ssid_override=ssid_override,
             run_speedtest_fn=run_speedtest_fn,
             no_speedtest=no_speedtest,
         )
@@ -458,17 +484,22 @@ def start_snapshot_thread(
 def _finish_benchmark(
     db_path: str,
     location_id: int,
-    sig_dict: Dict[str, object],
     note: str = "",
+    ssid_override: Optional[str] = None,
     run_speedtest_fn: Optional[Callable[[], speed_mod.Speed]] = None,
     no_speedtest: bool = False,
 ) -> SnapshotResult:
-    """Run speedtest (unless skipped) + upsert benchmark on fresh connection.
+    """Sample signal, run speedtest (unless skipped), upsert benchmark.
 
     Mirrors ``finish_snapshot`` but writes the per-location benchmark row
     instead of a reading. Always opens/closes its OWN ``store.get_db``
     connection — never share the UI thread's connection.
     """
+    sig, err = _sample_guarded()
+    if sig is None:
+        return SnapshotResult(ok=False, message=err)
+    if ssid_override is not None:
+        sig.ssid = ssid_override
     ping_ms = down = up = None
     server: Optional[str] = None
     notice = ""
@@ -491,16 +522,16 @@ def _finish_benchmark(
         try:
             store_mod.set_benchmark(
                 conn, location_id,
-                ssid=sig_dict.get("ssid"),  # type: ignore[arg-type]
-                bssid=sig_dict.get("bssid"),  # type: ignore[arg-type]
-                rssi=sig_dict.get("rssi"),  # type: ignore[arg-type]
-                noise=sig_dict.get("noise"),  # type: ignore[arg-type]
-                snr=sig_dict.get("snr"),  # type: ignore[arg-type]
-                channel=sig_dict.get("channel"),  # type: ignore[arg-type]
-                phy=sig_dict.get("phy"),  # type: ignore[arg-type]
-                tx_rate=sig_dict.get("tx_rate"),  # type: ignore[arg-type]
-                ping_ms=ping_ms, down_mbps=down,  # type: ignore[arg-type]
-                up_mbps=up,  # type: ignore[arg-type]
+                ssid=sig.ssid,
+                bssid=sig.bssid,
+                rssi=sig.rssi,
+                noise=sig.noise,
+                snr=sig.snr,
+                channel=sig.channel,
+                phy=sig.phy,
+                tx_rate=sig.tx_rate,
+                ping_ms=ping_ms, down_mbps=down,
+                up_mbps=up,
                 server=server,
                 note=note or None,
             )
@@ -513,12 +544,12 @@ def _finish_benchmark(
         return "-" if v is None else str(v)
 
     msg = "benchmark set for #%d rssi=%s snr=%s down=%s up=%s" % (
-        location_id, _d(sig_dict.get("rssi")), _d(sig_dict.get("snr")),
-        _d(down), _d(up))
+        location_id, _d(sig.rssi), _d(sig.snr), _d(down), _d(up))
     if notice:
         msg += " (%s)" % notice
     return SnapshotResult(ok=True, message=msg, ping_ms=ping_ms,
-                          down_mbps=down, up_mbps=up)
+                          down_mbps=down, up_mbps=up,
+                          rssi=sig.rssi, snr=sig.snr)
 
 
 # ---------------------------------------------------------------------------
@@ -683,7 +714,11 @@ class WalkState:
         self,
         run_speedtest_fn: Optional[Callable[[], speed_mod.Speed]] = None,
     ) -> Optional["threading.Thread"]:
-        """Spawn snapshot thread for active spot; None + hint if blocked."""
+        """Spawn snapshot thread for active spot; None + hint if blocked.
+
+        The worker samples the signal itself (5s average) on its own
+        thread; the UI thread keeps live meters untouched.
+        """
         if self.no_wifi:
             self.set_toast("NO-WIFI: `s` blocked (WiFi off/not associated)")
             return None
@@ -693,9 +728,6 @@ class WalkState:
         with self._lock:
             self.pending += 1
         loc_id = self.active_spot_id
-        sig_copy = copy.deepcopy(self.sig)
-        if self.ssid_override is not None:
-            sig_copy.ssid = self.ssid_override
         result_box: List[SnapshotResult] = []
 
         def _cb(res: SnapshotResult) -> None:
@@ -703,9 +735,8 @@ class WalkState:
             self.on_snapshot_done(res)
             if res.ok:
                 try:
-                    frozen = snapshot_payload(sig_copy)
-                    cur = {"rssi": frozen.get("rssi"),
-                           "snr": frozen.get("snr"),
+                    cur = {"rssi": res.rssi,
+                           "snr": res.snr,
                            "down_mbps": res.down_mbps,
                            "up_mbps": res.up_mbps}
                     with self._lock:
@@ -722,8 +753,9 @@ class WalkState:
 
         self.set_toast("snapshot running (speedtest)...")
         t = start_snapshot_thread(
-            self.db_path, loc_id, sig_copy,
+            self.db_path, loc_id,
             no_speedtest=self.no_speedtest,
+            ssid_override=self.ssid_override,
             on_done=_cb,
             run_speedtest_fn=run_speedtest_fn,
         )
@@ -1194,9 +1226,6 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                     state.set_toast(
                         "no preset location: rerun with --location")
                     continue
-                bench_sig = copy.deepcopy(state.sig)
-                if state.ssid_override is not None:
-                    bench_sig.ssid = state.ssid_override
                 try:
                     existing = store_mod.get_benchmark(
                         conn, state.active_location_id)
@@ -1222,8 +1251,8 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                 except Exception:
                     pass
                 res = _finish_benchmark(
-                    state.db_path, state.active_location_id,
-                    snapshot_payload(bench_sig), note=note,
+                    state.db_path, state.active_location_id, note=note,
+                    ssid_override=state.ssid_override,
                     no_speedtest=state.no_speedtest)
                 state.set_toast(res.message)
                 if res.ok:
@@ -1430,9 +1459,6 @@ def _walk_fallback(db_path: str, interval: float,
                     state.set_toast(
                         "no preset location: rerun with --location")
                     continue
-                bench_sig = copy.deepcopy(state.sig)
-                if state.ssid_override is not None:
-                    bench_sig.ssid = state.ssid_override
                 try:
                     existing = store_mod.get_benchmark(
                         conn, state.active_location_id)
@@ -1454,8 +1480,8 @@ def _walk_fallback(db_path: str, interval: float,
                 state.set_toast("benchmark running (speedtest)...")
                 print("» benchmark running (speedtest)...", flush=True)
                 res = _finish_benchmark(
-                    state.db_path, state.active_location_id,
-                    snapshot_payload(bench_sig), note=note,
+                    state.db_path, state.active_location_id, note=note,
+                    ssid_override=state.ssid_override,
                     no_speedtest=state.no_speedtest)
                 state.set_toast(res.message)
                 if res.ok:

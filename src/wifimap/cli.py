@@ -152,8 +152,9 @@ def _cmd_scan(db_path: str, args: argparse.Namespace) -> int:
             identity = signal_mod.read_network_identity()
         except Exception:  # noqa: BLE001 - identity is best-effort
             identity = None
+        print("sampling signal 5s...", file=sys.stderr, flush=True)
         try:
-            sig = signal_mod.read_signal()
+            sig = signal_mod.sample_signal()
         except signal_mod.NoWiFiError as exc:
             print("Error: no WiFi: %s" % (exc,), file=sys.stderr)
             return EXIT_NOWIFI
@@ -476,8 +477,9 @@ def _cmd_benchmark_set(db_path: str, args: argparse.Namespace) -> int:
             if ans not in ("y", "yes"):
                 print("benchmark kept")
                 return EXIT_OK
+        print("sampling signal 5s...", file=sys.stderr, flush=True)
         try:
-            sig = signal_mod.read_signal()
+            sig = signal_mod.sample_signal()
         except signal_mod.NoWiFiError as exc:
             print("Error: no WiFi: %s" % (exc,), file=sys.stderr)
             return EXIT_NOWIFI

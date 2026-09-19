@@ -202,7 +202,7 @@ def _db(tmp_path):
     return str(tmp_path / "tui.db")
 
 
-def test_finish_snapshot_speed_ok(tmp_path):
+def test_finish_snapshot_speed_ok(tmp_path, monkeypatch):
     db = _db(tmp_path)
     conn = store_mod.get_db(db)
     try:
@@ -210,25 +210,29 @@ def test_finish_snapshot_speed_ok(tmp_path):
                                       spots=("s1", "s2"))
     finally:
         conn.close()
-    sig = {"ssid": "h", "bssid": None, "rssi": -60, "noise": -90,
-           "snr": 30, "channel": "1", "phy": "n", "tx_rate": "5"}
+    monkeypatch.setattr(
+        signal_mod, "sample_signal",
+        lambda *a, **k: signal_mod.Signal(ssid="h", bssid=None, rssi=-60,
+                                          noise=-90, snr=30, channel="1",
+                                          phy="n", tx_rate="5"))
 
     def _sp():
         return speed_mod.Speed(ping_ms=9.0, down_mbps=80.0, up_mbps=10.0,
                                server="S (1)")
 
-    res = tui_mod.finish_snapshot(db, sid, dict(sig), run_speedtest_fn=_sp)
+    res = tui_mod.finish_snapshot(db, sid, run_speedtest_fn=_sp)
     assert res.ok and res.reading_id is not None
     conn = store_mod.get_db(db)
     try:
         rows = store_mod.list_readings(conn)
         assert rows[0]["down_mbps"] == 80.0
         assert rows[0]["rssi"] == -60
+        assert rows[0]["snr"] == 30
     finally:
         conn.close()
 
 
-def test_finish_snapshot_speed_fail_nulls_error(tmp_path):
+def test_finish_snapshot_no_wifi_result_message(tmp_path, monkeypatch):
     db = _db(tmp_path)
     conn = store_mod.get_db(db)
     try:
@@ -237,11 +241,59 @@ def test_finish_snapshot_speed_fail_nulls_error(tmp_path):
     finally:
         conn.close()
 
+    def _off(*a, **k):
+        raise signal_mod.NoWiFiError("off")
+
+    monkeypatch.setattr(signal_mod, "sample_signal", _off)
+    res = tui_mod.finish_snapshot(db, sid)
+    assert res.ok is False
+    assert "NO-WIFI" in res.message
+    conn = store_mod.get_db(db)
+    try:
+        assert store_mod.list_readings(conn) == []
+    finally:
+        conn.close()
+
+
+def test_finish_snapshot_other_error_empty_signal_row(tmp_path, monkeypatch):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        _, _, (sid, _) = _seed_3level(conn, loc="den", room="r",
+                                      spots=("s1", "s2"))
+    finally:
+        conn.close()
+
+    def _boom(*a, **k):
+        raise RuntimeError("backend gone")
+
+    monkeypatch.setattr(signal_mod, "sample_signal", _boom)
+    res = tui_mod.finish_snapshot(db, sid, no_speedtest=True)
+    assert res.ok
+    conn = store_mod.get_db(db)
+    try:
+        rows = store_mod.list_readings(conn)
+        assert rows[0]["rssi"] is None
+    finally:
+        conn.close()
+
+
+def test_finish_snapshot_speed_fail_nulls_error(tmp_path, monkeypatch):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        _, _, (sid, _) = _seed_3level(conn, loc="den", room="r",
+                                      spots=("s1", "s2"))
+    finally:
+        conn.close()
+    monkeypatch.setattr(
+        signal_mod, "sample_signal",
+        lambda *a, **k: signal_mod.Signal(ssid="h", rssi=-61))
+
     def _fail():
         raise speed_mod.SpeedtestFailedError("timeout")
 
-    res = tui_mod.finish_snapshot(
-        db, sid, {"ssid": "h", "rssi": -61}, run_speedtest_fn=_fail)
+    res = tui_mod.finish_snapshot(db, sid, run_speedtest_fn=_fail)
     assert res.ok
     conn = store_mod.get_db(db)
     try:
@@ -252,7 +304,7 @@ def test_finish_snapshot_speed_fail_nulls_error(tmp_path):
         conn.close()
 
 
-def test_finish_snapshot_missing_binary_signal_only(tmp_path):
+def test_finish_snapshot_missing_binary_signal_only(tmp_path, monkeypatch):
     db = _db(tmp_path)
     conn = store_mod.get_db(db)
     try:
@@ -260,12 +312,14 @@ def test_finish_snapshot_missing_binary_signal_only(tmp_path):
                                       spots=("s1", "s2"))
     finally:
         conn.close()
+    monkeypatch.setattr(
+        signal_mod, "sample_signal",
+        lambda *a, **k: signal_mod.Signal(ssid="h", rssi=-62))
 
     def _missing():
         raise speed_mod.SpeedtestUnavailableError("no binary")
 
-    res = tui_mod.finish_snapshot(
-        db, sid, {"ssid": "h", "rssi": -62}, run_speedtest_fn=_missing)
+    res = tui_mod.finish_snapshot(db, sid, run_speedtest_fn=_missing)
     assert res.ok
     assert "signal-only" in res.message.lower() or "warn" in res.message.lower()
     conn = store_mod.get_db(db)
@@ -275,7 +329,7 @@ def test_finish_snapshot_missing_binary_signal_only(tmp_path):
         conn.close()
 
 
-def test_start_snapshot_thread_daemon_join(tmp_path):
+def test_start_snapshot_thread_daemon_join(tmp_path, monkeypatch):
     db = _db(tmp_path)
     conn = store_mod.get_db(db)
     try:
@@ -283,10 +337,12 @@ def test_start_snapshot_thread_daemon_join(tmp_path):
                                       spots=("s1", "s2"))
     finally:
         conn.close()
-    sig = signal_mod.Signal(ssid="h", rssi=-55)
+    monkeypatch.setattr(
+        signal_mod, "sample_signal",
+        lambda *a, **k: signal_mod.Signal(ssid="h", rssi=-55))
     done = []
     t = tui_mod.start_snapshot_thread(
-        db, sid, sig, no_speedtest=True,
+        db, sid, no_speedtest=True,
         on_done=lambda r: done.append(r))
     assert t.daemon is True
     t.join(timeout=10)
@@ -296,8 +352,6 @@ def test_start_snapshot_thread_daemon_join(tmp_path):
         assert store_mod.list_readings(conn)[0]["rssi"] == -55
     finally:
         conn.close()
-    # thread froze a copy: mutating original post-spawn is safe
-    sig.rssi = -1
 
 
 def test_walk_state_nowifi_blocks_snapshot(tmp_path):
@@ -428,7 +482,30 @@ def test_location_label_states(tmp_path, monkeypatch):
         conn.close()
 
 
-def test_try_snapshot_success_path(tmp_path):
+def test_finish_benchmark_samples_signal(tmp_path, monkeypatch):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        lid, _rid, _spots = _seed_3level(conn, loc="lab", room="r",
+                                         spots=("s1", "s2"))
+    finally:
+        conn.close()
+    monkeypatch.setattr(
+        signal_mod, "sample_signal",
+        lambda *a, **k: signal_mod.Signal(ssid="h", rssi=-45, noise=-90,
+                                          snr=45))
+    res = tui_mod._finish_benchmark(db, lid, no_speedtest=True)
+    assert res.ok
+    assert res.rssi == -45 and res.snr == 45
+    conn = store_mod.get_db(db)
+    try:
+        bench = store_mod.get_benchmark(conn, lid)
+        assert bench["rssi"] == -45
+    finally:
+        conn.close()
+
+
+def test_try_snapshot_success_path(tmp_path, monkeypatch):
     db = _db(tmp_path)
     conn = store_mod.get_db(db)
     try:
@@ -436,9 +513,12 @@ def test_try_snapshot_success_path(tmp_path):
                                       spots=("s1", "s2"))
     finally:
         conn.close()
+    monkeypatch.setattr(
+        signal_mod, "sample_signal",
+        lambda *a, **k: signal_mod.Signal(ssid="h", rssi=-60, noise=-90,
+                                          snr=30))
     st = tui_mod.WalkState(db, no_speedtest=True)
     st.active_spot_id = sid
-    st.sig = signal_mod.Signal(ssid="h", rssi=-60, noise=-90, snr=30)
     t = st.try_snapshot()
     assert t is not None
     t.join(timeout=10)
@@ -553,7 +633,7 @@ def test_ssid_override_skips_autodetect(tmp_path):
     assert calls == []
 
 
-def test_ssid_override_backfills_and_tags_snapshot(tmp_path):
+def test_ssid_override_backfills_and_tags_snapshot(tmp_path, monkeypatch):
     db = str(tmp_path / "w.db")
     conn = store_mod.get_db(db)
     try:
@@ -561,6 +641,9 @@ def test_ssid_override_backfills_and_tags_snapshot(tmp_path):
                                       spots=("s1", "s2"))
     finally:
         conn.close()
+    monkeypatch.setattr(
+        signal_mod, "sample_signal",
+        lambda *a, **k: signal_mod.Signal(ssid="other", rssi=-60))
     st = tui_mod.WalkState(db, no_speedtest=True, ssid_override="home-5g")
     st.active_spot_id = sid
     st.poll(read_fn=lambda: signal_mod.Signal(ssid="other", rssi=-60))
@@ -795,7 +878,7 @@ def test_walk_state_last_result_delta(tmp_path):
     assert "vs bench" in st.last_result
 
 
-def test_snapshot_last_result_delta_with_speed(tmp_path):
+def test_snapshot_last_result_delta_with_speed(tmp_path, monkeypatch):
     db = _db(tmp_path)
     conn = store_mod.get_db(db)
     try:
@@ -805,10 +888,13 @@ def test_snapshot_last_result_delta_with_speed(tmp_path):
             down_mbps=100.0, up_mbps=20.0)
     finally:
         conn.close()
+    monkeypatch.setattr(
+        signal_mod, "sample_signal",
+        lambda *a, **k: signal_mod.Signal(ssid="h", rssi=-60, noise=-90,
+                                          snr=30))
     st = tui_mod.WalkState(db)
     st.active_location_id = lid
     st.active_spot_id = sid
-    st.sig = signal_mod.Signal(ssid="h", rssi=-60, noise=-90, snr=30)
     conn = store_mod.get_db(db)
     try:
         st.refresh_benchmark(conn)

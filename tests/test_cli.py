@@ -36,8 +36,8 @@ def _seed_3level(conn, loc="home", room="kitchen", spot="window",
 def test_scan_insert_path(monkeypatch, tmp_path, capsys):
     db = _db_path(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        signal_mod, "read_signal",
-        lambda timeout=2.0: signal_mod.Signal(
+        signal_mod, "sample_signal",
+        lambda *a, **k: signal_mod.Signal(
             ssid="home", bssid="aa:bb", rssi=-55, noise=-95,
             snr=40, channel="36", phy="802.11ax", tx_rate="1200"),
     )
@@ -63,11 +63,24 @@ def test_scan_insert_path(monkeypatch, tmp_path, capsys):
         conn.close()
 
 
+def test_scan_prints_sampling_notice(monkeypatch, tmp_path, capsys):
+    db = _db_path(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        signal_mod, "sample_signal",
+        lambda *a, **k: signal_mod.Signal(rssi=-55, noise=-95, snr=40),
+    )
+    rc, out, err = _run(capsys, "--db", db, "scan",
+                        "--location", "home", "--room", "kitchen",
+                        "--spot", "window", "--no-speedtest")
+    assert rc == 0
+    assert "sampling signal" in err
+
+
 def test_scan_no_wifi_exit_2(monkeypatch, tmp_path, capsys):
     db = _db_path(monkeypatch, tmp_path)
-    def _boom(timeout=2.0):
+    def _boom(*a, **k):
         raise signal_mod.NoWiFiError("off")
-    monkeypatch.setattr(signal_mod, "read_signal", _boom)
+    monkeypatch.setattr(signal_mod, "sample_signal", _boom)
     rc, out, err = _run(capsys, "--db", db, "scan",
                         "--location", "home", "--room", "kitchen",
                         "--spot", "window", "--no-speedtest")
@@ -77,9 +90,9 @@ def test_scan_no_wifi_exit_2(monkeypatch, tmp_path, capsys):
 
 def test_scan_signal_unavailable_exit_2(monkeypatch, tmp_path, capsys):
     db = _db_path(monkeypatch, tmp_path)
-    def _boom(timeout=2.0):
+    def _boom(*a, **k):
         raise signal_mod.SignalUnavailableError("no backend")
-    monkeypatch.setattr(signal_mod, "read_signal", _boom)
+    monkeypatch.setattr(signal_mod, "sample_signal", _boom)
     rc, out, err = _run(capsys, "--db", db, "scan",
                         "--location", "home", "--room", "kitchen",
                         "--spot", "window", "--no-speedtest")
@@ -90,8 +103,8 @@ def test_scan_signal_unavailable_exit_2(monkeypatch, tmp_path, capsys):
 def test_scan_speedtest_fail_stores_nulls(monkeypatch, tmp_path, capsys):
     db = _db_path(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        signal_mod, "read_signal",
-        lambda timeout=2.0: signal_mod.Signal(ssid="h", rssi=-60),
+        signal_mod, "sample_signal",
+        lambda *a, **k: signal_mod.Signal(ssid="h", rssi=-60),
     )
     def _fail(timeout=120.0):
         raise speed_mod.SpeedtestFailedError("timeout")
@@ -115,8 +128,8 @@ def test_scan_speedtest_unavailable_warns_and_keeps_signal(
         monkeypatch, tmp_path, capsys):
     db = _db_path(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        signal_mod, "read_signal",
-        lambda timeout=2.0: signal_mod.Signal(ssid="h", rssi=-61),
+        signal_mod, "sample_signal",
+        lambda *a, **k: signal_mod.Signal(ssid="h", rssi=-61),
     )
     def _missing(timeout=120.0):
         raise speed_mod.SpeedtestUnavailableError("no binary")
@@ -138,8 +151,8 @@ def test_scan_speedtest_unavailable_warns_and_keeps_signal(
 def test_scan_resolve_autocreate_with_flags(monkeypatch, tmp_path, capsys):
     db = _db_path(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        signal_mod, "read_signal",
-        lambda timeout=2.0: signal_mod.Signal(rssi=-70),
+        signal_mod, "sample_signal",
+        lambda *a, **k: signal_mod.Signal(rssi=-70),
     )
     rc, out, err = _run(
         capsys, "--db", db, "scan", "--location", "home",
@@ -309,8 +322,8 @@ def test_scan_location_room_spot(monkeypatch, tmp_path):
     from wifimap import signal as signal_mod, store as store_mod
     from wifimap.cli import main
     db = str(tmp_path / "cli.db")
-    monkeypatch.setattr(signal_mod, "read_signal",
-        lambda timeout=2.0: signal_mod.Signal(ssid="h", rssi=-55))
+    monkeypatch.setattr(signal_mod, "sample_signal",
+        lambda *a, **k: signal_mod.Signal(ssid="h", rssi=-55))
     rc = main(["--db", db, "scan", "--location", "home",
                "--room", "kitchen", "--spot", "window", "--no-speedtest"])
     assert rc == 0
@@ -446,8 +459,8 @@ def test_rooms_spots_list_unknown_no_create(tmp_path, capsys):
 def test_benchmark_set_and_show(monkeypatch, tmp_path, capsys):
     db = str(tmp_path / "bench.db")
     monkeypatch.setattr(
-        signal_mod, "read_signal",
-        lambda timeout=2.0: signal_mod.Signal(
+        signal_mod, "sample_signal",
+        lambda *a, **k: signal_mod.Signal(
             ssid="h", bssid="aa", rssi=-45, noise=-90, snr=45,
             channel="36", phy="802.11ax", tx_rate="1200"),
     )
@@ -465,8 +478,8 @@ def test_benchmark_set_and_show(monkeypatch, tmp_path, capsys):
 def test_benchmark_set_stderr_speedtest_notice(monkeypatch, tmp_path, capsys):
     db = str(tmp_path / "bench_notice.db")
     monkeypatch.setattr(
-        signal_mod, "read_signal",
-        lambda timeout=2.0: signal_mod.Signal(
+        signal_mod, "sample_signal",
+        lambda *a, **k: signal_mod.Signal(
             ssid="h", bssid="aa", rssi=-45, noise=-90, snr=45,
             channel="36", phy="802.11ax", tx_rate="1200"),
     )
@@ -489,8 +502,8 @@ def test_scan_shows_delta_when_benchmark(monkeypatch, tmp_path, capsys):
                             down_mbps=300.0, up_mbps=40.0)
     conn.close()
     monkeypatch.setattr(
-        signal_mod, "read_signal",
-        lambda timeout=2.0: signal_mod.Signal(
+        signal_mod, "sample_signal",
+        lambda *a, **k: signal_mod.Signal(
             ssid="h", bssid="aa", rssi=-67, noise=-91, snr=24,
             channel="36", phy="802.11ax", tx_rate="800"),
     )
