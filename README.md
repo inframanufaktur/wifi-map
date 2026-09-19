@@ -25,8 +25,8 @@ wifimap --db /tmp/demo.db scan --no-speedtest \
 
 # 2. House walkthrough (live RSSI/noise/SNR table):
 wifimap --db /tmp/demo.db walk --no-speedtest --location HOME
-# keys: s snapshot (room→spot drilldown, Enter confirms) | l switch |
-#       n new room+spot | f edit floor | q quit. DB writes only on s.
+# keys: s snapshot (room→spot drilldown, Enter confirms) | b benchmark |
+#       l switch | n new room+spot | f edit floor | q quit. DB writes only on s.
 
 # 3. Review + export:
 wifimap --db /tmp/demo.db list
@@ -48,6 +48,7 @@ auto-create on `scan`.
 | `wifimap spots list --location L --room R` / `add --location L --room R --name X` | List / create spots in a room |
 | `wifimap list [--location L] [--room R] [--spot S] [--floor N] [--ssid S] [--limit 50]` | History, joined with location/room/spot (newest first) |
 | `wifimap export --csv out.csv [same filters as list]` | CSV dump (up to 1M rows) |
+| `wifimap benchmark set --location L [--no-speedtest] [--note T] [--force]` / `show` / `clear` | Capture/show/delete ideal-conditions reference (one per location, overwrite prompts) |
 
 All location/room/spot arguments accept ID or NAME. Filters accept ID or NAME.
 `scan` and `add` auto-create unknown names (parents included);
@@ -57,6 +58,15 @@ Exit codes: 0 ok, 2 no-wifi/signal-unavailable (missing signal backend
 maps here with an install hint), 3 storage error. Code 4 is reserved —
 a missing speedtest binary never exits nonzero; the scan warns and stores
 a signal-only row instead.
+
+Benchmarks: capture an ideal-conditions reference reading per location
+(e.g. right next to the router) with `benchmark set`; later snapshots and
+walk reads print the delta against it as
+`(vs bench: rssi -22, snr -8, down -262.4, up -41.0 …)`.
+Walk shows the benchmark in its header and keeps a persistent `last:`
+line with the last speedtest result + delta. While the Ookla binary runs
+(both `scan` capture and `benchmark set`), `speedtest running...` prints
+to stderr so the wait is visible.
 
 Floor convention (on room): 0 ground, -1 first basement, +1 first upper.
 `outdoors`: 1 = garden/balcony/etc. Note the flag shapes differ:

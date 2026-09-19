@@ -127,6 +127,96 @@ def test_read_signal_missing_pyobjc_raises_unavailable(monkeypatch):
         read_signal()
 
 
+# --- sample_signal (5s averaging over injected read_fn) ---
+
+def _sleep_counter():
+    calls = {"n": 0}
+
+    def _sleep(seconds):
+        calls["n"] += 1
+
+    return calls, _sleep
+
+
+def test_sample_signal_averages_rssi_noise_and_snr():
+    from wifimap import signal as sig_mod
+    seq = [
+        sig_mod.Signal(rssi=-60, noise=-90, snr=30),
+        sig_mod.Signal(rssi=-64, noise=-92, snr=28),
+        sig_mod.Signal(rssi=-61, noise=-94, snr=33),
+    ]
+    calls, _sleep = _sleep_counter()
+
+    def _read():
+        return seq[min(len(seq) - 1, calls["n"])]
+
+    sig = sig_mod.sample_signal(seconds=1.0, read_fn=_read, sleep_fn=_sleep)
+    assert sig.rssi == round((-60 + -64 + -61) / 3)
+    assert sig.noise == round((-90 + -92 + -94) / 3)
+    assert sig.snr == sig.rssi - sig.noise
+    assert calls["n"] >= 2  # sampled more than once
+
+
+def test_sample_signal_last_sample_passthrough_fields():
+    from wifimap import signal as sig_mod
+    last = sig_mod.Signal(ssid="net", bssid="aa:bb", rssi=-50, noise=-90,
+                          snr=40, channel="36 (80MHz)", phy="802.11ax",
+                          tx_rate="866", mcs=9, band="5 GHz",
+                          security="WPA3 Personal")
+
+    def _read():
+        return last
+
+    sig = sig_mod.sample_signal(seconds=1.0, read_fn=_read,
+                                sleep_fn=lambda s: None)
+    assert sig.ssid == "net"
+    assert sig.bssid == "aa:bb"
+    assert sig.channel == "36 (80MHz)"
+    assert sig.phy == "802.11ax"
+    assert sig.tx_rate == "866"
+    assert sig.mcs == 9
+    assert sig.band == "5 GHz"
+    assert sig.security == "WPA3 Personal"
+
+
+def test_sample_signal_nowifi_propagates_no_partial(monkeypatch):
+    from wifimap import signal as sig_mod
+    calls = {"n": 0}
+
+    def _read():
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise sig_mod.NoWiFiError("off mid-sample")
+        return sig_mod.Signal(rssi=-60, noise=-90, snr=30)
+
+    with pytest.raises(sig_mod.NoWiFiError):
+        sig_mod.sample_signal(seconds=2.0, read_fn=_read,
+                              sleep_fn=lambda s: None)
+    assert calls["n"] == 2  # early abort, no partial average
+
+
+def test_sample_signal_unavailable_propagates():
+    from wifimap import signal as sig_mod
+
+    def _read():
+        raise sig_mod.SignalUnavailableError("no backend")
+
+    with pytest.raises(sig_mod.SignalUnavailableError):
+        sig_mod.sample_signal(seconds=1.0, read_fn=_read,
+                              sleep_fn=lambda s: None)
+
+
+def test_sample_signal_default_read_fn_resolved_late(monkeypatch):
+    """Body resolves read_signal at call time so module monkeypatch works."""
+    from wifimap import signal as sig_mod
+    monkeypatch.setattr(
+        sig_mod, "read_signal",
+        lambda timeout=2.0: sig_mod.Signal(rssi=-55, noise=-95, snr=40))
+    sig = sig_mod.sample_signal(seconds=1.0, sleep_fn=lambda s: None)
+    assert sig.rssi == -55
+    assert sig.snr == 40
+
+
 # --- read_network_identity (sudo wdutil, session-start only) ---
 
 def _run_ok(stdout):
@@ -285,8 +375,9 @@ def test_scan_backfills_ssid_and_warns_on_abort(monkeypatch, tmp_path, capsys):
     from wifimap import store as store_mod
     from wifimap.cli import main
     db = str(tmp_path / "scan.db")
-    monkeypatch.setattr(sig_mod, "read_signal",
-                        lambda timeout=2.0: sig_mod.Signal(ssid=None, bssid=None, rssi=-60))
+    monkeypatch.setattr(sig_mod, "sample_signal",
+                        lambda *a, **k: sig_mod.Signal(ssid=None, bssid=None,
+                                                       rssi=-60))
     monkeypatch.setattr(sig_mod, "read_network_identity",
                         lambda: ("ScanNet", "11:22:33:44:55:66"))
     rc = main(["--db", db, "scan", "--location", "lab", "--room", "R1",

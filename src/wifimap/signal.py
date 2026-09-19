@@ -14,6 +14,7 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -184,6 +185,50 @@ def read_signal(timeout: float = 2.0) -> Signal:
         mcs=_mcs_value(iface),
         band=_band_name(wlan_ch),
         security=sec,
+    )
+
+
+def sample_signal(seconds: float = 5.0, read_fn=None,
+                  sleep_fn=time.sleep) -> Signal:
+    """Average WiFi signal over ``seconds``: poll now, then every 0.5s.
+
+    rssi + noise averaged (rounded ints), snr recomputed from the
+    averages; ssid/bssid/channel/phy/tx_rate/mcs/band/security come
+    from the last successful sample. ``NoWiFiError``/
+    ``SignalUnavailableError`` propagate immediately (no partial
+    averaging). ``read_fn`` defaults to ``read_signal`` resolved at
+    call time so tests can monkeypatch the module attribute.
+    """
+    if read_fn is None:
+        read_fn = read_signal
+    samples = [read_fn()]
+    step = 0.5
+    slept = 0.0
+    while slept < seconds:
+        sleep_fn(step)
+        slept += step
+        samples.append(read_fn())
+    rssi_vals = [s.rssi for s in samples if s.rssi is not None]
+    noise_vals = [s.noise for s in samples if s.noise is not None]
+    avg_rssi = (int(round(sum(rssi_vals) / len(rssi_vals)))
+                if rssi_vals else None)
+    avg_noise = (int(round(sum(noise_vals) / len(noise_vals)))
+                 if noise_vals else None)
+    snr = (avg_rssi - avg_noise
+           if avg_rssi is not None and avg_noise is not None else None)
+    last = samples[-1]
+    return Signal(
+        ssid=last.ssid,
+        bssid=last.bssid,
+        rssi=avg_rssi,
+        noise=avg_noise,
+        snr=snr,
+        channel=last.channel,
+        phy=last.phy,
+        tx_rate=last.tx_rate,
+        mcs=last.mcs,
+        band=last.band,
+        security=last.security,
     )
 
 

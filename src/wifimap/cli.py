@@ -11,6 +11,7 @@ import argparse
 import csv
 import sqlite3
 import sys
+import time
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -36,6 +37,18 @@ _EXPORT_FIELDS = [
 def _disp(v: object) -> str:
     """Human-table cell: NULL shows as ``-`` (CSV export keeps ``""``)."""
     return "-" if v is None else str(v)
+
+
+def _sample_countdown(seconds: float = 5.0, tick: float = 1.0,
+                      write=None, _sleep=None) -> None:
+    """Tick a countdown to stderr before the blocking sampling call."""
+    w = write if write is not None else sys.stderr.write
+    sleep = _sleep if _sleep is not None else time.sleep
+    n = max(1, int(round(seconds / tick)))
+    for i in range(n, 0, -1):
+        w("sampling %gs... %d\n" % (seconds, i))
+        if i > 1:
+            sleep(tick)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -108,6 +121,20 @@ def _build_parser() -> argparse.ArgumentParser:
     ex.add_argument("--spot", default=None, help="Filter ID|NAME")
     ex.add_argument("--floor", type=int, default=None)
     ex.add_argument("--ssid", default=None, help="Filter by SSID")
+    bm = sub.add_parser("benchmark",
+                        help="Ideal-conditions reference per location.")
+    bm_sub = bm.add_subparsers(dest="benchmark_cmd", required=True)
+    bm_set = bm_sub.add_parser("set", help="Capture benchmark for a location.")
+    bm_set.add_argument("--location", required=True, help="Location ID|NAME")
+    bm_set.add_argument("--no-speedtest", action="store_true")
+    bm_set.add_argument("--note", default=None)
+    bm_set.add_argument("--force", action="store_true")
+    bm_show = bm_sub.add_parser("show", help="Print benchmark for a location.")
+    bm_show.add_argument("--location", required=True, help="Location ID|NAME")
+    bm_clear = bm_sub.add_parser("clear",
+                                help="Delete benchmark for a location.")
+    bm_clear.add_argument("--location", required=True, help="Location ID|NAME")
+    bm_clear.add_argument("--force", action="store_true")
     return p
 
 
@@ -138,8 +165,9 @@ def _cmd_scan(db_path: str, args: argparse.Namespace) -> int:
             identity = signal_mod.read_network_identity()
         except Exception:  # noqa: BLE001 - identity is best-effort
             identity = None
+        _sample_countdown()
         try:
-            sig = signal_mod.read_signal()
+            sig = signal_mod.sample_signal()
         except signal_mod.NoWiFiError as exc:
             print("Error: no WiFi: %s" % (exc,), file=sys.stderr)
             return EXIT_NOWIFI
@@ -161,6 +189,7 @@ def _cmd_scan(db_path: str, args: argparse.Namespace) -> int:
         up_mbps: Optional[float] = None
         server: Optional[str] = None
         if not args.no_speedtest:
+            print("speedtest running...", file=sys.stderr, flush=True)
             try:
                 sp = speed_mod.run_speedtest()
                 ping_ms, down_mbps, up_mbps, server = (
@@ -185,7 +214,19 @@ def _cmd_scan(db_path: str, args: argparse.Namespace) -> int:
         print("#%d %s/%s/%s rssi=%s snr=%s down=%s up=%s note=%s" % (
             rid, args.location, args.room, args.spot,
             _disp(sig.rssi), _disp(sig.snr),
-            _disp(down_mbps), _disp(up_mbps), _disp(args.note)))
+            _disp(down_mbps), _disp(up_mbps), _disp(args.note)),
+            end="")
+        try:
+            bench = store_mod.get_benchmark(conn, loc_id)
+            delta = store_mod.format_benchmark_delta(
+                {"rssi": sig.rssi, "snr": sig.snr,
+                 "down_mbps": down_mbps, "up_mbps": up_mbps},
+                bench)
+            if delta:
+                print(" (vs bench: %s)" % delta, end="")
+        except Exception:  # noqa: BLE001 - delta never breaks scan
+            pass
+        print("")
         return EXIT_OK
     finally:
         conn.close()
@@ -417,6 +458,146 @@ def _cmd_export(db_path: str, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _cmd_benchmark_set(db_path: str, args: argparse.Namespace) -> int:
+    try:
+        conn = _open_db(db_path)
+    except (sqlite3.Error, OSError) as exc:
+        print("Error: cannot open DB: %s" % (exc,), file=sys.stderr)
+        return EXIT_STORAGE
+    try:
+        try:
+            loc_id = store_mod.resolve_location(conn, args.location)
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            print("Error: cannot resolve location: %s" % (exc,),
+                  file=sys.stderr)
+            return EXIT_STORAGE
+        try:
+            old = store_mod.get_benchmark(conn, loc_id)
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            print("Error: cannot read benchmark: %s" % (exc,),
+                  file=sys.stderr)
+            return EXIT_STORAGE
+        if old is not None and not args.force:
+            print("existing benchmark: rssi=%s snr=%s down=%s up=%s note=%s"
+                  % (_disp(old.get("rssi")), _disp(old.get("snr")),
+                     _disp(old.get("down_mbps")), _disp(old.get("up_mbps")),
+                     _disp(old.get("note"))))
+            try:
+                ans = input("Overwrite benchmark for %s? [y/N] "
+                            % (args.location,)).strip().lower()
+            except (EOFError, OSError):
+                ans = ""
+            if ans not in ("y", "yes"):
+                print("benchmark kept")
+                return EXIT_OK
+        _sample_countdown()
+        try:
+            sig = signal_mod.sample_signal()
+        except signal_mod.NoWiFiError as exc:
+            print("Error: no WiFi: %s" % (exc,), file=sys.stderr)
+            return EXIT_NOWIFI
+        except signal_mod.SignalUnavailableError as exc:
+            print("Error: signal backend unavailable: %s" % (exc,),
+                  file=sys.stderr)
+            return EXIT_NOWIFI
+        ping_ms: Optional[float] = None
+        down_mbps: Optional[float] = None
+        up_mbps: Optional[float] = None
+        server: Optional[str] = None
+        if not args.no_speedtest:
+            print("speedtest running...", file=sys.stderr, flush=True)
+            try:
+                sp = speed_mod.run_speedtest()
+                ping_ms, down_mbps, up_mbps, server = (
+                    sp.ping_ms, sp.down_mbps, sp.up_mbps, sp.server)
+            except speed_mod.SpeedtestUnavailableError as exc:
+                print("Warning: %s; proceeding signal-only" % (exc,),
+                      file=sys.stderr)
+            except speed_mod.SpeedtestFailedError:
+                ping_ms, down_mbps, up_mbps, server = None, None, None, "ERROR"
+        try:
+            store_mod.set_benchmark(
+                conn, loc_id, ssid=sig.ssid, bssid=sig.bssid,
+                rssi=sig.rssi, noise=sig.noise, snr=sig.snr,
+                channel=sig.channel, phy=sig.phy, tx_rate=sig.tx_rate,
+                ping_ms=ping_ms, down_mbps=down_mbps, up_mbps=up_mbps,
+                server=server, note=args.note)
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            print("Error: cannot store benchmark: %s" % (exc,),
+                  file=sys.stderr)
+            return EXIT_STORAGE
+        print("benchmark set for %s rssi=%s snr=%s down=%s up=%s note=%s"
+              % (args.location, _disp(sig.rssi), _disp(sig.snr),
+                 _disp(down_mbps), _disp(up_mbps), _disp(args.note)))
+        return EXIT_OK
+    finally:
+        conn.close()
+
+
+def _cmd_benchmark_show(db_path: str, args: argparse.Namespace) -> int:
+    try:
+        conn = _open_db(db_path)
+    except (sqlite3.Error, OSError) as exc:
+        print("Error: cannot open DB: %s" % (exc,), file=sys.stderr)
+        return EXIT_STORAGE
+    try:
+        try:
+            loc_id = store_mod.lookup_location(conn, args.location)
+            bench = store_mod.get_benchmark(conn, loc_id)
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            print("Error: cannot show benchmark: %s" % (exc,),
+                  file=sys.stderr)
+            return EXIT_STORAGE
+        if bench is None:
+            print("no benchmark for %s" % (args.location,), file=sys.stderr)
+            return EXIT_STORAGE
+        print("benchmark for %s rssi=%s snr=%s down=%s up=%s note=%s" % (
+            args.location, _disp(bench.get("rssi")),
+            _disp(bench.get("snr")), _disp(bench.get("down_mbps")),
+            _disp(bench.get("up_mbps")), _disp(bench.get("note"))))
+        return EXIT_OK
+    finally:
+        conn.close()
+
+
+def _cmd_benchmark_clear(db_path: str, args: argparse.Namespace) -> int:
+    try:
+        conn = _open_db(db_path)
+    except (sqlite3.Error, OSError) as exc:
+        print("Error: cannot open DB: %s" % (exc,), file=sys.stderr)
+        return EXIT_STORAGE
+    try:
+        try:
+            loc_id = store_mod.lookup_location(conn, args.location)
+            bench = store_mod.get_benchmark(conn, loc_id)
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            print("Error: cannot clear benchmark: %s" % (exc,),
+                  file=sys.stderr)
+            return EXIT_STORAGE
+        if bench is None:
+            print("no benchmark for %s" % (args.location,), file=sys.stderr)
+            return EXIT_STORAGE
+        if not args.force:
+            try:
+                ans = input("Clear benchmark for %s? [y/N] "
+                            % (args.location,)).strip().lower()
+            except (EOFError, OSError):
+                ans = ""
+            if ans not in ("y", "yes"):
+                print("benchmark kept")
+                return EXIT_OK
+        try:
+            store_mod.clear_benchmark(conn, loc_id)
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            print("Error: cannot clear benchmark: %s" % (exc,),
+                  file=sys.stderr)
+            return EXIT_STORAGE
+        print("benchmark cleared for %s" % (args.location,))
+        return EXIT_OK
+    finally:
+        conn.close()
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """Entry point returning an exit code (no sys.exit inside)."""
     parser = _build_parser()
@@ -442,6 +623,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _cmd_list(db_path, args)
     if args.cmd == "export":
         return _cmd_export(db_path, args)
+    if args.cmd == "benchmark":
+        if args.benchmark_cmd == "set":
+            return _cmd_benchmark_set(db_path, args)
+        if args.benchmark_cmd == "show":
+            return _cmd_benchmark_show(db_path, args)
+        if args.benchmark_cmd == "clear":
+            return _cmd_benchmark_clear(db_path, args)
     raise AssertionError("unreachable: argparse requires a subcommand")
 
 

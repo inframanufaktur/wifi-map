@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import sqlite3
 import threading
 
 import pytest
@@ -146,6 +147,69 @@ def test_fallback_pick_no_preset_toasts(monkeypatch, tmp_path):
         conn.close()
 
 
+def test_find_room_by_name(tmp_path):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        lid, rid, _ = _seed_3level(conn, room="kitchen", floor=1)
+        assert tui_mod._find_room_by_name(conn, lid, "kitchen") == (rid, 1)
+        assert tui_mod._find_room_by_name(conn, lid, "nope") is None
+        other = store_mod.create_location(conn, "office")
+        assert tui_mod._find_room_by_name(conn, other, "kitchen") is None
+    finally:
+        conn.close()
+
+
+def test_fallback_create_room_reuses_on_integrity_error(
+        monkeypatch, tmp_path):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        lid, rid, _ = _seed_3level(conn, room="kitchen", floor=1)
+
+        def _boom(*args, **kwargs):
+            raise sqlite3.IntegrityError(
+                "UNIQUE constraint failed: rooms.location_id, rooms.name")
+
+        monkeypatch.setattr(store_mod, "create_room", _boom)
+        answers = iter(["kitchen", "2", "n"])
+        monkeypatch.setattr("builtins.input",
+                            lambda *args: next(answers))
+        st = tui_mod.WalkState(db)
+        st.active_location_id = lid
+        room_id, note = tui_mod._fallback_create_room(conn, st)
+        assert room_id == rid
+        assert note == "room exists (floor 1); adding spot there"
+    finally:
+        conn.close()
+
+
+def test_fallback_create_reuses_room_then_spot(monkeypatch, tmp_path):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        lid, rid, _ = _seed_3level(conn, room="kitchen", floor=1)
+
+        def _boom(*args, **kwargs):
+            raise sqlite3.IntegrityError(
+                "UNIQUE constraint failed: rooms.location_id, rooms.name")
+
+        monkeypatch.setattr(store_mod, "create_room", _boom)
+        # room name, floor, outdoors, then spot name for reused room.
+        answers = iter(["kitchen", "2", "n", "corner"])
+        monkeypatch.setattr("builtins.input",
+                            lambda *args: next(answers))
+        st = tui_mod.WalkState(db)
+        st.active_location_id = lid
+        tui_mod._fallback_create(conn, st)
+        assert st.active_spot_id is not None
+        spot = store_mod.list_spots(conn, room_id=rid)
+        assert [sp.name for sp in spot] == ["window", "bed", "corner"]
+        assert "room exists" in st.ui_snapshot()[0]
+    finally:
+        conn.close()
+
+
 def test_parse_floor_input_ok_and_negative():
     assert tui_mod.parse_floor_input("0") == 0
     assert tui_mod.parse_floor_input(" 2 ") == 2
@@ -202,7 +266,7 @@ def _db(tmp_path):
     return str(tmp_path / "tui.db")
 
 
-def test_finish_snapshot_speed_ok(tmp_path):
+def test_finish_snapshot_speed_ok(tmp_path, monkeypatch):
     db = _db(tmp_path)
     conn = store_mod.get_db(db)
     try:
@@ -210,25 +274,29 @@ def test_finish_snapshot_speed_ok(tmp_path):
                                       spots=("s1", "s2"))
     finally:
         conn.close()
-    sig = {"ssid": "h", "bssid": None, "rssi": -60, "noise": -90,
-           "snr": 30, "channel": "1", "phy": "n", "tx_rate": "5"}
+    monkeypatch.setattr(
+        signal_mod, "sample_signal",
+        lambda *a, **k: signal_mod.Signal(ssid="h", bssid=None, rssi=-60,
+                                          noise=-90, snr=30, channel="1",
+                                          phy="n", tx_rate="5"))
 
     def _sp():
         return speed_mod.Speed(ping_ms=9.0, down_mbps=80.0, up_mbps=10.0,
                                server="S (1)")
 
-    res = tui_mod.finish_snapshot(db, sid, dict(sig), run_speedtest_fn=_sp)
+    res = tui_mod.finish_snapshot(db, sid, run_speedtest_fn=_sp)
     assert res.ok and res.reading_id is not None
     conn = store_mod.get_db(db)
     try:
         rows = store_mod.list_readings(conn)
         assert rows[0]["down_mbps"] == 80.0
         assert rows[0]["rssi"] == -60
+        assert rows[0]["snr"] == 30
     finally:
         conn.close()
 
 
-def test_finish_snapshot_speed_fail_nulls_error(tmp_path):
+def test_finish_snapshot_no_wifi_result_message(tmp_path, monkeypatch):
     db = _db(tmp_path)
     conn = store_mod.get_db(db)
     try:
@@ -237,11 +305,59 @@ def test_finish_snapshot_speed_fail_nulls_error(tmp_path):
     finally:
         conn.close()
 
+    def _off(*a, **k):
+        raise signal_mod.NoWiFiError("off")
+
+    monkeypatch.setattr(signal_mod, "sample_signal", _off)
+    res = tui_mod.finish_snapshot(db, sid)
+    assert res.ok is False
+    assert "NO-WIFI" in res.message
+    conn = store_mod.get_db(db)
+    try:
+        assert store_mod.list_readings(conn) == []
+    finally:
+        conn.close()
+
+
+def test_finish_snapshot_other_error_empty_signal_row(tmp_path, monkeypatch):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        _, _, (sid, _) = _seed_3level(conn, loc="den", room="r",
+                                      spots=("s1", "s2"))
+    finally:
+        conn.close()
+
+    def _boom(*a, **k):
+        raise RuntimeError("backend gone")
+
+    monkeypatch.setattr(signal_mod, "sample_signal", _boom)
+    res = tui_mod.finish_snapshot(db, sid, no_speedtest=True)
+    assert res.ok
+    conn = store_mod.get_db(db)
+    try:
+        rows = store_mod.list_readings(conn)
+        assert rows[0]["rssi"] is None
+    finally:
+        conn.close()
+
+
+def test_finish_snapshot_speed_fail_nulls_error(tmp_path, monkeypatch):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        _, _, (sid, _) = _seed_3level(conn, loc="den", room="r",
+                                      spots=("s1", "s2"))
+    finally:
+        conn.close()
+    monkeypatch.setattr(
+        signal_mod, "sample_signal",
+        lambda *a, **k: signal_mod.Signal(ssid="h", rssi=-61))
+
     def _fail():
         raise speed_mod.SpeedtestFailedError("timeout")
 
-    res = tui_mod.finish_snapshot(
-        db, sid, {"ssid": "h", "rssi": -61}, run_speedtest_fn=_fail)
+    res = tui_mod.finish_snapshot(db, sid, run_speedtest_fn=_fail)
     assert res.ok
     conn = store_mod.get_db(db)
     try:
@@ -252,7 +368,7 @@ def test_finish_snapshot_speed_fail_nulls_error(tmp_path):
         conn.close()
 
 
-def test_finish_snapshot_missing_binary_signal_only(tmp_path):
+def test_finish_snapshot_missing_binary_signal_only(tmp_path, monkeypatch):
     db = _db(tmp_path)
     conn = store_mod.get_db(db)
     try:
@@ -260,12 +376,14 @@ def test_finish_snapshot_missing_binary_signal_only(tmp_path):
                                       spots=("s1", "s2"))
     finally:
         conn.close()
+    monkeypatch.setattr(
+        signal_mod, "sample_signal",
+        lambda *a, **k: signal_mod.Signal(ssid="h", rssi=-62))
 
     def _missing():
         raise speed_mod.SpeedtestUnavailableError("no binary")
 
-    res = tui_mod.finish_snapshot(
-        db, sid, {"ssid": "h", "rssi": -62}, run_speedtest_fn=_missing)
+    res = tui_mod.finish_snapshot(db, sid, run_speedtest_fn=_missing)
     assert res.ok
     assert "signal-only" in res.message.lower() or "warn" in res.message.lower()
     conn = store_mod.get_db(db)
@@ -275,7 +393,7 @@ def test_finish_snapshot_missing_binary_signal_only(tmp_path):
         conn.close()
 
 
-def test_start_snapshot_thread_daemon_join(tmp_path):
+def test_start_snapshot_thread_daemon_join(tmp_path, monkeypatch):
     db = _db(tmp_path)
     conn = store_mod.get_db(db)
     try:
@@ -283,10 +401,12 @@ def test_start_snapshot_thread_daemon_join(tmp_path):
                                       spots=("s1", "s2"))
     finally:
         conn.close()
-    sig = signal_mod.Signal(ssid="h", rssi=-55)
+    monkeypatch.setattr(
+        signal_mod, "sample_signal",
+        lambda *a, **k: signal_mod.Signal(ssid="h", rssi=-55))
     done = []
     t = tui_mod.start_snapshot_thread(
-        db, sid, sig, no_speedtest=True,
+        db, sid, no_speedtest=True,
         on_done=lambda r: done.append(r))
     assert t.daemon is True
     t.join(timeout=10)
@@ -296,8 +416,6 @@ def test_start_snapshot_thread_daemon_join(tmp_path):
         assert store_mod.list_readings(conn)[0]["rssi"] == -55
     finally:
         conn.close()
-    # thread froze a copy: mutating original post-spawn is safe
-    sig.rssi = -1
 
 
 def test_walk_state_nowifi_blocks_snapshot(tmp_path):
@@ -428,7 +546,30 @@ def test_location_label_states(tmp_path, monkeypatch):
         conn.close()
 
 
-def test_try_snapshot_success_path(tmp_path):
+def test_finish_benchmark_samples_signal(tmp_path, monkeypatch):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        lid, _rid, _spots = _seed_3level(conn, loc="lab", room="r",
+                                         spots=("s1", "s2"))
+    finally:
+        conn.close()
+    monkeypatch.setattr(
+        signal_mod, "sample_signal",
+        lambda *a, **k: signal_mod.Signal(ssid="h", rssi=-45, noise=-90,
+                                          snr=45))
+    res = tui_mod._finish_benchmark(db, lid, no_speedtest=True)
+    assert res.ok
+    assert res.rssi == -45 and res.snr == 45
+    conn = store_mod.get_db(db)
+    try:
+        bench = store_mod.get_benchmark(conn, lid)
+        assert bench["rssi"] == -45
+    finally:
+        conn.close()
+
+
+def test_try_snapshot_success_path(tmp_path, monkeypatch):
     db = _db(tmp_path)
     conn = store_mod.get_db(db)
     try:
@@ -436,9 +577,12 @@ def test_try_snapshot_success_path(tmp_path):
                                       spots=("s1", "s2"))
     finally:
         conn.close()
+    monkeypatch.setattr(
+        signal_mod, "sample_signal",
+        lambda *a, **k: signal_mod.Signal(ssid="h", rssi=-60, noise=-90,
+                                          snr=30))
     st = tui_mod.WalkState(db, no_speedtest=True)
     st.active_spot_id = sid
-    st.sig = signal_mod.Signal(ssid="h", rssi=-60, noise=-90, snr=30)
     t = st.try_snapshot()
     assert t is not None
     t.join(timeout=10)
@@ -459,6 +603,28 @@ def test_try_snapshot_no_spot_toasts(tmp_path):
     st = tui_mod.WalkState(str(tmp_path / "w.db"), no_speedtest=True)
     assert st.try_snapshot() is None
     assert "no active spot" in st.ui_snapshot()[0].lower()
+
+
+def test_try_snapshot_sets_running_toast(tmp_path, monkeypatch):
+    st = tui_mod.WalkState(str(tmp_path / "w.db"), no_speedtest=True)
+    st.active_spot_id = 1
+    st.sig = signal_mod.Signal(ssid="h", rssi=-60, noise=-90, snr=30)
+    captured = {}
+
+    def fake_thread(*args, **kwargs):
+        captured["called"] = True
+
+        class _T:
+            def join(self, timeout=None):
+                pass
+        return _T()
+
+    monkeypatch.setattr(tui_mod, "start_snapshot_thread", fake_thread)
+    t = st.try_snapshot()
+    assert t is not None
+    assert captured["called"]
+    toast, _ = st.ui_snapshot()
+    assert "snapshot running" in toast.lower()
 
 
 def test_run_walk_rejects_bad_interval(capsys, tmp_path):
@@ -531,7 +697,7 @@ def test_ssid_override_skips_autodetect(tmp_path):
     assert calls == []
 
 
-def test_ssid_override_backfills_and_tags_snapshot(tmp_path):
+def test_ssid_override_backfills_and_tags_snapshot(tmp_path, monkeypatch):
     db = str(tmp_path / "w.db")
     conn = store_mod.get_db(db)
     try:
@@ -539,6 +705,9 @@ def test_ssid_override_backfills_and_tags_snapshot(tmp_path):
                                       spots=("s1", "s2"))
     finally:
         conn.close()
+    monkeypatch.setattr(
+        signal_mod, "sample_signal",
+        lambda *a, **k: signal_mod.Signal(ssid="other", rssi=-60))
     st = tui_mod.WalkState(db, no_speedtest=True, ssid_override="home-5g")
     st.active_spot_id = sid
     st.poll(read_fn=lambda: signal_mod.Signal(ssid="other", rssi=-60))
@@ -759,3 +928,63 @@ def test_snapshot_payload_excludes_display_only():
     payload = tui_mod.snapshot_payload(sig)
     assert "mcs" not in payload and "band" not in payload
     assert "security" not in payload
+
+
+def test_walk_state_last_result_delta(tmp_path):
+    assert tui_mod.KEY_BENCHMARK == "b"
+    st = tui_mod.WalkState(str(tmp_path / "w.db"))
+    assert st.last_result == ""
+    cur = {"rssi": -60, "snr": 30, "down_mbps": 80.0, "up_mbps": 10.0}
+    bench = {"rssi": -70, "snr": 20, "down_mbps": 100.0, "up_mbps": 20.0}
+    delta = store_mod.format_benchmark_delta(cur, bench)
+    assert delta != ""
+    st.last_result = "saved #1 vs bench (%s)" % delta
+    assert "vs bench" in st.last_result
+
+
+def test_snapshot_last_result_delta_with_speed(tmp_path, monkeypatch):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        lid, _rid, (sid, _bid) = _seed_3level(conn)
+        store_mod.set_benchmark(
+            conn, lid, rssi=-70, snr=20, ping_ms=30.0,
+            down_mbps=100.0, up_mbps=20.0)
+    finally:
+        conn.close()
+    monkeypatch.setattr(
+        signal_mod, "sample_signal",
+        lambda *a, **k: signal_mod.Signal(ssid="h", rssi=-60, noise=-90,
+                                          snr=30))
+    st = tui_mod.WalkState(db)
+    st.active_location_id = lid
+    st.active_spot_id = sid
+    conn = store_mod.get_db(db)
+    try:
+        st.refresh_benchmark(conn)
+    finally:
+        conn.close()
+
+    def fake_speedtest():
+        return speed_mod.Speed(ping_ms=25.0, down_mbps=80.0, up_mbps=10.0)
+
+    t = st.try_snapshot(run_speedtest_fn=fake_speedtest)
+    assert t is not None
+    t.join(timeout=10)
+    with st._lock:
+        toast, last = st.toast, st.last_result
+    assert "vs bench" in last
+    assert "down -20.0" in last and "up -10.0" in last
+    # toast carries the same delta (spec: saved #N (vs bench ...))
+    assert last == toast
+
+
+def test_snapshot_last_result_no_benchmark_plain(tmp_path):
+    st = tui_mod.WalkState(str(tmp_path / "w.db"))
+    st.on_snapshot_done(tui_mod.SnapshotResult(ok=True, reading_id=1,
+                                               message="saved #1"))
+    with st._lock:
+        toast, last = st.toast, st.last_result
+    assert last == "saved #1"
+    assert "vs bench" not in last
+    assert toast == last

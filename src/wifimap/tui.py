@@ -9,7 +9,6 @@ callbacks and UI-thread reads are serialized by ``WalkState._lock``.
 """
 from __future__ import annotations
 
-import copy
 import math
 import os
 import shutil
@@ -31,6 +30,7 @@ from wifimap import store as store_mod
 # ---------------------------------------------------------------------------
 
 KEY_SNAPSHOT = "s"
+KEY_BENCHMARK = "b"
 KEY_SWITCH = "l"
 KEY_NEW = "n"
 KEY_FLOOR = "f"
@@ -361,23 +361,51 @@ class SnapshotResult:
     ok: bool
     reading_id: Optional[int] = None
     message: str = ""
+    ping_ms: Optional[float] = None
+    down_mbps: Optional[float] = None
+    up_mbps: Optional[float] = None
+    rssi: Optional[int] = None
+    snr: Optional[int] = None
+
+
+def _sample_guarded() -> Tuple[Optional[signal_mod.Signal], str]:
+    """sample_signal with attempt_read-style guards; (sig, error_msg).
+
+    ``NoWiFiError`` → (None, "NO-WIFI: ...") — caller aborts the
+    capture with that message. Any other error → (empty Signal, "")
+    so the capture still stores an UNKNOWN row (walk must never crash).
+    """
+    try:
+        return (signal_mod.sample_signal(), "")
+    except signal_mod.NoWiFiError as exc:
+        return (None, "NO-WIFI: %s" % (exc,))
+    except Exception:  # noqa: BLE001 - walk must never crash
+        return (signal_mod.Signal(), "")
 
 
 def finish_snapshot(
     db_path: str,
     spot_id: int,
-    sig_dict: Dict[str, object],
+    ssid_override: Optional[str] = None,
     run_speedtest_fn: Optional[Callable[[], speed_mod.Speed]] = None,
     no_speedtest: bool = False,
 ) -> SnapshotResult:
-    """Run speedtest (unless skipped) + insert reading on a fresh connection.
+    """Sample signal, run speedtest (unless skipped), insert reading.
 
-    Always opens/closes its OWN ``store.get_db`` connection — never share
-    the UI thread's connection (row_factory toggling is not thread-safe).
-    Speedtest fail → NULLs + server="ERROR", signal kept (spec 4).
-    Missing binary → signal-only row + warning message (same as scan).
-    DB error → ok=False + error message (caller toasts, walk continues).
+    Samples via ``signal_mod.sample_signal`` (5s average) BEFORE the
+    speedtest. Always opens/closes its OWN ``store.get_db`` connection —
+    never share the UI thread's connection (row_factory toggling is not
+    thread-safe). ``NoWiFiError`` → ok=False + "NO-WIFI" message; other
+    sampling errors → empty Signal (UNKNOWN row). Speedtest fail →
+    NULLs + server="ERROR", signal kept (spec 4). Missing binary →
+    signal-only row + warning message (same as scan). DB error →
+    ok=False + error message (caller toasts, walk continues).
     """
+    sig, err = _sample_guarded()
+    if sig is None:
+        return SnapshotResult(ok=False, message=err)
+    if ssid_override is not None:
+        sig.ssid = ssid_override
     ping_ms = down = up = None
     server: Optional[str] = None
     notice = ""
@@ -400,16 +428,16 @@ def finish_snapshot(
         try:
             rid = store_mod.add_reading(
                 conn, spot_id,
-                ssid=sig_dict.get("ssid"),  # type: ignore[arg-type]
-                bssid=sig_dict.get("bssid"),  # type: ignore[arg-type]
-                rssi=sig_dict.get("rssi"),  # type: ignore[arg-type]
-                noise=sig_dict.get("noise"),  # type: ignore[arg-type]
-                snr=sig_dict.get("snr"),  # type: ignore[arg-type]
-                channel=sig_dict.get("channel"),  # type: ignore[arg-type]
-                phy=sig_dict.get("phy"),  # type: ignore[arg-type]
-                tx_rate=sig_dict.get("tx_rate"),  # type: ignore[arg-type]
-                ping_ms=ping_ms, down_mbps=down,  # type: ignore[arg-type]
-                up_mbps=up,  # type: ignore[arg-type]
+                ssid=sig.ssid,
+                bssid=sig.bssid,
+                rssi=sig.rssi,
+                noise=sig.noise,
+                snr=sig.snr,
+                channel=sig.channel,
+                phy=sig.phy,
+                tx_rate=sig.tx_rate,
+                ping_ms=ping_ms, down_mbps=down,
+                up_mbps=up,
                 server=server,
             )
         except (sqlite3.Error, OSError, ValueError) as exc:
@@ -419,26 +447,29 @@ def finish_snapshot(
     msg = "saved #%d" % rid
     if notice:
         msg += " (%s)" % notice
-    return SnapshotResult(ok=True, reading_id=rid, message=msg)
+    return SnapshotResult(ok=True, reading_id=rid, message=msg,
+                          ping_ms=ping_ms, down_mbps=down, up_mbps=up,
+                          rssi=sig.rssi, snr=sig.snr)
 
 
 def start_snapshot_thread(
     db_path: str,
     location_id: int,
-    sig: signal_mod.Signal,
     no_speedtest: bool = False,
+    ssid_override: Optional[str] = None,
     on_done: Optional[Callable[[SnapshotResult], None]] = None,
     run_speedtest_fn: Optional[Callable[[], speed_mod.Speed]] = None,
 ) -> "threading.Thread":
-    """Freeze signal copy, spawn daemon thread; on done insert + callback.
+    """Spawn daemon thread: sample signal + insert on its own connection.
 
-    The thread opens its own DB connection via ``finish_snapshot``.
+    The worker calls ``finish_snapshot`` (samples + opens its own DB
+    connection), so the UI thread only hands over ids/overrides.
     """
-    frozen = snapshot_payload(copy.deepcopy(sig))
 
     def _work() -> None:
         res = finish_snapshot(
-            db_path, location_id, frozen,
+            db_path, location_id,
+            ssid_override=ssid_override,
             run_speedtest_fn=run_speedtest_fn,
             no_speedtest=no_speedtest,
         )
@@ -448,6 +479,77 @@ def start_snapshot_thread(
     t = threading.Thread(target=_work, daemon=True)
     t.start()
     return t
+
+
+def _finish_benchmark(
+    db_path: str,
+    location_id: int,
+    note: str = "",
+    ssid_override: Optional[str] = None,
+    run_speedtest_fn: Optional[Callable[[], speed_mod.Speed]] = None,
+    no_speedtest: bool = False,
+) -> SnapshotResult:
+    """Sample signal, run speedtest (unless skipped), upsert benchmark.
+
+    Mirrors ``finish_snapshot`` but writes the per-location benchmark row
+    instead of a reading. Always opens/closes its OWN ``store.get_db``
+    connection — never share the UI thread's connection.
+    """
+    sig, err = _sample_guarded()
+    if sig is None:
+        return SnapshotResult(ok=False, message=err)
+    if ssid_override is not None:
+        sig.ssid = ssid_override
+    ping_ms = down = up = None
+    server: Optional[str] = None
+    notice = ""
+    if not no_speedtest:
+        fn = run_speedtest_fn or speed_mod.run_speedtest
+        try:
+            sp = fn()
+            ping_ms, down, up, server = (
+                sp.ping_ms, sp.down_mbps, sp.up_mbps, sp.server)
+        except speed_mod.SpeedtestUnavailableError as exc:
+            notice = "Warning: %s; signal-only" % (exc,)
+        except speed_mod.SpeedtestFailedError:
+            ping_ms, down, up, server = None, None, None, "ERROR"
+            notice = "speedtest failed; signal kept"
+    try:
+        conn = store_mod.get_db(db_path)
+    except (sqlite3.Error, OSError) as exc:
+        return SnapshotResult(ok=False, message="DB error: %s" % (exc,))
+    try:
+        try:
+            store_mod.set_benchmark(
+                conn, location_id,
+                ssid=sig.ssid,
+                bssid=sig.bssid,
+                rssi=sig.rssi,
+                noise=sig.noise,
+                snr=sig.snr,
+                channel=sig.channel,
+                phy=sig.phy,
+                tx_rate=sig.tx_rate,
+                ping_ms=ping_ms, down_mbps=down,
+                up_mbps=up,
+                server=server,
+                note=note or None,
+            )
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            return SnapshotResult(ok=False, message="DB error: %s" % (exc,))
+    finally:
+        conn.close()
+
+    def _d(v: object) -> str:
+        return "-" if v is None else str(v)
+
+    msg = "benchmark set for #%d rssi=%s snr=%s down=%s up=%s" % (
+        location_id, _d(sig.rssi), _d(sig.snr), _d(down), _d(up))
+    if notice:
+        msg += " (%s)" % notice
+    return SnapshotResult(ok=True, message=msg, ping_ms=ping_ms,
+                          down_mbps=down, up_mbps=up,
+                          rssi=sig.rssi, snr=sig.snr)
 
 
 # ---------------------------------------------------------------------------
@@ -482,6 +584,8 @@ class WalkState:
         self.no_wifi_msg: str = ""
         self.toast: str = ""
         self.pending: int = 0
+        self.last_result: str = ""
+        self.benchmark: Optional[dict] = None
         self.net_ssid: Optional[str] = None
         self.net_bssid: Optional[str] = None
         self.ip: Optional[str] = None
@@ -572,6 +676,21 @@ class WalkState:
             self.pending = max(0, self.pending - 1)
             self.toast = (res.message if res.message else (
                 "saved #%s" % res.reading_id))
+            self.last_result = self.toast
+
+    def refresh_benchmark(self, conn: sqlite3.Connection) -> None:
+        """Reload benchmark for the active location; keeps old on DB error."""
+        lid = self.active_location_id
+        if lid is None:
+            with self._lock:
+                self.benchmark = None
+            return
+        try:
+            bench = store_mod.get_benchmark(conn, lid)
+        except Exception:  # noqa: BLE001 - bench line is best-effort
+            return
+        with self._lock:
+            self.benchmark = bench
 
     def poll(self, read_fn: Optional[Callable[[], signal_mod.Signal]] = None) -> None:
         fn = read_fn or signal_mod.read_signal
@@ -595,7 +714,11 @@ class WalkState:
         self,
         run_speedtest_fn: Optional[Callable[[], speed_mod.Speed]] = None,
     ) -> Optional["threading.Thread"]:
-        """Spawn snapshot thread for active spot; None + hint if blocked."""
+        """Spawn snapshot thread for active spot; None + hint if blocked.
+
+        The worker samples the signal itself (5s average) on its own
+        thread; the UI thread keeps live meters untouched.
+        """
         if self.no_wifi:
             self.set_toast("NO-WIFI: `s` blocked (WiFi off/not associated)")
             return None
@@ -605,18 +728,34 @@ class WalkState:
         with self._lock:
             self.pending += 1
         loc_id = self.active_spot_id
-        sig_copy = copy.deepcopy(self.sig)
-        if self.ssid_override is not None:
-            sig_copy.ssid = self.ssid_override
         result_box: List[SnapshotResult] = []
 
         def _cb(res: SnapshotResult) -> None:
             result_box.append(res)
             self.on_snapshot_done(res)
+            if res.ok:
+                try:
+                    cur = {"rssi": res.rssi,
+                           "snr": res.snr,
+                           "down_mbps": res.down_mbps,
+                           "up_mbps": res.up_mbps}
+                    with self._lock:
+                        bench = self.benchmark
+                    delta = store_mod.format_benchmark_delta(cur, bench)
+                    if delta:
+                        with self._lock:
+                            self.toast = "%s vs bench (%s)" % (
+                                self.toast, delta)
+                            self.last_result = "%s vs bench (%s)" % (
+                                self.last_result, delta)
+                except Exception:  # noqa: BLE001 - delta is best-effort
+                    pass
 
+        self.set_toast("snapshot running (speedtest)...")
         t = start_snapshot_thread(
-            self.db_path, loc_id, sig_copy,
+            self.db_path, loc_id,
             no_speedtest=self.no_speedtest,
+            ssid_override=self.ssid_override,
             on_done=_cb,
             run_speedtest_fn=run_speedtest_fn,
         )
@@ -793,10 +932,10 @@ def _pick_room_spot_curses(
         state.set_toast("DB error: %s" % (exc,))
         return False
     if picked_room == "new":
-        picked_room = _create_room_curses(
+        picked_room, note = _create_room_curses(
             stdscr, conn, state.active_location_id, poll_timeout_ms)
+        state.set_toast(note)
     if not isinstance(picked_room, int):
-        state.set_toast("room pick cancelled")
         return False
     try:
         picked_spot = _spot_picker_curses(
@@ -847,26 +986,58 @@ def _prompt_curses(stdscr: object, prompt: str,
             pass
 
 
+def _find_room_by_name(
+    conn: sqlite3.Connection, location_id: int, name: str,
+) -> Optional[Tuple[int, int]]:
+    """Existing (room_id, floor) for (location_id, name), any floor.
+
+    None when absent.
+    """
+    try:
+        row = conn.execute(
+            "SELECT id, floor FROM rooms WHERE location_id = ? AND name = ?",
+            (location_id, name),
+        ).fetchone()
+    except (sqlite3.Error, OSError):
+        return None
+    if row is None:
+        return None
+    return row[0], row[1]
+
+
 def _create_room_curses(
     stdscr: object, conn: sqlite3.Connection,
     location_id: int,
     poll_timeout_ms: int = PICKER_TIMEOUT_RESTORE_MS,
-) -> Optional[int]:
+) -> Tuple[Optional[int], str]:
+    """Prompt name/floor/outdoors; return (room_id, note).
+
+    room_id None means cancel/failure; note explains the outcome
+    ("room created" on success, "room exists (floor N); adding spot
+    there" when a same-name room was reused on UNIQUE collision).
+    """
     name = _prompt_curses(stdscr, "room name: ", poll_timeout_ms).strip()
     if not name:
-        return None
+        return None, "new room cancelled"
     floor_s = _prompt_curses(stdscr, "floor (int): ", poll_timeout_ms).strip()
     try:
         floor = parse_floor_input(floor_s or "0")
-    except ValueError:
-        return None
+    except ValueError as exc:
+        return None, "cancelled/invalid: %s" % (exc,)
     od_s = _prompt_curses(stdscr, "outdoors? [y/N]: ", poll_timeout_ms).strip().lower()
     outdoors = od_s in ("y", "yes", "1")
     try:
-        return store_mod.create_room(
+        room_id = store_mod.create_room(
             conn, location_id, name, floor=floor, outdoors=outdoors)
-    except (sqlite3.Error, OSError, ValueError):
-        return None
+    except sqlite3.IntegrityError:
+        existing = _find_room_by_name(conn, location_id, name)
+        if existing is None:
+            return None, "room create failed: duplicate room"
+        rid, efloor = existing
+        return rid, "room exists (floor %d); adding spot there" % efloor
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        return None, "room create failed: %s" % (exc,)
+    return room_id, "room created"
 
 
 def _create_spot_curses(
@@ -904,6 +1075,7 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                       ssid_override=ssid, history_max=cap)
     try:
         state.active_location_id = _resolve_preset(conn, location_preset)
+        state.refresh_benchmark(conn)
         state.ensure_identity()
         state.ensure_addrs()
         if location_preset is not None and state.active_location_id is None:
@@ -1033,7 +1205,22 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                 toast, pending = state.ui_snapshot()
                 _emit("loc: %s  pending: %d" % (
                     _location_label(conn, state.active_spot_id), pending))
-                _emit("keys: s snapshot | l switch | n new | "
+                with state._lock:
+                    _bench = state.benchmark
+                    _last = state.last_result
+                if _bench is not None:
+                    _emit("bench: rssi %s snr %s down %s up %s" % (
+                        "-" if _bench.get("rssi") is None
+                        else _bench.get("rssi"),
+                        "-" if _bench.get("snr") is None
+                        else _bench.get("snr"),
+                        "-" if _bench.get("down_mbps") is None
+                        else _bench.get("down_mbps"),
+                        "-" if _bench.get("up_mbps") is None
+                        else _bench.get("up_mbps")))
+                if _last:
+                    _emit("last: %s" % _last)
+                _emit("keys: s snapshot | b benchmark | l switch | n new | "
                       "f floor | q quit")
                 if toast:
                     _emit("» %s" % toast)
@@ -1062,6 +1249,46 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                     state.set_toast("snapshot cancelled (no spot)")
                     continue
                 state.try_snapshot()
+            elif key == KEY_BENCHMARK:
+                if state.no_wifi:
+                    state.set_toast(
+                        "NO-WIFI: `b` blocked (WiFi off/not associated)")
+                    continue
+                if state.active_location_id is None:
+                    state.set_toast(
+                        "no preset location: rerun with --location")
+                    continue
+                try:
+                    existing = store_mod.get_benchmark(
+                        conn, state.active_location_id)
+                except (sqlite3.Error, OSError, ValueError):
+                    existing = None
+                if existing is not None:
+                    ans = _prompt_curses(
+                        stdscr, "Overwrite benchmark? [y/N] ",
+                        poll_timeout_ms).strip().lower()
+                    if ans not in ("y", "yes"):
+                        state.set_toast("benchmark kept")
+                        continue
+                note = _prompt_curses(
+                    stdscr, "benchmark note: ",
+                    poll_timeout_ms).strip()
+                state.set_toast("benchmark running (speedtest)...")
+                try:
+                    _h, _w = stdscr.getmaxyx()
+                    stdscr.addstr(
+                        _h - 1, 0,
+                        "» benchmark running (speedtest)..."[:_w - 1])
+                    stdscr.refresh()
+                except Exception:
+                    pass
+                res = _finish_benchmark(
+                    state.db_path, state.active_location_id, note=note,
+                    ssid_override=state.ssid_override,
+                    no_speedtest=state.no_speedtest)
+                state.set_toast(res.message)
+                if res.ok:
+                    state.refresh_benchmark(conn)
             elif key == KEY_SWITCH:
                 if _pick_room_spot_curses(
                         stdscr, conn, state, poll_timeout_ms):
@@ -1072,11 +1299,11 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                     state.set_toast(
                         "no preset location: rerun with --location")
                     continue
-                room_id = _create_room_curses(
+                room_id, note = _create_room_curses(
                     stdscr, conn, state.active_location_id,
                     poll_timeout_ms)
+                state.set_toast(note)
                 if room_id is None:
-                    state.set_toast("new room cancelled/invalid")
                     continue
                 spot_id = _create_spot_curses(
                     stdscr, conn, room_id, poll_timeout_ms)
@@ -1116,7 +1343,7 @@ def _walk_fallback(db_path: str, interval: float,
     """ANSI fallback when curses/tty unavailable.
 
     Limit: keys are line-buffered (type a key + Enter); no live refresh
-    while waiting for input. Same ``s``/``l``/``n``/``f``/``q`` keys.
+    while waiting for input. Same ``s``/``b``/``l``/``n``/``f``/``q`` keys.
     """
     import select
 
@@ -1130,11 +1357,12 @@ def _walk_fallback(db_path: str, interval: float,
                       ssid_override=ssid, history_max=cap)
     try:
         state.active_location_id = _resolve_preset(conn, location_preset)
+        state.refresh_benchmark(conn)
         state.ensure_identity()
         state.ensure_addrs()
-        if location_preset is None:
-            print("walk fallback (no curses): keys s/l/n/f/q + Enter",
-                  flush=True)
+        print("walk fallback (no curses): type a key + Enter", flush=True)
+        print("keys: s snapshot | b benchmark | l switch | n new | "
+              "f floor | q quit", flush=True)
         while True:
             state.poll()
             if state.no_wifi:
@@ -1218,6 +1446,20 @@ def _walk_fallback(db_path: str, interval: float,
             print("loc: %s pending: %d %s" % (
                 _location_label(conn, state.active_spot_id), pending,
                 ("» %s" % toast) if toast else ""))
+            with state._lock:
+                _bench = state.benchmark
+                _last = state.last_result
+            if _bench is not None:
+                print("bench: rssi %s snr %s down %s up %s" % (
+                    "-" if _bench.get("rssi") is None
+                    else _bench.get("rssi"),
+                    "-" if _bench.get("snr") is None else _bench.get("snr"),
+                    "-" if _bench.get("down_mbps") is None
+                    else _bench.get("down_mbps"),
+                    "-" if _bench.get("up_mbps") is None
+                    else _bench.get("up_mbps")), flush=True)
+            if _last:
+                print("last: %s" % _last, flush=True)
             state.set_toast("")
             r, _, _ = select.select([sys.stdin], [], [], interval)
             key = ""
@@ -1239,6 +1481,43 @@ def _walk_fallback(db_path: str, interval: float,
                     continue  # picker toasted already ("cancelled", ...)
                 state.try_snapshot()
                 time.sleep(FALLBACK_SETTLE_SLEEP)  # fast mocks → toast order
+            elif key == KEY_BENCHMARK:
+                if state.no_wifi:
+                    state.set_toast(
+                        "NO-WIFI: `b` blocked (WiFi off/not associated)")
+                    time.sleep(FALLBACK_SETTLE_SLEEP)
+                    continue
+                if state.active_location_id is None:
+                    state.set_toast(
+                        "no preset location: rerun with --location")
+                    continue
+                try:
+                    existing = store_mod.get_benchmark(
+                        conn, state.active_location_id)
+                except (sqlite3.Error, OSError, ValueError):
+                    existing = None
+                if existing is not None:
+                    try:
+                        ans = input(
+                            "Overwrite benchmark? [y/N] ").strip().lower()
+                    except (EOFError, OSError):
+                        ans = ""
+                    if ans not in ("y", "yes"):
+                        state.set_toast("benchmark kept")
+                        continue
+                try:
+                    note = input("benchmark note: ").strip()
+                except (EOFError, OSError):
+                    note = ""
+                state.set_toast("benchmark running (speedtest)...")
+                print("» benchmark running (speedtest)...", flush=True)
+                res = _finish_benchmark(
+                    state.db_path, state.active_location_id, note=note,
+                    ssid_override=state.ssid_override,
+                    no_speedtest=state.no_speedtest)
+                state.set_toast(res.message)
+                if res.ok:
+                    state.refresh_benchmark(conn)
             elif key == KEY_SWITCH:
                 _fallback_pick(conn, state)
             elif key == KEY_NEW:
@@ -1306,7 +1585,11 @@ def _fallback_pick(conn: sqlite3.Connection, state: WalkState) -> bool:
     picked_room = _fallback_pick_level(
         "room", room_rows, _active_room_id(conn, state), "new room")
     if picked_room == "new":
-        picked_room = _fallback_create_room(conn, state)
+        picked_room, note = _fallback_create_room(conn, state)
+        if picked_room is None:
+            state.set_toast(note)
+            return False
+        state.set_toast(note)
     if not isinstance(picked_room, int):
         state.set_toast("cancelled")
         return False
@@ -1328,26 +1611,38 @@ def _fallback_pick(conn: sqlite3.Connection, state: WalkState) -> bool:
 
 
 def _fallback_create_room(conn: sqlite3.Connection,
-                          state: WalkState) -> Optional[int]:
-    """Prompt name/floor/outdoors; create room in active location."""
+                          state: WalkState) -> Tuple[Optional[int], str]:
+    """Prompt name/floor/outdoors; return (room_id, note).
+
+    room_id None means cancel/failure; note explains the outcome
+    ("room created" on success, "room exists (floor N); adding spot
+    there" when a same-name room was reused on UNIQUE collision).
+    """
     if state.active_location_id is None:
-        state.set_toast("no preset location: rerun with --location")
-        return None
+        return None, "no preset location: rerun with --location"
     try:
         name = input("room name: ").strip()
         floor = parse_floor_input(input("floor (int): ") or "0")
         outdoors = input("outdoors? [y/N]: ").strip().lower() in (
             "y", "yes", "1")
     except (EOFError, OSError, ValueError) as exc:
-        state.set_toast("cancelled/invalid: %s" % (exc,))
-        return None
+        return None, "cancelled/invalid: %s" % (exc,)
+    if not name:
+        return None, "new room cancelled"
     try:
-        return store_mod.create_room(
+        room_id = store_mod.create_room(
             conn, state.active_location_id, name, floor=floor,
             outdoors=outdoors)
+    except sqlite3.IntegrityError:
+        existing = _find_room_by_name(
+            conn, state.active_location_id, name)
+        if existing is None:
+            return None, "room create failed: duplicate room"
+        rid, efloor = existing
+        return rid, "room exists (floor %d); adding spot there" % efloor
     except (sqlite3.Error, OSError, ValueError) as exc:
-        state.set_toast("DB error: %s" % (exc,))
-        return None
+        return None, "DB error: %s" % (exc,)
+    return room_id, "room created"
 
 
 def _fallback_create_spot(conn: sqlite3.Connection, room_id: int,
@@ -1367,11 +1662,11 @@ def _fallback_create_spot(conn: sqlite3.Connection, room_id: int,
 
 def _fallback_create(conn: sqlite3.Connection, state: WalkState) -> None:
     """Create room (in active location) then spot (in new room)."""
-    room_id = _fallback_create_room(conn, state)
+    room_id, note = _fallback_create_room(conn, state)
     if room_id is None:
-        if not state.ui_snapshot()[0]:
-            state.set_toast("cancelled/invalid")
+        state.set_toast(note)
         return
+    state.set_toast(note)
     spot_id = _fallback_create_spot(conn, room_id, state)
     if spot_id is None:
         if not state.ui_snapshot()[0]:
@@ -1433,6 +1728,7 @@ __all__ = [
     "PickerSelection",
     "QUIT_WORDS",
     "KEY_SNAPSHOT",
+    "KEY_BENCHMARK",
     "KEY_SWITCH",
     "KEY_NEW",
     "KEY_FLOOR",
