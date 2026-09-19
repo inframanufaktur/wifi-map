@@ -23,6 +23,7 @@ from typing import Callable, Dict, List, Literal, Optional, Tuple, Union
 from wifimap import signal as signal_mod
 from wifimap import speed as speed_mod
 from wifimap import store as store_mod
+from wifimap import traffic as traffic_mod
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +81,16 @@ def format_signal_line(sig: signal_mod.Signal) -> str:
 def format_net_line(ssid: Optional[str]) -> str:
     """Session header: ``Net: <ssid>`` or ``Net: unknown``."""
     return "Net: %s" % (ssid if ssid else "unknown")
+
+
+def fmt_mbps(v: Optional[float]) -> str:
+    """Compact Mbps value; None renders as ``-`` (matches table style)."""
+    return "-" if v is None else "%.1f" % v
+
+
+def fmt_rate_val(v: Optional[float]) -> str:
+    """Meter value cell for live down/up: ``267.5 Mbps`` / ``-``."""
+    return "-" if v is None else "%.1f Mbps" % v
 
 
 def rate_rssi(v: Optional[int]) -> str:
@@ -247,6 +258,12 @@ class SparkHistory:
         if align == "right" and len(s) < width:
             s = " " * (width - len(s)) + s
         return s
+
+    def sparkline_auto(self, width: int, min_hi: float = 1.0) -> str:
+        """Sparkline scaled 0..max(buffer); floor ``min_hi`` keeps flatlines visible."""
+        vals = [v for v in self._buf if v is not None]
+        hi = max(vals) if vals else min_hi
+        return self.sparkline(0.0, max(hi, min_hi), width)
 
 
 def history_cap(interval: float) -> int:
@@ -445,6 +462,8 @@ def finish_snapshot(
     finally:
         conn.close()
     msg = "saved #%d" % rid
+    if not no_speedtest:
+        msg += " down %s up %s Mbps" % (fmt_mbps(down), fmt_mbps(up))
     if notice:
         msg += " (%s)" % notice
     return SnapshotResult(ok=True, reading_id=rid, message=msg,
@@ -544,7 +563,8 @@ def _finish_benchmark(
         return "-" if v is None else str(v)
 
     msg = "benchmark set for #%d rssi=%s snr=%s down=%s up=%s" % (
-        location_id, _d(sig.rssi), _d(sig.snr), _d(down), _d(up))
+        location_id, _d(sig.rssi), _d(sig.snr),
+        fmt_mbps(down), fmt_mbps(up))
     if notice:
         msg += " (%s)" % notice
     return SnapshotResult(ok=True, message=msg, ping_ms=ping_ms,
@@ -569,7 +589,8 @@ class WalkState:
 
     def __init__(self, db_path: str, no_speedtest: bool = False,
                  ssid_override: Optional[str] = None,
-                 history_max: int = 60) -> None:
+                 history_max: int = 60,
+                 traffic_fn: Optional[Callable[[], traffic_mod.Rates]] = None) -> None:
         self.db_path = db_path
         self.no_speedtest = no_speedtest
         self.ssid_override = (ssid_override.strip() or None) if ssid_override is not None else None
@@ -577,6 +598,12 @@ class WalkState:
         self.hist_rssi: SparkHistory = SparkHistory(maxlen=self.history_max)
         self.hist_noise: SparkHistory = SparkHistory(maxlen=self.history_max)
         self.hist_snr: SparkHistory = SparkHistory(maxlen=self.history_max)
+        self.hist_down: SparkHistory = SparkHistory(maxlen=self.history_max)
+        self.hist_up: SparkHistory = SparkHistory(maxlen=self.history_max)
+        self.last_rates: traffic_mod.Rates = None
+        self._traffic_fn = traffic_fn
+        self._traffic_sampler: Optional[traffic_mod.TrafficSampler] = (
+            None if traffic_fn is not None else traffic_mod.TrafficSampler())
         self.active_location_id: Optional[int] = None
         self.active_spot_id: Optional[int] = None
         self.sig: signal_mod.Signal = signal_mod.Signal()
@@ -709,6 +736,17 @@ class WalkState:
         self.hist_rssi.append(self.sig.rssi)
         self.hist_noise.append(self.sig.noise)
         self.hist_snr.append(self.sig.snr)
+        rates: traffic_mod.Rates = None
+        try:
+            if self._traffic_fn is not None:
+                rates = self._traffic_fn()
+            elif self._traffic_sampler is not None:
+                rates = self._traffic_sampler.sample()
+        except Exception:  # noqa: BLE001 - traffic graph is best-effort
+            rates = None
+        self.last_rates = rates
+        self.hist_down.append(rates[0] if rates else None)
+        self.hist_up.append(rates[1] if rates else None)
 
     def try_snapshot(
         self,
@@ -1153,56 +1191,80 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                     ch_s = state.sig.channel or "-"
                     phy_s = state.sig.phy or "-"
                     tx_s = state.sig.tx_rate or "-"
+                    down_s = fmt_rate_val(
+                        state.last_rates[0] if state.last_rates else None)
+                    up_s = fmt_rate_val(
+                        state.last_rates[1] if state.last_rates else None)
                     r_val_pad = rssi_s.ljust(METER_VAL_W)
                     s_val_pad = snr_s.ljust(METER_VAL_W)
                     n_val_pad = noise_s.ljust(METER_VAL_W)
+                    d_val_pad = down_s.ljust(METER_VAL_W)
+                    u_val_pad = up_s.ljust(METER_VAL_W)
                     lefts = [
                         format_meter_left("RSSI", rssi_s, r_rate),
                         format_meter_left("SNR", snr_s, s_rate),
                         format_meter_left("noise", noise_s, None),
+                        format_meter_left("down", down_s, None),
+                        format_meter_left("up", up_s, None),
                     ]
                     max_left, gw = meter_layout(w, lefts)
-                    pad1 = " " * (max_left - len(lefts[0]))
-                    pad2 = " " * (max_left - len(lefts[1]))
-                    pad3 = " " * (max_left - len(lefts[2]))
+                    pads = [" " * (max_left - len(s)) for s in lefts]
                     if h >= 10:
                         rssi_g = state.hist_rssi.sparkline(-90, -30, gw)
                         snr_g = state.hist_snr.sparkline(0, 40, gw)
                         noise_g = state.hist_noise.sparkline(-100, -60, gw)
+                        down_g = state.hist_down.sparkline_auto(gw)
+                        up_g = state.hist_up.sparkline_auto(gw)
                         _emit_segs([("RSSI  ", 0),
                                     (r_val_pad + "[%s]" % r_rate, r_attr),
-                                    (pad1 + " | ", 0),
+                                    (pads[0] + " | ", 0),
                                     (rssi_g, r_attr), (" [60s]", 0)])
                         _emit_segs([("SNR   ", 0),
                                     (s_val_pad + "[%s]" % s_rate, s_attr),
-                                    (pad2 + " | ", 0),
+                                    (pads[1] + " | ", 0),
                                     (snr_g, s_attr), (" [60s]", 0)])
                         _emit_segs([("noise ", 0), (n_val_pad, 0),
-                                    (pad3 + " | ", 0),
+                                    (pads[2] + " | ", 0),
                                     (noise_g, 0), (" [60s]", 0)])
+                        _emit("")
                         _emit(format_extra_line(ch_s, phy_s, tx_s))
                         _emit(format_radio_line(
                             state.sig.mcs, state.sig.band,
                             state.sig.security))
+                        _emit("")
+                        _emit_segs([("down  ", 0), (d_val_pad, 0),
+                                    (pads[3] + " | ", 0),
+                                    (down_g, 0), (" [60s]", 0)])
+                        _emit_segs([("up    ", 0), (u_val_pad, 0),
+                                    (pads[4] + " | ", 0),
+                                    (up_g, 0), (" [60s]", 0)])
                     else:
                         _emit_segs([("RSSI  ", 0),
                                     (r_val_pad + "[%s]" % r_rate, r_attr),
-                                    (pad1, 0)])
+                                    (pads[0], 0)])
                         _emit_segs([("SNR   ", 0),
                                     (s_val_pad + "[%s]" % s_rate, s_attr),
-                                    (pad2, 0)])
+                                    (pads[1], 0)])
                         _emit_segs([("noise ", 0), (n_val_pad, 0),
-                                    (pad3, 0)])
+                                    (pads[2], 0)])
+                        _emit("")
                         _emit(format_extra_line(ch_s, phy_s, tx_s))
                         _emit(format_radio_line(
                             state.sig.mcs, state.sig.band,
                             state.sig.security))
+                        _emit("")
+                        _emit_segs([("down  ", 0), (d_val_pad, 0),
+                                    (pads[3], 0)])
+                        _emit_segs([("up    ", 0), (u_val_pad, 0),
+                                    (pads[4], 0)])
                 manual = " (manual)" if state.ssid_override else ""
+                _emit("")
                 _emit("Net: %s%s" % (state.net_ssid or "unknown", manual))
                 _addr = format_addr_line(state.ip, state.router, state.mac)
                 if _addr:
                     _emit(_addr)
                 toast, pending = state.ui_snapshot()
+                _emit("")
                 _emit("loc: %s  pending: %d" % (
                     _location_label(conn, state.active_spot_id), pending))
                 with state._lock:
@@ -1214,12 +1276,11 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                         else _bench.get("rssi"),
                         "-" if _bench.get("snr") is None
                         else _bench.get("snr"),
-                        "-" if _bench.get("down_mbps") is None
-                        else _bench.get("down_mbps"),
-                        "-" if _bench.get("up_mbps") is None
-                        else _bench.get("up_mbps")))
+                        fmt_mbps(_bench.get("down_mbps")),
+                        fmt_mbps(_bench.get("up_mbps"))))
                 if _last:
                     _emit("last: %s" % _last)
+                _emit("")
                 _emit("keys: s snapshot | b benchmark | l switch | n new | "
                       "f floor | q quit")
                 if toast:
@@ -1419,6 +1480,14 @@ def _walk_fallback(db_path: str, interval: float,
                 rssi_g = state.hist_rssi.sparkline(-90, -30, gw, align="right")
                 snr_g = state.hist_snr.sparkline(0, 40, gw, align="right")
                 noise_g = state.hist_noise.sparkline(-100, -60, gw, align="right")
+                down_g = state.hist_down.sparkline_auto(gw)
+                up_g = state.hist_up.sparkline_auto(gw)
+                down_s = fmt_rate_val(
+                    state.last_rates[0] if state.last_rates else None)
+                up_s = fmt_rate_val(
+                    state.last_rates[1] if state.last_rates else None)
+                d_val_pad = down_s.ljust(METER_VAL_W)
+                u_val_pad = up_s.ljust(METER_VAL_W)
                 pad1 = " " * (max_left - len(lefts[0]))
                 pad2 = " " * (max_left - len(lefts[1]))
                 pad3 = " " * (max_left - len(lefts[2]))
@@ -1437,6 +1506,11 @@ def _walk_fallback(db_path: str, interval: float,
                 print(format_radio_line(
                     state.sig.mcs, state.sig.band,
                     state.sig.security), flush=True)
+                print("", flush=True)
+                print("down  " + d_val_pad + " | " + down_g
+                      + " [60s]", flush=True)
+                print("up    " + u_val_pad + " | " + up_g
+                      + " [60s]", flush=True)
             manual = " (manual)" if state.ssid_override else ""
             print("Net: %s%s" % (state.net_ssid or "unknown", manual), flush=True)
             _addr = format_addr_line(state.ip, state.router, state.mac)
@@ -1453,11 +1527,10 @@ def _walk_fallback(db_path: str, interval: float,
                 print("bench: rssi %s snr %s down %s up %s" % (
                     "-" if _bench.get("rssi") is None
                     else _bench.get("rssi"),
-                    "-" if _bench.get("snr") is None else _bench.get("snr"),
-                    "-" if _bench.get("down_mbps") is None
-                    else _bench.get("down_mbps"),
-                    "-" if _bench.get("up_mbps") is None
-                    else _bench.get("up_mbps")), flush=True)
+                    "-" if _bench.get("snr") is None
+                    else _bench.get("snr"),
+                    fmt_mbps(_bench.get("down_mbps")),
+                    fmt_mbps(_bench.get("up_mbps"))), flush=True)
             if _last:
                 print("last: %s" % _last, flush=True)
             state.set_toast("")
@@ -1737,6 +1810,8 @@ __all__ = [
     "attempt_read",
     "ansi_wrap",
     "finish_snapshot",
+    "fmt_mbps",
+    "fmt_rate_val",
     "format_extra_line",
     "format_radio_line",
     "format_addr_line",

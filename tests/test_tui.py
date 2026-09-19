@@ -988,3 +988,98 @@ def test_snapshot_last_result_no_benchmark_plain(tmp_path):
     assert last == "saved #1"
     assert "vs bench" not in last
     assert toast == last
+
+
+def test_fmt_mbps():
+    assert tui_mod.fmt_mbps(None) == "-"
+    assert tui_mod.fmt_mbps(267.524744) == "267.5"
+    assert tui_mod.fmt_mbps(0) == "0.0"
+
+
+def test_fmt_rate_val():
+    assert tui_mod.fmt_rate_val(None) == "-"
+    assert tui_mod.fmt_rate_val(80.0) == "80.0 Mbps"
+
+
+def test_sparkline_auto_scales_to_buffer_max():
+    h = tui_mod.SparkHistory(maxlen=10)
+    for v in (1.0, 2.0, 4.0):
+        h.append(v)
+    s = h.sparkline_auto(4)
+    assert len(s) == 4
+    assert s[-1] == "▇"
+    assert s == " ▃▄▇"  # right-aligned; buffer max (4.0) → full block
+
+
+def test_sparkline_auto_empty_uses_min_hi():
+    h = tui_mod.SparkHistory(maxlen=4)
+    assert h.sparkline_auto(3) == ""
+    h.append(None)
+    assert h.sparkline_auto(3) == "   "  # None blanks, flat scale
+
+
+def test_walkstate_poll_traffic_history():
+    rates_seq = [None, (1.0, 0.5), (2.0, 1.0)]
+    calls = {"n": 0}
+
+    def tf():
+        n = min(calls["n"], len(rates_seq) - 1)
+        calls["n"] += 1
+        return rates_seq[n]
+
+    st = tui_mod.WalkState("/tmp/unused.db", traffic_fn=tf)
+    st.poll(read_fn=lambda: signal_mod.Signal(rssi=-60, noise=-90, snr=30))
+    assert st.last_rates is None
+    assert list(st.hist_down._buf) == [None]
+    st.poll(read_fn=lambda: signal_mod.Signal(rssi=-60, noise=-90, snr=30))
+    assert st.last_rates == (1.0, 0.5)
+    st.poll(read_fn=lambda: signal_mod.Signal(rssi=-60, noise=-90, snr=30))
+    assert st.last_rates == (2.0, 1.0)
+    assert list(st.hist_up._buf)[-1] == 1.0
+
+
+def test_walkstate_poll_traffic_fn_raises():
+    def tf():
+        raise RuntimeError("netstat gone")
+
+    st = tui_mod.WalkState("/tmp/unused.db", traffic_fn=tf)
+    st.poll(read_fn=lambda: signal_mod.Signal(rssi=-60))
+    assert st.last_rates is None
+
+
+def test_finish_snapshot_message_includes_speed(tmp_path, monkeypatch):
+    db = str(tmp_path / "t.db")
+    conn = store_mod.get_db(db)
+    try:
+        _, _, (sid, _) = _seed_3level(conn, loc="den", room="r",
+                                      spots=("s1", "s2"))
+    finally:
+        conn.close()
+    monkeypatch.setattr(
+        signal_mod, "sample_signal",
+        lambda *a, **k: signal_mod.Signal(ssid="h", rssi=-60, snr=30))
+
+    def _sp():
+        return speed_mod.Speed(ping_ms=9.0, down_mbps=80.0, up_mbps=10.0,
+                               server="S (1)")
+
+    res = tui_mod.finish_snapshot(db, sid, run_speedtest_fn=_sp)
+    assert res.ok
+    assert "down 80.0 up 10.0 Mbps" in res.message
+
+
+def test_finish_snapshot_message_no_speedtest(tmp_path, monkeypatch):
+    db = str(tmp_path / "t.db")
+    conn = store_mod.get_db(db)
+    try:
+        _, _, (sid, _) = _seed_3level(conn, loc="den", room="r",
+                                      spots=("s1", "s2"))
+    finally:
+        conn.close()
+    monkeypatch.setattr(
+        signal_mod, "sample_signal",
+        lambda *a, **k: signal_mod.Signal(ssid="h", rssi=-60, snr=30))
+    res = tui_mod.finish_snapshot(db, sid, no_speedtest=True)
+    assert res.ok
+    assert "Mbps" not in res.message
+    assert res.message.startswith("saved #")
