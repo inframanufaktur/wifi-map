@@ -42,7 +42,7 @@ auto-create on `scan`.
 | Command | What it does |
 |---------|--------------|
 | `wifimap scan --location L --room R --spot S [--room-floor N] [--room-outdoors 0\|1] [--no-speedtest] [--note TEXT]` | Single snapshot row, print, exit |
-| `wifimap walk [--interval 1.0] [--no-speedtest] [--location L] [--ssid NAME]` | Live RSSI/noise/SNR/BSSID/channel table + snapshot keys above |
+| `wifimap walk [--interval 1.0] [--no-speedtest] [--location L] [--ssid NAME]` | Live RSSI/noise/SNR/down/up graph meters, BSSID/channel table + snapshot keys above |
 | `wifimap locations list` / `add --name X` | List sites / create one (prints id) |
 | `wifimap rooms list --location L` / `add --location L --name X --floor N [--outdoors]` | List / create rooms in a site |
 | `wifimap spots list --location L --room R` / `add --location L --room R --name X` | List / create spots in a room |
@@ -99,7 +99,10 @@ verified from this machine. Homebrew only carries unofficial clients —
 upstream, "will be disabled on 2027-01-18"), which uses different
 flags/output and does **not** match our `--format=json` parser. Do not
 substitute it. Without the Ookla binary everything still works via
-`--no-speedtest` (rows stored with NULL down/up).
+`--no-speedtest` (rows stored with NULL down/up). In `walk`, the live
+down/up meters come from default-route interface byte counters via
+`netstat`/`route`; VPN tunnels (utun) count as the internet path, and
+the graph is blank if netstat/route is unavailable.
 
 ## Network name (SSID/BSSID)
 
@@ -126,7 +129,10 @@ that is normal, readings are keyed by your manual location tags.
 `export` columns: `id, ts, spot_id, room_id, location_id,
 location_name, room_name, spot_name, floor, outdoors, ssid, bssid,
 rssi, noise, snr, channel, phy, tx_rate, ping_ms, down_mbps, up_mbps,
-server, note`. NULLs render as `-` in terminal tables, `""` in CSV.
+server, note, delta_rssi, delta_snr, delta_down_mbps, delta_up_mbps`.
+NULLs render as `-` in terminal tables, `""` in CSV. Delta columns are
+reading minus the location benchmark; blank when no benchmark exists or
+either value is missing.
 
 ```sh
 pip install -e .[test]
@@ -143,6 +149,7 @@ src/wifimap/  cli.py    argparse + exit codes, CSV export
               store.py  SQLite (locations→rooms→spots→readings, WAL, FK on)
               signal.py CoreWLAN backend + slow fallback + wdutil identity
               speed.py  Ookla subprocess wrapper (graceful missing-binary path)
+              traffic.py default-iface byte counters (netstat/route) for live down/up
               tui.py    curses walk loop + ANSI fallback, snapshot worker thread
 tests/        fixtures/mocks only, no live network
 docs/         plans/ (build history) + superpowers/ (specs)
