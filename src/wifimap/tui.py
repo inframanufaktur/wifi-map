@@ -362,6 +362,9 @@ class SnapshotResult:
     ok: bool
     reading_id: Optional[int] = None
     message: str = ""
+    ping_ms: Optional[float] = None
+    down_mbps: Optional[float] = None
+    up_mbps: Optional[float] = None
 
 
 def finish_snapshot(
@@ -420,7 +423,8 @@ def finish_snapshot(
     msg = "saved #%d" % rid
     if notice:
         msg += " (%s)" % notice
-    return SnapshotResult(ok=True, reading_id=rid, message=msg)
+    return SnapshotResult(ok=True, reading_id=rid, message=msg,
+                          ping_ms=ping_ms, down_mbps=down, up_mbps=up)
 
 
 def start_snapshot_thread(
@@ -467,16 +471,18 @@ def _finish_benchmark(
     """
     ping_ms = down = up = None
     server: Optional[str] = None
+    notice = ""
     if not no_speedtest:
         fn = run_speedtest_fn or speed_mod.run_speedtest
         try:
             sp = fn()
             ping_ms, down, up, server = (
                 sp.ping_ms, sp.down_mbps, sp.up_mbps, sp.server)
-        except speed_mod.SpeedtestUnavailableError:
-            ping_ms, down, up, server = None, None, None, None
+        except speed_mod.SpeedtestUnavailableError as exc:
+            notice = "Warning: %s; signal-only" % (exc,)
         except speed_mod.SpeedtestFailedError:
             ping_ms, down, up, server = None, None, None, "ERROR"
+            notice = "speedtest failed; signal kept"
     try:
         conn = store_mod.get_db(db_path)
     except (sqlite3.Error, OSError) as exc:
@@ -506,11 +512,13 @@ def _finish_benchmark(
     def _d(v: object) -> str:
         return "-" if v is None else str(v)
 
-    return SnapshotResult(
-        ok=True,
-        message="benchmark set for #%d rssi=%s snr=%s down=%s up=%s" % (
-            location_id, _d(sig_dict.get("rssi")), _d(sig_dict.get("snr")),
-            _d(down), _d(up)))
+    msg = "benchmark set for #%d rssi=%s snr=%s down=%s up=%s" % (
+        location_id, _d(sig_dict.get("rssi")), _d(sig_dict.get("snr")),
+        _d(down), _d(up))
+    if notice:
+        msg += " (%s)" % notice
+    return SnapshotResult(ok=True, message=msg, ping_ms=ping_ms,
+                          down_mbps=down, up_mbps=up)
 
 
 # ---------------------------------------------------------------------------
@@ -698,12 +706,15 @@ class WalkState:
                     frozen = snapshot_payload(sig_copy)
                     cur = {"rssi": frozen.get("rssi"),
                            "snr": frozen.get("snr"),
-                           "down_mbps": None, "up_mbps": None}
+                           "down_mbps": res.down_mbps,
+                           "up_mbps": res.up_mbps}
                     with self._lock:
                         bench = self.benchmark
                     delta = store_mod.format_benchmark_delta(cur, bench)
                     if delta:
                         with self._lock:
+                            self.toast = "%s vs bench (%s)" % (
+                                self.toast, delta)
                             self.last_result = "%s vs bench (%s)" % (
                                 self.last_result, delta)
                 except Exception:  # noqa: BLE001 - delta is best-effort
@@ -1278,9 +1289,9 @@ def _walk_fallback(db_path: str, interval: float,
         state.refresh_benchmark(conn)
         state.ensure_identity()
         state.ensure_addrs()
-        if location_preset is None:
-            print("walk fallback (no curses): keys s/b/l/n/f/q + Enter",
-                  flush=True)
+        print("walk fallback (no curses): type a key + Enter", flush=True)
+        print("keys: s snapshot | b benchmark | l switch | n new | "
+              "f floor | q quit", flush=True)
         while True:
             state.poll()
             if state.no_wifi:

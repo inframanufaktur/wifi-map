@@ -771,3 +771,48 @@ def test_walk_state_last_result_delta(tmp_path):
     assert delta != ""
     st.last_result = "saved #1 vs bench (%s)" % delta
     assert "vs bench" in st.last_result
+
+
+def test_snapshot_last_result_delta_with_speed(tmp_path):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        lid, _rid, (sid, _bid) = _seed_3level(conn)
+        store_mod.set_benchmark(
+            conn, lid, rssi=-70, snr=20, ping_ms=30.0,
+            down_mbps=100.0, up_mbps=20.0)
+    finally:
+        conn.close()
+    st = tui_mod.WalkState(db)
+    st.active_location_id = lid
+    st.active_spot_id = sid
+    st.sig = signal_mod.Signal(ssid="h", rssi=-60, noise=-90, snr=30)
+    conn = store_mod.get_db(db)
+    try:
+        st.refresh_benchmark(conn)
+    finally:
+        conn.close()
+
+    def fake_speedtest():
+        return speed_mod.Speed(ping_ms=25.0, down_mbps=80.0, up_mbps=10.0)
+
+    t = st.try_snapshot(run_speedtest_fn=fake_speedtest)
+    assert t is not None
+    t.join(timeout=10)
+    with st._lock:
+        toast, last = st.toast, st.last_result
+    assert "vs bench" in last
+    assert "down -20.0" in last and "up -10.0" in last
+    # toast carries the same delta (spec: saved #N (vs bench ...))
+    assert last == toast
+
+
+def test_snapshot_last_result_no_benchmark_plain(tmp_path):
+    st = tui_mod.WalkState(str(tmp_path / "w.db"))
+    st.on_snapshot_done(tui_mod.SnapshotResult(ok=True, reading_id=1,
+                                               message="saved #1"))
+    with st._lock:
+        toast, last = st.toast, st.last_result
+    assert last == "saved #1"
+    assert "vs bench" not in last
+    assert toast == last
