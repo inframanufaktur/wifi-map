@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import sqlite3
 import threading
 
 import pytest
@@ -142,6 +143,69 @@ def test_fallback_pick_no_preset_toasts(monkeypatch, tmp_path):
         st = tui_mod.WalkState(db)
         assert tui_mod._fallback_pick(conn, st) is False
         assert "preset" in st.ui_snapshot()[0].lower()
+    finally:
+        conn.close()
+
+
+def test_find_room_by_name(tmp_path):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        lid, rid, _ = _seed_3level(conn, room="kitchen", floor=1)
+        assert tui_mod._find_room_by_name(conn, lid, "kitchen") == (rid, 1)
+        assert tui_mod._find_room_by_name(conn, lid, "nope") is None
+        other = store_mod.create_location(conn, "office")
+        assert tui_mod._find_room_by_name(conn, other, "kitchen") is None
+    finally:
+        conn.close()
+
+
+def test_fallback_create_room_reuses_on_integrity_error(
+        monkeypatch, tmp_path):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        lid, rid, _ = _seed_3level(conn, room="kitchen", floor=1)
+
+        def _boom(*args, **kwargs):
+            raise sqlite3.IntegrityError(
+                "UNIQUE constraint failed: rooms.location_id, rooms.name")
+
+        monkeypatch.setattr(store_mod, "create_room", _boom)
+        answers = iter(["kitchen", "2", "n"])
+        monkeypatch.setattr("builtins.input",
+                            lambda *args: next(answers))
+        st = tui_mod.WalkState(db)
+        st.active_location_id = lid
+        room_id, note = tui_mod._fallback_create_room(conn, st)
+        assert room_id == rid
+        assert note == "room exists (floor 1); adding spot there"
+    finally:
+        conn.close()
+
+
+def test_fallback_create_reuses_room_then_spot(monkeypatch, tmp_path):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        lid, rid, _ = _seed_3level(conn, room="kitchen", floor=1)
+
+        def _boom(*args, **kwargs):
+            raise sqlite3.IntegrityError(
+                "UNIQUE constraint failed: rooms.location_id, rooms.name")
+
+        monkeypatch.setattr(store_mod, "create_room", _boom)
+        # room name, floor, outdoors, then spot name for reused room.
+        answers = iter(["kitchen", "2", "n", "corner"])
+        monkeypatch.setattr("builtins.input",
+                            lambda *args: next(answers))
+        st = tui_mod.WalkState(db)
+        st.active_location_id = lid
+        tui_mod._fallback_create(conn, st)
+        assert st.active_spot_id is not None
+        spot = store_mod.list_spots(conn, room_id=rid)
+        assert [sp.name for sp in spot] == ["window", "bed", "corner"]
+        assert "room exists" in st.ui_snapshot()[0]
     finally:
         conn.close()
 

@@ -932,10 +932,10 @@ def _pick_room_spot_curses(
         state.set_toast("DB error: %s" % (exc,))
         return False
     if picked_room == "new":
-        picked_room = _create_room_curses(
+        picked_room, note = _create_room_curses(
             stdscr, conn, state.active_location_id, poll_timeout_ms)
+        state.set_toast(note)
     if not isinstance(picked_room, int):
-        state.set_toast("room pick cancelled")
         return False
     try:
         picked_spot = _spot_picker_curses(
@@ -986,26 +986,58 @@ def _prompt_curses(stdscr: object, prompt: str,
             pass
 
 
+def _find_room_by_name(
+    conn: sqlite3.Connection, location_id: int, name: str,
+) -> Optional[Tuple[int, int]]:
+    """Existing (room_id, floor) for (location_id, name), any floor.
+
+    None when absent.
+    """
+    try:
+        row = conn.execute(
+            "SELECT id, floor FROM rooms WHERE location_id = ? AND name = ?",
+            (location_id, name),
+        ).fetchone()
+    except (sqlite3.Error, OSError):
+        return None
+    if row is None:
+        return None
+    return row[0], row[1]
+
+
 def _create_room_curses(
     stdscr: object, conn: sqlite3.Connection,
     location_id: int,
     poll_timeout_ms: int = PICKER_TIMEOUT_RESTORE_MS,
-) -> Optional[int]:
+) -> Tuple[Optional[int], str]:
+    """Prompt name/floor/outdoors; return (room_id, note).
+
+    room_id None means cancel/failure; note explains the outcome
+    ("room created" on success, "room exists (floor N); adding spot
+    there" when a same-name room was reused on UNIQUE collision).
+    """
     name = _prompt_curses(stdscr, "room name: ", poll_timeout_ms).strip()
     if not name:
-        return None
+        return None, "new room cancelled"
     floor_s = _prompt_curses(stdscr, "floor (int): ", poll_timeout_ms).strip()
     try:
         floor = parse_floor_input(floor_s or "0")
-    except ValueError:
-        return None
+    except ValueError as exc:
+        return None, "cancelled/invalid: %s" % (exc,)
     od_s = _prompt_curses(stdscr, "outdoors? [y/N]: ", poll_timeout_ms).strip().lower()
     outdoors = od_s in ("y", "yes", "1")
     try:
-        return store_mod.create_room(
+        room_id = store_mod.create_room(
             conn, location_id, name, floor=floor, outdoors=outdoors)
-    except (sqlite3.Error, OSError, ValueError):
-        return None
+    except sqlite3.IntegrityError:
+        existing = _find_room_by_name(conn, location_id, name)
+        if existing is None:
+            return None, "room create failed: duplicate room"
+        rid, efloor = existing
+        return rid, "room exists (floor %d); adding spot there" % efloor
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        return None, "room create failed: %s" % (exc,)
+    return room_id, "room created"
 
 
 def _create_spot_curses(
@@ -1267,11 +1299,11 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                     state.set_toast(
                         "no preset location: rerun with --location")
                     continue
-                room_id = _create_room_curses(
+                room_id, note = _create_room_curses(
                     stdscr, conn, state.active_location_id,
                     poll_timeout_ms)
+                state.set_toast(note)
                 if room_id is None:
-                    state.set_toast("new room cancelled/invalid")
                     continue
                 spot_id = _create_spot_curses(
                     stdscr, conn, room_id, poll_timeout_ms)
@@ -1553,7 +1585,11 @@ def _fallback_pick(conn: sqlite3.Connection, state: WalkState) -> bool:
     picked_room = _fallback_pick_level(
         "room", room_rows, _active_room_id(conn, state), "new room")
     if picked_room == "new":
-        picked_room = _fallback_create_room(conn, state)
+        picked_room, note = _fallback_create_room(conn, state)
+        if picked_room is None:
+            state.set_toast(note)
+            return False
+        state.set_toast(note)
     if not isinstance(picked_room, int):
         state.set_toast("cancelled")
         return False
@@ -1575,26 +1611,38 @@ def _fallback_pick(conn: sqlite3.Connection, state: WalkState) -> bool:
 
 
 def _fallback_create_room(conn: sqlite3.Connection,
-                          state: WalkState) -> Optional[int]:
-    """Prompt name/floor/outdoors; create room in active location."""
+                          state: WalkState) -> Tuple[Optional[int], str]:
+    """Prompt name/floor/outdoors; return (room_id, note).
+
+    room_id None means cancel/failure; note explains the outcome
+    ("room created" on success, "room exists (floor N); adding spot
+    there" when a same-name room was reused on UNIQUE collision).
+    """
     if state.active_location_id is None:
-        state.set_toast("no preset location: rerun with --location")
-        return None
+        return None, "no preset location: rerun with --location"
     try:
         name = input("room name: ").strip()
         floor = parse_floor_input(input("floor (int): ") or "0")
         outdoors = input("outdoors? [y/N]: ").strip().lower() in (
             "y", "yes", "1")
     except (EOFError, OSError, ValueError) as exc:
-        state.set_toast("cancelled/invalid: %s" % (exc,))
-        return None
+        return None, "cancelled/invalid: %s" % (exc,)
+    if not name:
+        return None, "new room cancelled"
     try:
-        return store_mod.create_room(
+        room_id = store_mod.create_room(
             conn, state.active_location_id, name, floor=floor,
             outdoors=outdoors)
+    except sqlite3.IntegrityError:
+        existing = _find_room_by_name(
+            conn, state.active_location_id, name)
+        if existing is None:
+            return None, "room create failed: duplicate room"
+        rid, efloor = existing
+        return rid, "room exists (floor %d); adding spot there" % efloor
     except (sqlite3.Error, OSError, ValueError) as exc:
-        state.set_toast("DB error: %s" % (exc,))
-        return None
+        return None, "DB error: %s" % (exc,)
+    return room_id, "room created"
 
 
 def _fallback_create_spot(conn: sqlite3.Connection, room_id: int,
@@ -1614,11 +1662,11 @@ def _fallback_create_spot(conn: sqlite3.Connection, room_id: int,
 
 def _fallback_create(conn: sqlite3.Connection, state: WalkState) -> None:
     """Create room (in active location) then spot (in new room)."""
-    room_id = _fallback_create_room(conn, state)
+    room_id, note = _fallback_create_room(conn, state)
     if room_id is None:
-        if not state.ui_snapshot()[0]:
-            state.set_toast("cancelled/invalid")
+        state.set_toast(note)
         return
+    state.set_toast(note)
     spot_id = _fallback_create_spot(conn, room_id, state)
     if spot_id is None:
         if not state.ui_snapshot()[0]:
