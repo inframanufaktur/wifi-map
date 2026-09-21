@@ -352,6 +352,44 @@ def test_export_csv_content(monkeypatch, tmp_path, capsys):
     assert "floor" in rows[0] and "outdoors" in rows[0]
 
 
+def test_aps_name_uses_current_access_point(monkeypatch, tmp_path, capsys):
+    db = _db_path(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        signal_mod, "read_network_identity",
+        lambda: ("home-net", "60:8d:26:8d:cf:3d"),
+    )
+
+    rc, out, err = _run(
+        capsys, "--db", db, "aps", "name", "--name", "Office mesh")
+
+    assert rc == 0
+    conn = store_mod.get_db(db)
+    try:
+        assert store_mod.get_access_point_name(
+            conn, "60:8d:26:8d:cf:3d") == "Office mesh"
+    finally:
+        conn.close()
+
+
+def test_aps_current_prints_address_and_name(monkeypatch, tmp_path, capsys):
+    db = _db_path(monkeypatch, tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        store_mod.set_access_point_name(
+            conn, "60:8d:26:8d:cf:3d", "Office mesh")
+    finally:
+        conn.close()
+    monkeypatch.setattr(
+        signal_mod, "read_network_identity",
+        lambda: ("home-net", "60:8d:26:8d:cf:3d"),
+    )
+
+    rc, out, err = _run(capsys, "--db", db, "aps", "current")
+
+    assert rc == 0
+    assert out == "60:8d:26:8d:cf:3d  Office mesh\n"
+
+
 def test_export_csv_includes_benchmark_delta(tmp_path, capsys):
     """Export rows carry deltas vs the location benchmark (blank if none)."""
     db = str(tmp_path / "cli.db")

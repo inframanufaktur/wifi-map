@@ -30,6 +30,9 @@ from wifimap.cli_common import (
     _sample_countdown,
 )
 from wifimap.cli_storage_commands import (
+    _cmd_aps_current,
+    _cmd_aps_list,
+    _cmd_aps_name,
     _cmd_benchmark_clear,
     _cmd_benchmark_set,
     _cmd_benchmark_show,
@@ -115,6 +118,18 @@ def _build_parser() -> argparse.ArgumentParser:
     spadd.add_argument("--location", required=True, help="Location ID|NAME")
     spadd.add_argument("--room", required=True, help="Room ID|NAME")
     spadd.add_argument("--name", required=True)
+
+    aps = sub.add_parser("aps", help="Name recognizable access points.")
+    aps_sub = aps.add_subparsers(dest="aps_cmd", required=True)
+    aps_sub.add_parser(
+        "current", help="Print the current BSSID and optional name.")
+    aps_sub.add_parser("list", help="List access-point names and BSSIDs.")
+    ap_name = aps_sub.add_parser(
+        "name", help="Name the current or an explicit access point.")
+    ap_name.add_argument("--name", required=True)
+    ap_name.add_argument(
+        "--bssid", default=None,
+        help="Access-point BSSID; defaults to the current connection")
 
     li = sub.add_parser("list", help="History table (joins locations).")
     li.add_argument("--location", default=None, help="Filter ID|NAME")
@@ -318,6 +333,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if getattr(args, "spots_cmd", None) == "add":
             return _cmd_spots_add(db_path, args)
         return _cmd_spots_list(db_path, args)
+    if args.cmd == "aps":
+        if args.aps_cmd == "name":
+            return _cmd_aps_name(db_path, args)
+        if args.aps_cmd == "current":
+            return _cmd_aps_current(db_path)
+        return _cmd_aps_list(db_path)
     if args.cmd == "list":
         return _cmd_list(db_path, args)
     if args.cmd == "export":

@@ -36,6 +36,9 @@ from wifimap.store import (
     resolve_spot,
     set_benchmark,
     update_room_floor,
+    get_access_point_name,
+    list_access_points,
+    set_access_point_name,
 )
 
 
@@ -73,6 +76,14 @@ def test_locations_create_and_list(db):
     assert len(locs) == 1
     assert locs[0].id == lid
     assert locs[0].name == "home"
+
+
+def test_access_point_names_are_keyed_by_normalized_bssid(db):
+    set_access_point_name(db, "60-8D-26-8D-CF-3D", "Office mesh")
+
+    assert get_access_point_name(db, "60:8d:26:8d:cf:3d") == "Office mesh"
+    assert [(ap.bssid, ap.name) for ap in list_access_points(db)] == [
+        ("60:8d:26:8d:cf:3d", "Office mesh")]
 
 
 def test_locations_unique_name(db):

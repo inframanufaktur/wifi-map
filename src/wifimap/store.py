@@ -1,6 +1,13 @@
 """SQLite store: locations CRUD + readings insert + join queries."""
 from __future__ import annotations
 
+from wifimap.store_access_points import (
+    AccessPoint,
+    get_access_point_name,
+    list_access_points,
+    normalize_bssid,
+    set_access_point_name,
+)
 from wifimap.store_benchmarks import (
     clear_benchmark,
     format_benchmark_delta,

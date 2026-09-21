@@ -18,6 +18,10 @@ CREATE TABLE IF NOT EXISTS ssids(
   name TEXT NOT NULL CHECK(trim(name) <> ''),
   UNIQUE(location_id, name)
 );
+CREATE TABLE IF NOT EXISTS access_points(
+  bssid TEXT PRIMARY KEY,
+  name TEXT NOT NULL CHECK(trim(name) <> '')
+);
 CREATE TABLE IF NOT EXISTS walks(
   id INTEGER PRIMARY KEY,
   location_id INTEGER NOT NULL REFERENCES locations(id),

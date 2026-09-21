@@ -153,6 +153,89 @@ def _cmd_spots_add(db_path: str, args: argparse.Namespace) -> int:
         conn.close()
 
 
+def _current_bssid() -> Optional[str]:
+    try:
+        identity = signal_mod.read_network_identity()
+    except Exception:  # noqa: BLE001 - converted to a useful CLI error
+        identity = None
+    return identity[1] if identity is not None else None
+
+
+def _cmd_aps_name(db_path: str, args: argparse.Namespace) -> int:
+    """Name an explicit BSSID, or the access point connected right now."""
+    bssid = args.bssid
+    if bssid is None:
+        bssid = _current_bssid()
+        if not bssid:
+            print("Error: current access point is unavailable; pass --bssid",
+                  file=sys.stderr)
+            return EXIT_STORAGE
+    try:
+        conn = _open_db(db_path)
+    except (sqlite3.Error, OSError) as exc:
+        print("Error: cannot open DB: %s" % (exc,), file=sys.stderr)
+        return EXIT_STORAGE
+    try:
+        try:
+            access_point = store_mod.set_access_point_name(
+                conn, bssid, args.name)
+        except (sqlite3.Error, ValueError) as exc:
+            print("Error: cannot name access point: %s" % exc,
+                  file=sys.stderr)
+            return EXIT_STORAGE
+        print("%s  %s" % (access_point.bssid, access_point.name))
+        return EXIT_OK
+    finally:
+        conn.close()
+
+
+def _cmd_aps_current(db_path: str) -> int:
+    """Print the current BSSID followed by its optional local name."""
+    bssid = _current_bssid()
+    if not bssid:
+        print("Error: current access point is unavailable", file=sys.stderr)
+        return EXIT_NOWIFI
+    try:
+        conn = _open_db(db_path)
+    except (sqlite3.Error, OSError) as exc:
+        print("Error: cannot open DB: %s" % (exc,), file=sys.stderr)
+        return EXIT_STORAGE
+    try:
+        try:
+            canonical = store_mod.normalize_bssid(bssid)
+            name = store_mod.get_access_point_name(conn, canonical)
+        except (sqlite3.Error, ValueError) as exc:
+            print("Error: cannot read access point: %s" % exc,
+                  file=sys.stderr)
+            return EXIT_STORAGE
+        print(canonical + (("  " + name) if name else ""))
+        return EXIT_OK
+    finally:
+        conn.close()
+
+
+def _cmd_aps_list(db_path: str) -> int:
+    try:
+        conn = _open_db(db_path)
+    except (sqlite3.Error, OSError) as exc:
+        print("Error: cannot open DB: %s" % (exc,), file=sys.stderr)
+        return EXIT_STORAGE
+    try:
+        try:
+            access_points = store_mod.list_access_points(conn)
+        except sqlite3.Error as exc:
+            print("Error: cannot list access points: %s" % exc,
+                  file=sys.stderr)
+            return EXIT_STORAGE
+        print("%-17s  %s" % ("bssid", "name"))
+        for access_point in access_points:
+            print("%-17s  %s" % (
+                access_point.bssid, access_point.name))
+        return EXIT_OK
+    finally:
+        conn.close()
+
+
 def _cmd_list(db_path: str, args: argparse.Namespace) -> int:
     try:
         conn = _open_db(db_path)
