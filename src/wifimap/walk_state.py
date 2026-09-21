@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import sqlite3
-import statistics
 import threading
 import time
 from collections import deque
@@ -12,6 +11,7 @@ from wifimap import signal as signal_mod
 from wifimap import speed as speed_mod
 from wifimap import store as store_mod
 from wifimap import traffic as traffic_mod
+from wifimap.walk_baseline import load_baseline, median_values
 from wifimap.walk_snapshot import (
     MetricComparison,
     SnapshotResult,
@@ -119,15 +119,7 @@ class WalkState:
 
     @staticmethod
     def _median(values) -> Optional[float]:
-        numeric = []
-        for value in values:
-            if value is None or isinstance(value, bool):
-                continue
-            try:
-                numeric.append(float(value))
-            except (TypeError, ValueError):
-                continue
-        return (float(statistics.median(numeric)) if numeric else None)
+        return median_values(values)
 
     def select_baseline_walk(
         self,
@@ -149,79 +141,15 @@ class WalkState:
         if location_id is None:
             raise ValueError("comparison requires an active location")
 
-        all_walks = store_mod.list_walks(conn, location_id=location_id)
-        nonempty = _nonempty_walk_ids(conn)
-        walks = [walk for walk in all_walks if walk.id in nonempty]
-        selected = None
-        if isinstance(id_or_name, bool):
-            raise ValueError("invalid baseline walk: %r" % (id_or_name,))
-        if isinstance(id_or_name, int):
-            selected = next((walk for walk in walks
-                             if walk.id == id_or_name), None)
-        else:
-            label = str(id_or_name).strip()
-            try:
-                walk_id = int(label)
-            except ValueError:
-                walk_id = None
-            if walk_id is not None:
-                selected = next((walk for walk in walks
-                                 if walk.id == walk_id), None)
-            if selected is None:
-                named = [walk for walk in walks if walk.name == label]
-                if len(named) > 1:
-                    ids = ", ".join(str(walk.id) for walk in named)
-                    raise ValueError(
-                        "ambiguous baseline walk name %r; use IDs: %s"
-                        % (label, ids))
-                selected = named[0] if named else None
-        if selected is None:
-            known_empty = None
-            if isinstance(id_or_name, int):
-                known_empty = next((walk for walk in all_walks
-                                    if walk.id == id_or_name), None)
-            else:
-                requested = str(id_or_name).strip()
-                known_empty = next((walk for walk in all_walks if (
-                    str(walk.id) == requested or walk.name == requested)),
-                    None)
-            if known_empty is not None and known_empty.id not in nonempty:
-                raise ValueError("baseline walk has no readings: #%d" % (
-                    known_empty.id,))
-            raise ValueError("unknown baseline walk: %r" % (id_or_name,))
-        if selected.id == self.current_walk_id:
-            raise ValueError("current walk cannot be its own baseline")
-
-        rows = store_mod.list_readings(
-            conn, walk_id=selected.id, limit=1_000_000)
-        grouped: Dict[int, List[dict]] = {}
-        for row in rows:
-            grouped.setdefault(int(row["spot_id"]), []).append(row)
-
-        cache = {}
-        numeric_keys = (
-            "rssi", "noise", "snr", "tx_rate", "ping_ms",
-            "down_mbps", "up_mbps",
-        )
-        for spot_id, spot_rows in grouped.items():
-            newest = spot_rows[0]
-            numeric = {
-                key: self._median(row.get(key) for row in spot_rows)
-                for key in numeric_keys
-            }
-            cache[spot_id] = SpotBaseline(
-                spot_id=spot_id,
-                ssid=newest.get("ssid"), bssid=newest.get("bssid"),
-                channel=newest.get("channel"), server=newest.get("server"),
-                **numeric,
-            )
+        selected = load_baseline(
+            conn, location_id, self.current_walk_id, id_or_name)
         with self._lock:
-            self.baseline_walk_id = selected.id
-            self.baseline_walk_name = selected.name
-            self._baseline_by_spot = cache
+            self.baseline_walk_id = selected.walk_id
+            self.baseline_walk_name = selected.walk_name
+            self._baseline_by_spot = selected.spots
             self._comparison_generation += 1
             self._speed_probe = None
-        return selected.id
+        return selected.walk_id
 
     def clear_baseline_walk(self) -> None:
         with self._lock:
@@ -567,10 +495,3 @@ class WalkState:
         except (sqlite3.Error, OSError) as exc:
             return "DB error: %s" % (exc,)
         return "floor set to %d" % floor
-
-
-def _nonempty_walk_ids(conn: sqlite3.Connection) -> set:
-    rows = conn.execute(
-        "SELECT DISTINCT walk_id FROM readings WHERE walk_id IS NOT NULL"
-    ).fetchall()
-    return {int(row[0]) for row in rows}

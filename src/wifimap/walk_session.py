@@ -7,7 +7,7 @@ import time
 from typing import List, Optional, Tuple, Union
 
 from wifimap import store as store_mod
-from wifimap.walk_state import _nonempty_walk_ids
+from wifimap.walk_baseline import nonempty_walk_ids
 
 
 WORKER_DRAIN_TIMEOUT = 130.0
@@ -70,7 +70,7 @@ def _baseline_walk_rows(
         location_id = current.location_id if current is not None else None
     walks = (store_mod.list_walks(conn, location_id=location_id)
              if location_id is not None else [])
-    nonempty = _nonempty_walk_ids(conn)
+    nonempty = nonempty_walk_ids(conn)
     rows = [
         (walk.id, "%s | %s | #%d" % (
             walk.name, walk.started_at, walk.id))

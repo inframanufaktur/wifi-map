@@ -83,8 +83,8 @@ from wifimap.walk_snapshot import (
 )
 from wifimap.walk_state import (
     WalkState as _BaseWalkState,
-    _nonempty_walk_ids,
 )
+from wifimap.walk_baseline import nonempty_walk_ids as _nonempty_walk_ids
 from wifimap.walk_session import (
     _baseline_walk_rows,
     _finish_walk_session,
