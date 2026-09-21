@@ -12,6 +12,13 @@ CREATE TABLE IF NOT EXISTS locations(
   id INTEGER PRIMARY KEY,
   name TEXT NOT NULL UNIQUE
 );
+CREATE TABLE IF NOT EXISTS walks(
+  id INTEGER PRIMARY KEY,
+  location_id INTEGER NOT NULL REFERENCES locations(id),
+  name TEXT NOT NULL CHECK(trim(name) <> ''),
+  started_at TEXT NOT NULL,
+  ended_at TEXT
+);
 CREATE TABLE IF NOT EXISTS rooms(
   id INTEGER PRIMARY KEY,
   location_id INTEGER NOT NULL REFERENCES locations(id),
@@ -34,7 +41,8 @@ CREATE TABLE IF NOT EXISTS readings(
   rssi INTEGER, noise INTEGER, snr INTEGER,
   channel TEXT, phy TEXT, tx_rate TEXT,
   ping_ms REAL, down_mbps REAL, up_mbps REAL,
-  server TEXT, note TEXT
+  server TEXT, note TEXT,
+  walk_id INTEGER REFERENCES walks(id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS idx_rooms_location ON rooms(location_id);
 CREATE INDEX IF NOT EXISTS idx_spots_room ON spots(room_id);
@@ -42,6 +50,9 @@ CREATE INDEX IF NOT EXISTS idx_readings_spot ON readings(spot_id);
 CREATE INDEX IF NOT EXISTS idx_readings_ssid ON readings(ssid);
 CREATE TABLE IF NOT EXISTS benchmarks(location_id INTEGER PRIMARY KEY REFERENCES locations(id) ON DELETE CASCADE, ts TEXT NOT NULL, ssid TEXT, bssid TEXT, rssi INTEGER, noise INTEGER, snr INTEGER, channel TEXT, phy TEXT, tx_rate TEXT, ping_ms REAL, down_mbps REAL, up_mbps REAL, server TEXT, note TEXT);
 """
+_SCHEMA_VERSION = 1
+
+
 @dataclass
 class Location:
     id: int
@@ -60,12 +71,46 @@ class Spot:
     name: str
 
 
+@dataclass
+class Walk:
+    id: int
+    location_id: int
+    name: str
+    started_at: str
+    ended_at: Optional[str] = None
+
+
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """Apply additive schema migrations to an existing database."""
+    columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(readings)")
+    }
+    with conn:
+        if "walk_id" not in columns:
+            conn.execute(
+                "ALTER TABLE readings ADD COLUMN walk_id INTEGER "
+                "REFERENCES walks(id) ON DELETE SET NULL"
+            )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_readings_walk_spot "
+            "ON readings(walk_id, spot_id)"
+        )
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if version < _SCHEMA_VERSION:
+            conn.execute("PRAGMA user_version = %d" % _SCHEMA_VERSION)
+
+
 def get_db(path: Union[str, Path]) -> sqlite3.Connection:
     """Open DB at path with WAL mode, FK enforcement, and schema init."""
     conn = sqlite3.connect(str(path))
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.executescript(_SCHEMA)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.executescript(_SCHEMA)
+        _migrate_schema(conn)
+    except Exception:
+        conn.close()
+        raise
     return conn
 
 
@@ -112,6 +157,96 @@ def get_location(
     if row is None:
         return None
     return Location(id=row[0], name=row[1])
+
+
+def create_walk(
+    conn: sqlite3.Connection,
+    location_id: int,
+    name: str,
+    started_at: Optional[str] = None,
+) -> int:
+    """Create a named walk for one location and return its id."""
+    if isinstance(location_id, bool):
+        raise ValueError("unknown location id: %r" % (location_id,))
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("walk name must not be blank")
+    exists = conn.execute(
+        "SELECT id FROM locations WHERE id = ?", (location_id,)
+    ).fetchone()
+    if exists is None:
+        raise ValueError("unknown location id: %r" % (location_id,))
+    if started_at is None:
+        started_at = datetime.now(timezone.utc).isoformat()
+    cur = conn.execute(
+        "INSERT INTO walks(location_id, name, started_at) VALUES (?, ?, ?)",
+        (location_id, name.strip(), started_at),
+    )
+    conn.commit()
+    rowid = cur.lastrowid
+    if rowid is None:
+        raise sqlite3.Error("walk insert returned no row id")
+    return rowid
+
+
+def get_walk(
+    conn: sqlite3.Connection,
+    walk_id: int,
+) -> Optional[Walk]:
+    """Return a walk by id, or None when it does not exist."""
+    if isinstance(walk_id, bool):
+        raise ValueError("invalid walk id: %r" % (walk_id,))
+    row = conn.execute(
+        "SELECT id, location_id, name, started_at, ended_at "
+        "FROM walks WHERE id = ?",
+        (walk_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return Walk(id=row[0], location_id=row[1], name=row[2],
+                started_at=row[3], ended_at=row[4])
+
+
+def list_walks(
+    conn: sqlite3.Connection,
+    location_id: Optional[int] = None,
+) -> List[Walk]:
+    """Return walks newest-first, optionally for one location."""
+    if isinstance(location_id, bool):
+        raise ValueError("invalid location id: %r" % (location_id,))
+    query = (
+        "SELECT id, location_id, name, started_at, ended_at "
+        "FROM walks"
+    )
+    params = []
+    if location_id is not None:
+        query += " WHERE location_id = ?"
+        params.append(location_id)
+    query += " ORDER BY id DESC"
+    rows = conn.execute(query, params).fetchall()
+    return [
+        Walk(id=row[0], location_id=row[1], name=row[2],
+             started_at=row[3], ended_at=row[4])
+        for row in rows
+    ]
+
+
+def finish_walk(
+    conn: sqlite3.Connection,
+    walk_id: int,
+    ended_at: Optional[str] = None,
+) -> None:
+    """Finish a walk once; subsequent calls preserve its end time."""
+    if isinstance(walk_id, bool):
+        raise ValueError("unknown walk id: %r" % (walk_id,))
+    if get_walk(conn, walk_id) is None:
+        raise ValueError("unknown walk id: %r" % (walk_id,))
+    if ended_at is None:
+        ended_at = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "UPDATE walks SET ended_at = COALESCE(ended_at, ?) WHERE id = ?",
+        (ended_at, walk_id),
+    )
+    conn.commit()
 
 
 def resolve_location(
@@ -483,20 +618,38 @@ def add_reading(
     up_mbps: Optional[float] = None,
     server: Optional[str] = None,
     note: Optional[str] = None,
+    walk_id: Optional[int] = None,
 ) -> int:
     """Insert one readings row; ts defaults to current UTC ISO timestamp."""
+    if isinstance(walk_id, bool):
+        raise ValueError("invalid walk id: %r" % (walk_id,))
+    if walk_id is not None:
+        walk = get_walk(conn, walk_id)
+        if walk is None:
+            raise ValueError("unknown walk id: %r" % (walk_id,))
+        spot_location = conn.execute(
+            "SELECT m.location_id FROM spots s "
+            "JOIN rooms m ON m.id = s.room_id WHERE s.id = ?",
+            (spot_id,),
+        ).fetchone()
+        if spot_location is None:
+            raise ValueError("unknown spot id: %r" % (spot_id,))
+        if spot_location[0] != walk.location_id:
+            raise ValueError(
+                "walk and reading spot belong to a different location"
+            )
     if ts is None:
         ts = datetime.now(timezone.utc).isoformat()
     cur = conn.execute(
         """INSERT INTO readings(
              ts, spot_id, ssid, bssid, rssi, noise, snr,
              channel, phy, tx_rate, ping_ms, down_mbps, up_mbps,
-             server, note)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             server, note, walk_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             ts, spot_id, ssid, bssid, rssi, noise, snr,
             channel, phy, tx_rate, ping_ms, down_mbps, up_mbps,
-            server, note,
+            server, note, walk_id,
         ),
     )
     conn.commit()
@@ -635,6 +788,7 @@ def list_readings(
     floor: Optional[int] = None,
     ssid: Optional[str] = None,
     limit: int = 50,
+    walk_id: Optional[int] = None,
 ) -> List[dict]:
     """List readings newest-first as joined dicts across all 3 levels.
 
@@ -647,6 +801,8 @@ def list_readings(
         "SELECT r.id, r.ts, r.spot_id, r.ssid, r.bssid, r.rssi,"
         " r.noise, r.snr, r.channel, r.phy, r.tx_rate,"
         " r.ping_ms, r.down_mbps, r.up_mbps, r.server, r.note,"
+        " r.walk_id, w.name AS walk_name,"
+        " w.started_at AS walk_started_at, w.ended_at AS walk_ended_at,"
         " s.name AS spot_name, s.room_id AS room_id,"
         " m.name AS room_name, m.location_id AS location_id,"
         " m.floor AS floor, m.outdoors AS outdoors,"
@@ -654,6 +810,7 @@ def list_readings(
         " FROM readings r JOIN spots s ON r.spot_id = s.id"
         " JOIN rooms m ON s.room_id = m.id"
         " JOIN locations l ON m.location_id = l.id"
+        " LEFT JOIN walks w ON r.walk_id = w.id"
     )
     clauses = []
     params: List[Any] = []
@@ -721,6 +878,11 @@ def list_readings(
             raise ValueError("invalid ssid filter: %r" % (ssid,))
         clauses.append("r.ssid = ?")
         params.append(ssid)
+    if walk_id is not None:
+        if isinstance(walk_id, bool):
+            raise ValueError("invalid walk id filter: %r" % (walk_id,))
+        clauses.append("r.walk_id = ?")
+        params.append(walk_id)
     if clauses:
         query += " WHERE " + " AND ".join(clauses)
     query += " ORDER BY r.id DESC LIMIT ?"

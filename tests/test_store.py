@@ -3,21 +3,26 @@ import sqlite3
 import pytest
 
 from wifimap.store import (
+    Walk,
     add_reading,
     clear_benchmark,
     create_location,
     create_room,
     create_spot,
+    create_walk,
+    finish_walk,
     format_benchmark_delta,
     get_benchmark,
     get_db,
     get_location,
     get_room,
     get_spot,
+    get_walk,
     list_locations,
     list_readings,
     list_rooms,
     list_spots,
+    list_walks,
     resolve_location,
     resolve_room,
     resolve_spot,
@@ -419,3 +424,145 @@ def test_format_benchmark_delta_full():
 def test_format_benchmark_delta_null_safe():
     s = format_benchmark_delta({"rssi": -67}, {"rssi": None, "down_mbps": 100.0})
     assert s == ""
+
+
+def test_walk_create_get_list_and_finish(db):
+    home = create_location(db, "home")
+    office = create_location(db, "office")
+    first = create_walk(
+        db, home, "before mesh",
+        started_at="2026-09-21T08:00:00+00:00",
+    )
+    second = create_walk(
+        db, home, "after mesh",
+        started_at="2026-09-21T09:00:00+00:00",
+    )
+    create_walk(
+        db, office, "office baseline",
+        started_at="2026-09-21T10:00:00+00:00",
+    )
+
+    walk = get_walk(db, first)
+    assert walk == Walk(
+        id=first, location_id=home, name="before mesh",
+        started_at="2026-09-21T08:00:00+00:00",
+        ended_at=None,
+    )
+    assert [item.id for item in list_walks(db, location_id=home)] == [
+        second, first]
+
+    finish_walk(db, first, ended_at="2026-09-21T08:30:00+00:00")
+    finish_walk(db, first, ended_at="2026-09-21T08:45:00+00:00")
+    assert get_walk(db, first).ended_at == "2026-09-21T08:30:00+00:00"
+
+
+def test_walk_api_validates_names_locations_and_ids(db):
+    home = create_location(db, "home")
+    with pytest.raises(ValueError, match="name"):
+        create_walk(db, home, "   ")
+    with pytest.raises(ValueError, match="location"):
+        create_walk(db, 9999, "missing location")
+    with pytest.raises(ValueError, match="walk"):
+        finish_walk(db, 9999)
+    with pytest.raises(ValueError, match="walk"):
+        get_walk(db, True)
+
+
+def test_readings_can_be_assigned_and_filtered_by_walk(db):
+    home, _, home_spot = _three_levels(
+        db, loc="home", room="kitchen", spot="window")
+    _, _, office_spot = _three_levels(
+        db, loc="office", room="desk", spot="chair")
+    before = create_walk(
+        db, home, "before", started_at="2026-09-21T08:00:00+00:00")
+    after = create_walk(
+        db, home, "after", started_at="2026-09-21T09:00:00+00:00",
+    )
+    finish_walk(db, after, ended_at="2026-09-21T09:30:00+00:00")
+
+    historical = add_reading(db, home_spot, rssi=-80)
+    baseline = add_reading(db, home_spot, rssi=-70, walk_id=before)
+    candidate = add_reading(db, home_spot, rssi=-55, walk_id=after)
+
+    rows = list_readings(db, walk_id=after)
+    assert [row["id"] for row in rows] == [candidate]
+    assert rows[0]["walk_id"] == after
+    assert rows[0]["walk_name"] == "after"
+    assert rows[0]["walk_started_at"] == "2026-09-21T09:00:00+00:00"
+    assert rows[0]["walk_ended_at"] == "2026-09-21T09:30:00+00:00"
+
+    by_id = {row["id"]: row for row in list_readings(db)}
+    assert by_id[historical]["walk_id"] is None
+    assert by_id[historical]["walk_name"] is None
+    assert by_id[baseline]["walk_id"] == before
+
+    with pytest.raises(ValueError, match="different location"):
+        add_reading(db, office_spot, rssi=-60, walk_id=before)
+    with pytest.raises(ValueError, match="unknown walk"):
+        add_reading(db, home_spot, rssi=-60, walk_id=9999)
+
+
+def test_list_readings_walk_filter_preserves_positional_limit(db):
+    home, _, spot = _three_levels(db)
+    walk = create_walk(db, home, "walk")
+    first = add_reading(db, spot, rssi=-70, walk_id=walk)
+    add_reading(db, spot, rssi=-60, walk_id=walk)
+
+    assert len(list_readings(db, None, None, None, None, None, 1)) == 1
+    assert [row["id"] for row in list_readings(db, limit=10,
+                                                walk_id=walk)] == [
+        first + 1, first]
+
+
+def test_get_db_migrates_legacy_readings_idempotently(tmp_path):
+    path = tmp_path / "legacy.db"
+    legacy = sqlite3.connect(str(path))
+    legacy.executescript("""
+        CREATE TABLE locations(id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
+        CREATE TABLE rooms(
+          id INTEGER PRIMARY KEY,
+          location_id INTEGER NOT NULL REFERENCES locations(id),
+          name TEXT NOT NULL, floor INTEGER NOT NULL DEFAULT 0,
+          outdoors INTEGER NOT NULL DEFAULT 0,
+          UNIQUE(location_id, name, floor));
+        CREATE TABLE spots(
+          id INTEGER PRIMARY KEY, room_id INTEGER NOT NULL REFERENCES rooms(id),
+          name TEXT NOT NULL, UNIQUE(room_id, name));
+        CREATE TABLE readings(
+          id INTEGER PRIMARY KEY, ts TEXT NOT NULL,
+          spot_id INTEGER NOT NULL REFERENCES spots(id),
+          ssid TEXT, bssid TEXT, rssi INTEGER, noise INTEGER, snr INTEGER,
+          channel TEXT, phy TEXT, tx_rate TEXT, ping_ms REAL,
+          down_mbps REAL, up_mbps REAL, server TEXT, note TEXT);
+        INSERT INTO locations(id, name) VALUES (1, 'home');
+        INSERT INTO rooms(id, location_id, name) VALUES (1, 1, 'kitchen');
+        INSERT INTO spots(id, room_id, name) VALUES (1, 1, 'window');
+        INSERT INTO readings(id, ts, spot_id, rssi)
+          VALUES (1, '2026-09-20T10:00:00+00:00', 1, -70);
+    """)
+    legacy.close()
+
+    conn = get_db(path)
+    conn.close()
+    conn = get_db(path)
+    try:
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(readings)")
+        }
+        tables = {
+            row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        indexes = {
+            row[1] for row in conn.execute("PRAGMA index_list(readings)")
+        }
+        row = conn.execute(
+            "SELECT id, rssi, walk_id FROM readings WHERE id = 1"
+        ).fetchone()
+        assert "walk_id" in columns
+        assert "walks" in tables
+        assert "idx_readings_walk_spot" in indexes
+        assert row == (1, -70, None)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] >= 1
+    finally:
+        conn.close()
