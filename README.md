@@ -236,14 +236,23 @@ src/wifimap/  cli.py    argparse + exit codes, CSV export
               eval_tui.py terminal evaluation rendering + runtime
               ssid.py   location-scoped existing/detected/manual selector
               store.py  SQLite CRUD/query facade
+              store_benchmarks.py benchmark persistence + delta formatting
               store_networks.py location, SSID + named-walk persistence
+              store_places.py location/room/spot hierarchy persistence
+              store_readings.py reading persistence + joined queries
               store_schema.py schema setup + persistent record types (WAL, FK on)
               signal.py CoreWLAN backend + slow fallback + wdutil identity
               speed.py  Ookla subprocess wrapper (graceful missing-binary path)
               traffic.py default-iface byte counters (netstat/route) for live traffic
-              tui.py    walk state + curses/ANSI runtime loops
+              tui.py    compatibility facade + walk-mode entry point
+              walk_baseline.py prior-walk resolution + per-spot aggregation
+              walk_curses.py curses renderer + input loop
+              walk_fallback.py plain ANSI renderer + input loop
+              walk_keys.py shared walk controls + timing constants
               walk_picker.py curses + line-based room/spot workflows
+              walk_session.py comparison display + named-session lifecycle
               walk_snapshot.py signal/speed capture + benchmark workers
+              walk_state.py mutable session state + worker coordination
               walk_ui.py pure walk formatting, meters, sparklines + picker input
 tests/        fixtures/mocks only, no live network
 docs/         plans/ (build history) + superpowers/ (specs)
