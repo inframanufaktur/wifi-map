@@ -300,7 +300,7 @@ def load_csv(path: Union[str, Path]) -> Report:
 _DB_QUERY_TEMPLATE = """
 SELECT r.id, r.ts, r.spot_id, s.room_id, l.id AS location_id,
        l.name AS location_name, m.name AS room_name, s.name AS spot_name,
-       m.floor, m.outdoors, r.ssid, r.bssid, r.rssi, r.noise, r.snr,
+       m.floor, m.outdoors, {ssid_field}, r.bssid, r.rssi, r.noise, r.snr,
        r.channel, r.phy, r.tx_rate, r.ping_ms, r.down_mbps, r.up_mbps,
        r.server, r.note, {walk_fields},
        CASE WHEN r.rssi IS NOT NULL AND b.rssi IS NOT NULL
@@ -316,11 +316,14 @@ JOIN spots s ON s.id = r.spot_id
 JOIN rooms m ON m.id = s.room_id
 JOIN locations l ON l.id = m.location_id
 LEFT JOIN benchmarks b ON b.location_id = l.id
+{ssid_join}
 {walk_join}
 ORDER BY r.id DESC
 """
 
 _DB_QUERY = _DB_QUERY_TEMPLATE.format(
+    ssid_field="n.name AS ssid",
+    ssid_join="LEFT JOIN ssids n ON n.id = r.ssid_id",
     walk_fields=(
         "r.walk_id, w.name AS walk_name, "
         "w.started_at AS walk_started_at, w.ended_at AS walk_ended_at"
@@ -329,6 +332,28 @@ _DB_QUERY = _DB_QUERY_TEMPLATE.format(
 )
 
 _LEGACY_DB_QUERY = _DB_QUERY_TEMPLATE.format(
+    ssid_field="n.name AS ssid",
+    ssid_join="LEFT JOIN ssids n ON n.id = r.ssid_id",
+    walk_fields=(
+        "NULL AS walk_id, NULL AS walk_name, "
+        "NULL AS walk_started_at, NULL AS walk_ended_at"
+    ),
+    walk_join="",
+)
+
+_STRING_DB_QUERY = _DB_QUERY_TEMPLATE.format(
+    ssid_field="r.ssid",
+    ssid_join="",
+    walk_fields=(
+        "r.walk_id, w.name AS walk_name, "
+        "w.started_at AS walk_started_at, w.ended_at AS walk_ended_at"
+    ),
+    walk_join="LEFT JOIN walks w ON w.id = r.walk_id",
+)
+
+_STRING_LEGACY_DB_QUERY = _DB_QUERY_TEMPLATE.format(
+    ssid_field="r.ssid",
+    ssid_join="",
     walk_fields=(
         "NULL AS walk_id, NULL AS walk_name, "
         "NULL AS walk_started_at, NULL AS walk_ended_at"
@@ -350,6 +375,12 @@ def _has_walk_schema(conn: sqlite3.Connection) -> bool:
     )
 
 
+def _has_normalized_ssid_schema(conn: sqlite3.Connection) -> bool:
+    return "ssid_id" in {
+        row[1] for row in conn.execute("PRAGMA table_info(readings)")
+    }
+
+
 def load_db(path: Union[str, Path]) -> Report:
     source = Path(path).expanduser()
     if not source.is_file():
@@ -359,7 +390,13 @@ def load_db(path: Union[str, Path]) -> Report:
         conn = sqlite3.connect(uri, uri=True)
         conn.row_factory = sqlite3.Row
         try:
-            query = _DB_QUERY if _has_walk_schema(conn) else _LEGACY_DB_QUERY
+            has_walks = _has_walk_schema(conn)
+            normalized = _has_normalized_ssid_schema(conn)
+            if normalized:
+                query = _DB_QUERY if has_walks else _LEGACY_DB_QUERY
+            else:
+                query = (_STRING_DB_QUERY if has_walks
+                         else _STRING_LEGACY_DB_QUERY)
             rows = conn.execute(query).fetchall()
         finally:
             conn.close()

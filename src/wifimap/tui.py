@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Literal, Optional, Tuple, Union
 
 from wifimap import signal as signal_mod
+from wifimap import ssid as ssid_mod
 from wifimap import speed as speed_mod
 from wifimap import store as store_mod
 from wifimap import traffic as traffic_mod
@@ -453,6 +454,7 @@ def finish_snapshot(
     run_speedtest_fn: Optional[Callable[[], speed_mod.Speed]] = None,
     no_speedtest: bool = False,
     walk_id: Optional[int] = None,
+    ssid_id: Optional[int] = None,
 ) -> SnapshotResult:
     """Sample signal, run speedtest (unless skipped), insert reading.
 
@@ -492,7 +494,8 @@ def finish_snapshot(
         try:
             rid = store_mod.add_reading(
                 conn, spot_id,
-                ssid=sig.ssid,
+                ssid=None if ssid_id is not None else sig.ssid,
+                ssid_id=ssid_id,
                 bssid=sig.bssid,
                 rssi=sig.rssi,
                 noise=sig.noise,
@@ -527,6 +530,7 @@ def start_snapshot_thread(
     on_done: Optional[Callable[[SnapshotResult], None]] = None,
     run_speedtest_fn: Optional[Callable[[], speed_mod.Speed]] = None,
     walk_id: Optional[int] = None,
+    ssid_id: Optional[int] = None,
 ) -> "threading.Thread":
     """Spawn daemon thread: sample signal + insert on its own connection.
 
@@ -538,6 +542,7 @@ def start_snapshot_thread(
         res = finish_snapshot(
             db_path, location_id,
             ssid_override=ssid_override,
+            ssid_id=ssid_id,
             run_speedtest_fn=run_speedtest_fn,
             no_speedtest=no_speedtest,
             walk_id=walk_id,
@@ -557,6 +562,7 @@ def _finish_benchmark(
     ssid_override: Optional[str] = None,
     run_speedtest_fn: Optional[Callable[[], speed_mod.Speed]] = None,
     no_speedtest: bool = False,
+    ssid_id: Optional[int] = None,
 ) -> SnapshotResult:
     """Sample signal, run speedtest (unless skipped), upsert benchmark.
 
@@ -591,7 +597,8 @@ def _finish_benchmark(
         try:
             store_mod.set_benchmark(
                 conn, location_id,
-                ssid=sig.ssid,
+                ssid=None if ssid_id is not None else sig.ssid,
+                ssid_id=ssid_id,
                 bssid=sig.bssid,
                 rssi=sig.rssi,
                 noise=sig.noise,
@@ -642,11 +649,18 @@ class WalkState:
                  history_max: int = 60,
                  traffic_fn: Optional[Callable[[], traffic_mod.Rates]] = None,
                  current_walk_id: Optional[int] = None,
-                 comparison_window: int = 5) -> None:
+                 comparison_window: int = 5,
+                 ssid_id: Optional[int] = None,
+                 ssid_name: Optional[str] = None) -> None:
         self.db_path = db_path
         self.no_speedtest = no_speedtest
         self.current_walk_id = current_walk_id
-        self.ssid_override = (ssid_override.strip() or None) if ssid_override is not None else None
+        selected_name = ssid_name if ssid_name is not None else ssid_override
+        self.ssid_override = (
+            selected_name.strip() or None
+            if selected_name is not None else None
+        )
+        self.ssid_id = ssid_id
         self.history_max = max(1, history_max)
         self.comparison_window = max(1, comparison_window)
         self.hist_rssi: SparkHistory = SparkHistory(maxlen=self.history_max)
@@ -904,8 +918,10 @@ class WalkState:
 
     def ensure_identity(
         self,
-        identity_fn: Optional[Callable[[], Optional[Tuple[str, str]]]] = None,
-    ) -> Optional[Tuple[str, str]]:
+        identity_fn: Optional[
+            Callable[[], Optional[Tuple[str, Optional[str]]]]
+        ] = None,
+    ) -> Optional[Tuple[str, Optional[str]]]:
         """One-shot session lookup; backfills polls; abort → toast + None."""
         if self.ssid_override is not None:
             self.net_ssid = self.ssid_override
@@ -929,8 +945,7 @@ class WalkState:
     def _backfill_identity(self) -> None:
         if self.ssid_override is not None:
             self.sig.ssid = self.ssid_override
-            return
-        if self.net_ssid is not None and self.sig.ssid is None:
+        elif self.net_ssid is not None and self.sig.ssid is None:
             self.sig.ssid = self.net_ssid
         if self.net_bssid is not None and self.sig.bssid is None:
             self.sig.bssid = self.net_bssid
@@ -1129,6 +1144,7 @@ class WalkState:
             self.db_path, loc_id,
             no_speedtest=self.no_speedtest,
             ssid_override=self.ssid_override,
+            ssid_id=self.ssid_id,
             on_done=_cb,
             run_speedtest_fn=run_speedtest_fn,
             walk_id=self.current_walk_id,
@@ -1253,7 +1269,7 @@ def _start_walk_session(
     name = ((walk_name or "").strip()
             or time.strftime("walk %Y-%m-%d %H:%M:%S"))
     state.current_walk_id = store_mod.create_walk(
-        conn, state.active_location_id, name)
+        conn, state.active_location_id, name, ssid_id=state.ssid_id)
     if compare_to is None:
         return
     target: Union[int, str] = compare_to
@@ -1611,7 +1627,9 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                  no_speedtest: bool,
                  ssid: Optional[str] = None,
                  walk_name: Optional[str] = None,
-                 compare_to: Optional[Union[int, str]] = None) -> int:
+                 compare_to: Optional[Union[int, str]] = None,
+                 ssid_id: Optional[int] = None,
+                 network_bssid: Optional[str] = None) -> int:
     import curses
 
     try:
@@ -1626,7 +1644,8 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
         return 3
     cap = history_cap(interval)
     state = WalkState(db_path, no_speedtest=no_speedtest,
-                      ssid_override=ssid, history_max=cap)
+                      ssid_id=ssid_id, ssid_name=ssid, history_max=cap)
+    state.net_bssid = network_bssid
     try:
         state.active_location_id = _resolve_preset(conn, location_preset)
         if state.active_location_id is not None:
@@ -1779,9 +1798,8 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                                     (pads[3], 0)])
                         _emit_segs([("traffic up   ", 0), (u_val_pad, 0),
                                     (pads[4], 0)])
-                manual = " (manual)" if state.ssid_override else ""
                 _emit("")
-                _emit("Net: %s%s" % (state.net_ssid or "unknown", manual))
+                _emit("Net: %s" % (state.net_ssid or "unknown"))
                 _addr = format_addr_line(state.ip, state.router, state.mac)
                 if _addr:
                     _emit(_addr)
@@ -1892,6 +1910,7 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                 res = _finish_benchmark(
                     state.db_path, state.active_location_id, note=note,
                     ssid_override=state.ssid_override,
+                    ssid_id=state.ssid_id,
                     no_speedtest=state.no_speedtest)
                 state.set_toast(res.message)
                 if res.ok:
@@ -1976,7 +1995,9 @@ def _walk_fallback(db_path: str, interval: float,
                    no_speedtest: bool,
                    ssid: Optional[str] = None,
                    walk_name: Optional[str] = None,
-                   compare_to: Optional[Union[int, str]] = None) -> int:
+                   compare_to: Optional[Union[int, str]] = None,
+                   ssid_id: Optional[int] = None,
+                   network_bssid: Optional[str] = None) -> int:
     """ANSI fallback when curses/tty unavailable.
 
     Limit: keys are line-buffered (type a key + Enter); no live refresh
@@ -1991,7 +2012,8 @@ def _walk_fallback(db_path: str, interval: float,
         return 3
     cap = history_cap(interval)
     state = WalkState(db_path, no_speedtest=no_speedtest,
-                      ssid_override=ssid, history_max=cap)
+                      ssid_id=ssid_id, ssid_name=ssid, history_max=cap)
+    state.net_bssid = network_bssid
     try:
         state.active_location_id = _resolve_preset(conn, location_preset)
         if state.active_location_id is not None:
@@ -2093,8 +2115,7 @@ def _walk_fallback(db_path: str, interval: float,
                       + " [60s]", flush=True)
                 print("traffic up   " + u_val_pad + " | " + up_g
                       + " [60s]", flush=True)
-            manual = " (manual)" if state.ssid_override else ""
-            print("Net: %s%s" % (state.net_ssid or "unknown", manual), flush=True)
+            print("Net: %s" % (state.net_ssid or "unknown"), flush=True)
             _addr = format_addr_line(state.ip, state.router, state.mac)
             if _addr:
                 print(_addr, flush=True)
@@ -2193,6 +2214,7 @@ def _walk_fallback(db_path: str, interval: float,
                 res = _finish_benchmark(
                     state.db_path, state.active_location_id, note=note,
                     ssid_override=state.ssid_override,
+                    ssid_id=state.ssid_id,
                     no_speedtest=state.no_speedtest)
                 state.set_toast(res.message)
                 if res.ok:
@@ -2369,6 +2391,79 @@ def _fallback_floor(conn: sqlite3.Connection, state: WalkState) -> None:
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _select_walk_location(
+    conn: sqlite3.Connection,
+    requested: Optional[str],
+    input_fn: Optional[Callable[[str], str]] = None,
+) -> int:
+    """Resolve a preset or select/create a location before the walk UI."""
+    if requested is not None:
+        return store_mod.resolve_location(conn, requested)
+    if not sys.stdin.isatty():
+        raise ValueError(
+            "location selection requires a terminal; pass --location NAME")
+    read = input_fn or input
+    while True:
+        locations = store_mod.list_locations(conn)
+        print("Select location:")
+        for index, location in enumerate(locations, start=1):
+            print("%d. %s" % (index, location.name))
+        print("%d. Create location" % (len(locations) + 1))
+        try:
+            raw = read("Location [number, q cancel]: ").strip()
+        except (EOFError, OSError):
+            raise ssid_mod.SSIDSelectionCancelled(
+                "location selection cancelled")
+        if raw.lower() in QUIT_WORDS:
+            raise ssid_mod.SSIDSelectionCancelled(
+                "location selection cancelled")
+        try:
+            index = int(raw) - 1
+        except ValueError:
+            continue
+        if 0 <= index < len(locations):
+            return locations[index].id
+        if index != len(locations):
+            continue
+        try:
+            name = read("Location name: ").strip()
+        except (EOFError, OSError):
+            raise ssid_mod.SSIDSelectionCancelled(
+                "location selection cancelled")
+        if name:
+            return store_mod.resolve_location(conn, name)
+
+
+def _prepare_walk_selection(
+    db_path: str,
+    location_preset: Optional[str],
+    requested_ssid: Optional[str],
+) -> Tuple[str, store_mod.SSID, Optional[str]]:
+    """Resolve the location and its SSID before curses takes the terminal."""
+    conn = store_mod.get_db(db_path)
+    try:
+        location_id = _select_walk_location(conn, location_preset)
+        identity = None
+        if requested_ssid is None:
+            try:
+                identity = signal_mod.read_network_identity()
+            except Exception:  # noqa: BLE001 - detection is best-effort
+                identity = None
+        selected = ssid_mod.select_ssid_line(
+            conn,
+            location_id,
+            detected_name=identity[0] if identity is not None else None,
+            requested=requested_ssid,
+        )
+        return (
+            str(location_id),
+            selected,
+            identity[1] if identity is not None else None,
+        )
+    finally:
+        conn.close()
+
+
 def run_walk(db_path: str, interval: float = 1.0,
              location_preset: Optional[str] = None,
              no_speedtest: bool = False,
@@ -2383,6 +2478,16 @@ def run_walk(db_path: str, interval: float = 1.0,
         print("Error: --ssid must not be blank", file=sys.stderr)
         return 3
     try:
+        location_preset, selected_ssid, network_bssid = (
+            _prepare_walk_selection(db_path, location_preset, ssid))
+    except ssid_mod.SSIDSelectionCancelled as exc:
+        print(str(exc), file=sys.stderr)
+        return 0
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        print("Error: cannot prepare walk: %s" % exc, file=sys.stderr)
+        return 3
+    ssid = selected_ssid.name
+    try:
         import curses  # noqa: F401
         use_curses = sys.stdin.isatty() and sys.stdout.isatty()
     except ImportError:
@@ -2393,7 +2498,8 @@ def run_walk(db_path: str, interval: float = 1.0,
         def _main(stdscr: object) -> int:
             return _walk_curses(
                 stdscr, db_path, interval, location_preset, no_speedtest,
-                ssid, walk_name, compare_to)
+                ssid, walk_name, compare_to,
+                ssid_id=selected_ssid.id, network_bssid=network_bssid)
 
         try:
             return _c.wrapper(_main)
@@ -2404,7 +2510,8 @@ def run_walk(db_path: str, interval: float = 1.0,
                   file=sys.stderr)
     return _walk_fallback(
         db_path, interval, location_preset, no_speedtest, ssid,
-        walk_name, compare_to)
+        walk_name, compare_to,
+        ssid_id=selected_ssid.id, network_bssid=network_bssid)
 
 
 __all__ = [

@@ -723,6 +723,77 @@ def test_ssid_override_backfills_and_tags_snapshot(tmp_path, monkeypatch):
         conn.close()
 
 
+def test_selected_ssid_entity_tags_walk_and_snapshot(tmp_path, monkeypatch):
+    db = str(tmp_path / "w.db")
+    conn = store_mod.get_db(db)
+    try:
+        location_id, _, (spot_id, _) = _seed_3level(
+            conn, loc="den", room="r", spots=("s1", "s2"))
+        ssid_id = store_mod.create_ssid(conn, location_id, "home-5g")
+        state = tui_mod.WalkState(
+            db, no_speedtest=True, ssid_id=ssid_id, ssid_name="home-5g")
+        state.active_location_id = location_id
+        tui_mod._start_walk_session(
+            conn, state, walk_name="entity walk", compare_to=None)
+        walk_id = state.current_walk_id
+        assert store_mod.get_walk(conn, walk_id).ssid_id == ssid_id
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(
+        signal_mod, "sample_signal",
+        lambda *a, **k: signal_mod.Signal(ssid="other", rssi=-60))
+    state.active_spot_id = spot_id
+    thread = state.try_snapshot()
+    assert thread is not None
+    thread.join(timeout=10)
+
+    conn = store_mod.get_db(db)
+    try:
+        row = store_mod.list_readings(conn, walk_id=walk_id)[0]
+        assert row["ssid_id"] == ssid_id
+        assert row["ssid"] == "home-5g"
+    finally:
+        conn.close()
+
+
+def test_run_walk_preflight_resolves_ssid_flag(
+        tmp_path, monkeypatch):
+    db = str(tmp_path / "walk.db")
+    captured = {}
+    monkeypatch.setattr(tui_mod.sys.stdin, "isatty", lambda: False)
+
+    def fallback(db_path, interval, location_preset, no_speedtest,
+                 ssid=None, walk_name=None, compare_to=None, ssid_id=None,
+                 network_bssid=None):
+        captured.update({
+            "location": location_preset,
+            "ssid": ssid,
+            "ssid_id": ssid_id,
+            "bssid": network_bssid,
+        })
+        return 0
+
+    monkeypatch.setattr(tui_mod, "_walk_fallback", fallback)
+
+    assert tui_mod.run_walk(
+        db, location_preset="home", ssid="home-5g",
+        no_speedtest=True) == 0
+    conn = store_mod.get_db(db)
+    try:
+        location_id = store_mod.lookup_location(conn, "home")
+        selected = store_mod.list_ssids(conn, location_id)
+        assert len(selected) == 1
+        assert captured == {
+            "location": str(location_id),
+            "ssid": "home-5g",
+            "ssid_id": selected[0].id,
+            "bssid": None,
+        }
+    finally:
+        conn.close()
+
+
 def test_ssid_override_blank_normalizes_to_none(tmp_path):
     st = tui_mod.WalkState(str(tmp_path / "w.db"), ssid_override="   ")
     assert st.ssid_override is None

@@ -12,9 +12,16 @@ CREATE TABLE IF NOT EXISTS locations(
   id INTEGER PRIMARY KEY,
   name TEXT NOT NULL UNIQUE
 );
+CREATE TABLE IF NOT EXISTS ssids(
+  id INTEGER PRIMARY KEY,
+  location_id INTEGER NOT NULL REFERENCES locations(id) ON DELETE CASCADE,
+  name TEXT NOT NULL CHECK(trim(name) <> ''),
+  UNIQUE(location_id, name)
+);
 CREATE TABLE IF NOT EXISTS walks(
   id INTEGER PRIMARY KEY,
   location_id INTEGER NOT NULL REFERENCES locations(id),
+  ssid_id INTEGER REFERENCES ssids(id),
   name TEXT NOT NULL CHECK(trim(name) <> ''),
   started_at TEXT NOT NULL,
   ended_at TEXT
@@ -37,7 +44,7 @@ CREATE TABLE IF NOT EXISTS readings(
   id INTEGER PRIMARY KEY,
   ts TEXT NOT NULL,
   spot_id INTEGER NOT NULL REFERENCES spots(id),
-  ssid TEXT, bssid TEXT,
+  ssid_id INTEGER REFERENCES ssids(id), bssid TEXT,
   rssi INTEGER, noise INTEGER, snr INTEGER,
   channel TEXT, phy TEXT, tx_rate TEXT,
   ping_ms REAL, down_mbps REAL, up_mbps REAL,
@@ -45,18 +52,41 @@ CREATE TABLE IF NOT EXISTS readings(
   walk_id INTEGER REFERENCES walks(id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS idx_rooms_location ON rooms(location_id);
+CREATE INDEX IF NOT EXISTS idx_ssids_location_name ON ssids(location_id, name);
 CREATE INDEX IF NOT EXISTS idx_spots_room ON spots(room_id);
 CREATE INDEX IF NOT EXISTS idx_readings_spot ON readings(spot_id);
-CREATE INDEX IF NOT EXISTS idx_readings_ssid ON readings(ssid);
-CREATE TABLE IF NOT EXISTS benchmarks(location_id INTEGER PRIMARY KEY REFERENCES locations(id) ON DELETE CASCADE, ts TEXT NOT NULL, ssid TEXT, bssid TEXT, rssi INTEGER, noise INTEGER, snr INTEGER, channel TEXT, phy TEXT, tx_rate TEXT, ping_ms REAL, down_mbps REAL, up_mbps REAL, server TEXT, note TEXT);
+CREATE INDEX IF NOT EXISTS idx_readings_ssid ON readings(ssid_id);
+CREATE TABLE IF NOT EXISTS benchmarks(
+  location_id INTEGER PRIMARY KEY REFERENCES locations(id) ON DELETE CASCADE,
+  ts TEXT NOT NULL,
+  ssid_id INTEGER REFERENCES ssids(id),
+  bssid TEXT,
+  rssi INTEGER, noise INTEGER, snr INTEGER,
+  channel TEXT, phy TEXT, tx_rate TEXT,
+  ping_ms REAL, down_mbps REAL, up_mbps REAL,
+  server TEXT, note TEXT
+);
 """
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
+
+
+class SchemaMigrationRequired(sqlite3.DatabaseError):
+    """Raised when a legacy SSID-string database needs the one-off script."""
 
 
 @dataclass
 class Location:
     id: int
     name: str
+
+
+@dataclass
+class SSID:
+    id: int
+    location_id: int
+    name: str
+
+
 @dataclass
 class Room:
     id: int
@@ -78,10 +108,11 @@ class Walk:
     name: str
     started_at: str
     ended_at: Optional[str] = None
+    ssid_id: Optional[int] = None
 
 
 def _migrate_schema(conn: sqlite3.Connection) -> None:
-    """Apply additive schema migrations to an existing database."""
+    """Apply additive migrations within the normalized schema."""
     columns = {
         row[1] for row in conn.execute("PRAGMA table_info(readings)")
     }
@@ -95,6 +126,14 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             "CREATE INDEX IF NOT EXISTS idx_readings_walk_spot "
             "ON readings(walk_id, spot_id)"
         )
+        walk_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(walks)")
+        }
+        if "ssid_id" not in walk_columns:
+            conn.execute(
+                "ALTER TABLE walks ADD COLUMN ssid_id INTEGER "
+                "REFERENCES ssids(id)"
+            )
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         if version < _SCHEMA_VERSION:
             conn.execute("PRAGMA user_version = %d" % _SCHEMA_VERSION)
@@ -106,6 +145,19 @@ def get_db(path: Union[str, Path]) -> sqlite3.Connection:
     try:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
+        has_readings = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'readings'"
+        ).fetchone()
+        if has_readings is not None:
+            columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(readings)")
+            }
+            if "ssid" in columns and "ssid_id" not in columns:
+                raise SchemaMigrationRequired(
+                    "legacy SSID schema; run: .venv/bin/python "
+                    "scripts/migrate_ssid_entities.py %s" % path
+                )
         conn.executescript(_SCHEMA)
         _migrate_schema(conn)
     except Exception:
@@ -159,11 +211,99 @@ def get_location(
     return Location(id=row[0], name=row[1])
 
 
+def create_ssid(
+    conn: sqlite3.Connection,
+    location_id: int,
+    name: str,
+) -> int:
+    """Create one case-sensitive SSID name within a location."""
+    if isinstance(location_id, bool) or get_location(conn, location_id) is None:
+        raise ValueError("unknown location id: %r" % (location_id,))
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("SSID name must not be blank")
+    cur = conn.execute(
+        "INSERT INTO ssids(location_id, name) VALUES (?, ?)",
+        (location_id, name.strip()),
+    )
+    conn.commit()
+    rowid = cur.lastrowid
+    if rowid is None:
+        raise sqlite3.Error("SSID insert returned no row id")
+    return rowid
+
+
+def get_ssid(
+    conn: sqlite3.Connection,
+    ssid_id: int,
+) -> Optional[SSID]:
+    """Return an SSID by id, or None when it does not exist."""
+    if isinstance(ssid_id, bool):
+        raise ValueError("invalid SSID id: %r" % (ssid_id,))
+    row = conn.execute(
+        "SELECT id, location_id, name FROM ssids WHERE id = ?",
+        (ssid_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return SSID(id=row[0], location_id=row[1], name=row[2])
+
+
+def list_ssids(
+    conn: sqlite3.Connection,
+    location_id: int,
+) -> List[SSID]:
+    """List the SSIDs owned by one location in creation order."""
+    if isinstance(location_id, bool) or get_location(conn, location_id) is None:
+        raise ValueError("unknown location id: %r" % (location_id,))
+    rows = conn.execute(
+        "SELECT id, location_id, name FROM ssids "
+        "WHERE location_id = ? ORDER BY id",
+        (location_id,),
+    ).fetchall()
+    return [SSID(id=row[0], location_id=row[1], name=row[2]) for row in rows]
+
+
+def resolve_ssid(
+    conn: sqlite3.Connection,
+    location_id: int,
+    id_or_name: Union[int, str],
+) -> int:
+    """Resolve a location-owned SSID id/name, creating an unknown name."""
+    if isinstance(id_or_name, bool):
+        raise ValueError("invalid SSID: %r" % (id_or_name,))
+    if isinstance(location_id, bool) or get_location(conn, location_id) is None:
+        raise ValueError("unknown location id: %r" % (location_id,))
+    if isinstance(id_or_name, int):
+        ssid = get_ssid(conn, id_or_name)
+        if ssid is None or ssid.location_id != location_id:
+            raise ValueError("unknown SSID id for location: %r" % id_or_name)
+        return ssid.id
+    label = str(id_or_name).strip()
+    if not label:
+        raise ValueError("SSID name must not be blank")
+    try:
+        as_id = int(label)
+    except ValueError:
+        as_id = None
+    if as_id is not None:
+        ssid = get_ssid(conn, as_id)
+        if ssid is not None and ssid.location_id == location_id:
+            return ssid.id
+    row = conn.execute(
+        "SELECT id FROM ssids WHERE location_id = ? AND name = ?",
+        (location_id, label),
+    ).fetchone()
+    if row is not None:
+        return row[0]
+    return create_ssid(conn, location_id, label)
+
+
 def create_walk(
     conn: sqlite3.Connection,
     location_id: int,
     name: str,
     started_at: Optional[str] = None,
+    ssid_id: Optional[int] = None,
 ) -> int:
     """Create a named walk for one location and return its id."""
     if isinstance(location_id, bool):
@@ -175,11 +315,18 @@ def create_walk(
     ).fetchone()
     if exists is None:
         raise ValueError("unknown location id: %r" % (location_id,))
+    if ssid_id is not None:
+        ssid = get_ssid(conn, ssid_id)
+        if ssid is None:
+            raise ValueError("unknown SSID id: %r" % (ssid_id,))
+        if ssid.location_id != location_id:
+            raise ValueError("walk and SSID belong to a different location")
     if started_at is None:
         started_at = datetime.now(timezone.utc).isoformat()
     cur = conn.execute(
-        "INSERT INTO walks(location_id, name, started_at) VALUES (?, ?, ?)",
-        (location_id, name.strip(), started_at),
+        "INSERT INTO walks(location_id, ssid_id, name, started_at) "
+        "VALUES (?, ?, ?, ?)",
+        (location_id, ssid_id, name.strip(), started_at),
     )
     conn.commit()
     rowid = cur.lastrowid
@@ -196,14 +343,14 @@ def get_walk(
     if isinstance(walk_id, bool):
         raise ValueError("invalid walk id: %r" % (walk_id,))
     row = conn.execute(
-        "SELECT id, location_id, name, started_at, ended_at "
+        "SELECT id, location_id, name, started_at, ended_at, ssid_id "
         "FROM walks WHERE id = ?",
         (walk_id,),
     ).fetchone()
     if row is None:
         return None
     return Walk(id=row[0], location_id=row[1], name=row[2],
-                started_at=row[3], ended_at=row[4])
+                started_at=row[3], ended_at=row[4], ssid_id=row[5])
 
 
 def list_walks(
@@ -214,7 +361,7 @@ def list_walks(
     if isinstance(location_id, bool):
         raise ValueError("invalid location id: %r" % (location_id,))
     query = (
-        "SELECT id, location_id, name, started_at, ended_at "
+        "SELECT id, location_id, name, started_at, ended_at, ssid_id "
         "FROM walks"
     )
     params = []
@@ -225,7 +372,7 @@ def list_walks(
     rows = conn.execute(query, params).fetchall()
     return [
         Walk(id=row[0], location_id=row[1], name=row[2],
-             started_at=row[3], ended_at=row[4])
+             started_at=row[3], ended_at=row[4], ssid_id=row[5])
         for row in rows
     ]
 
@@ -619,35 +766,50 @@ def add_reading(
     server: Optional[str] = None,
     note: Optional[str] = None,
     walk_id: Optional[int] = None,
+    ssid_id: Optional[int] = None,
 ) -> int:
     """Insert one readings row; ts defaults to current UTC ISO timestamp."""
+    spot_location = conn.execute(
+        "SELECT m.location_id FROM spots s "
+        "JOIN rooms m ON m.id = s.room_id WHERE s.id = ?",
+        (spot_id,),
+    ).fetchone()
+    if spot_location is None:
+        raise sqlite3.IntegrityError("FOREIGN KEY constraint failed")
+    location_id = spot_location[0]
+    if ssid_id is None and ssid is not None:
+        ssid_id = resolve_ssid(conn, location_id, ssid)
+    if ssid_id is not None:
+        selected_ssid = get_ssid(conn, ssid_id)
+        if selected_ssid is None:
+            raise ValueError("unknown SSID id: %r" % (ssid_id,))
+        if selected_ssid.location_id != location_id:
+            raise ValueError("reading and SSID belong to a different location")
+        if ssid is not None and selected_ssid.name != ssid:
+            raise ValueError("SSID id and name do not match")
     if isinstance(walk_id, bool):
         raise ValueError("invalid walk id: %r" % (walk_id,))
     if walk_id is not None:
         walk = get_walk(conn, walk_id)
         if walk is None:
             raise ValueError("unknown walk id: %r" % (walk_id,))
-        spot_location = conn.execute(
-            "SELECT m.location_id FROM spots s "
-            "JOIN rooms m ON m.id = s.room_id WHERE s.id = ?",
-            (spot_id,),
-        ).fetchone()
-        if spot_location is None:
-            raise ValueError("unknown spot id: %r" % (spot_id,))
-        if spot_location[0] != walk.location_id:
+        if location_id != walk.location_id:
             raise ValueError(
                 "walk and reading spot belong to a different location"
             )
+        if (walk.ssid_id is not None and ssid_id is not None
+                and walk.ssid_id != ssid_id):
+            raise ValueError("walk and reading use a different SSID")
     if ts is None:
         ts = datetime.now(timezone.utc).isoformat()
     cur = conn.execute(
         """INSERT INTO readings(
-             ts, spot_id, ssid, bssid, rssi, noise, snr,
+             ts, spot_id, ssid_id, bssid, rssi, noise, snr,
              channel, phy, tx_rate, ping_ms, down_mbps, up_mbps,
              server, note, walk_id)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
-            ts, spot_id, ssid, bssid, rssi, noise, snr,
+            ts, spot_id, ssid_id, bssid, rssi, noise, snr,
             channel, phy, tx_rate, ping_ms, down_mbps, up_mbps,
             server, note, walk_id,
         ),
@@ -676,6 +838,7 @@ def set_benchmark(
     up_mbps: Optional[float] = None,
     server: Optional[str] = None,
     note: Optional[str] = None,
+    ssid_id: Optional[int] = None,
 ) -> None:
     """Upsert one benchmarks row per location; ts defaults to UTC ISO."""
     if isinstance(location_id, bool):
@@ -685,16 +848,26 @@ def set_benchmark(
     ).fetchone()
     if exists is None:
         raise ValueError("unknown location id: %r" % (location_id,))
+    if ssid_id is None and ssid is not None:
+        ssid_id = resolve_ssid(conn, location_id, ssid)
+    if ssid_id is not None:
+        selected_ssid = get_ssid(conn, ssid_id)
+        if selected_ssid is None:
+            raise ValueError("unknown SSID id: %r" % (ssid_id,))
+        if selected_ssid.location_id != location_id:
+            raise ValueError("benchmark and SSID belong to a different location")
+        if ssid is not None and selected_ssid.name != ssid:
+            raise ValueError("SSID id and name do not match")
     if ts is None:
         ts = datetime.now(timezone.utc).isoformat()
     conn.execute(
         """INSERT INTO benchmarks(
-             location_id, ts, ssid, bssid, rssi, noise, snr,
+             location_id, ts, ssid_id, bssid, rssi, noise, snr,
              channel, phy, tx_rate, ping_ms, down_mbps, up_mbps,
              server, note)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(location_id) DO UPDATE SET
-             ts = excluded.ts, ssid = excluded.ssid,
+             ts = excluded.ts, ssid_id = excluded.ssid_id,
              bssid = excluded.bssid, rssi = excluded.rssi,
              noise = excluded.noise, snr = excluded.snr,
              channel = excluded.channel, phy = excluded.phy,
@@ -702,7 +875,7 @@ def set_benchmark(
              down_mbps = excluded.down_mbps, up_mbps = excluded.up_mbps,
              server = excluded.server, note = excluded.note""",
         (
-            location_id, ts, ssid, bssid, rssi, noise, snr,
+            location_id, ts, ssid_id, bssid, rssi, noise, snr,
             channel, phy, tx_rate, ping_ms, down_mbps, up_mbps,
             server, note,
         ),
@@ -721,9 +894,12 @@ def get_benchmark(
     conn.row_factory = sqlite3.Row
     try:
         row = conn.execute(
-            "SELECT location_id, ts, ssid, bssid, rssi, noise, snr,"
+            "SELECT b.location_id, b.ts, b.ssid_id, n.name AS ssid, "
+            "b.bssid, b.rssi, b.noise, b.snr,"
             " channel, phy, tx_rate, ping_ms, down_mbps, up_mbps,"
-            " server, note FROM benchmarks WHERE location_id = ?",
+            " server, note FROM benchmarks b "
+            "LEFT JOIN ssids n ON n.id = b.ssid_id "
+            "WHERE b.location_id = ?",
             (location_id,),
         ).fetchone()
         if row is None:
@@ -798,7 +974,8 @@ def list_readings(
     if isinstance(limit, bool) or limit < 0:
         raise ValueError("limit must be >= 0")
     query = (
-        "SELECT r.id, r.ts, r.spot_id, r.ssid, r.bssid, r.rssi,"
+        "SELECT r.id, r.ts, r.spot_id, r.ssid_id, n.name AS ssid, "
+        "r.bssid, r.rssi,"
         " r.noise, r.snr, r.channel, r.phy, r.tx_rate,"
         " r.ping_ms, r.down_mbps, r.up_mbps, r.server, r.note,"
         " r.walk_id, w.name AS walk_name,"
@@ -810,6 +987,7 @@ def list_readings(
         " FROM readings r JOIN spots s ON r.spot_id = s.id"
         " JOIN rooms m ON s.room_id = m.id"
         " JOIN locations l ON m.location_id = l.id"
+        " LEFT JOIN ssids n ON r.ssid_id = n.id"
         " LEFT JOIN walks w ON r.walk_id = w.id"
     )
     clauses = []
@@ -876,7 +1054,7 @@ def list_readings(
     if ssid is not None:
         if isinstance(ssid, bool):
             raise ValueError("invalid ssid filter: %r" % (ssid,))
-        clauses.append("r.ssid = ?")
+        clauses.append("n.name = ?")
         params.append(ssid)
     if walk_id is not None:
         if isinstance(walk_id, bool):

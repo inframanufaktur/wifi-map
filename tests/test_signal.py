@@ -26,7 +26,8 @@ class FakeChannel:
 
 class FakeInterface:
     def __init__(self, ssid="HomeNet", bssid="aa:bb:cc:dd:ee:ff",
-                 rssi=-57, noise=-92, channel=None, rate=780.0, phy=5):
+                 rssi=-57, noise=-92, channel=None, rate=780.0, phy=5,
+                 name=None):
         self._ssid = ssid
         self._bssid = bssid
         self._rssi = rssi
@@ -34,12 +35,16 @@ class FakeInterface:
         self._channel = channel if channel is not None else FakeChannel()
         self._rate = rate
         self._phy = phy
+        self._name = name
 
     def ssid(self):
         return self._ssid
 
     def bssid(self):
         return self._bssid
+
+    def interfaceName(self):
+        return self._name
 
     def rssiValue(self):
         return self._rssi
@@ -217,7 +222,7 @@ def test_sample_signal_default_read_fn_resolved_late(monkeypatch):
     assert sig.snr == 40
 
 
-# --- read_network_identity (sudo wdutil, session-start only) ---
+# --- read_network_identity (networksetup/wdutil, session-start only) ---
 
 def _run_ok(stdout):
     import subprocess
@@ -271,6 +276,73 @@ def test_identity_parses_variant_labels(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", _fake)
     assert sig_mod.read_network_identity() == ("VariantNet", "AA-BB-CC-DD-EE-FF")
+
+
+def test_identity_accepts_corewlan_ssid_without_bssid(monkeypatch):
+    """macOS may expose the network name while redacting the AP address."""
+    from wifimap import signal as sig_mod
+    import subprocess
+    monkeypatch.setitem(sys.modules, "CoreWLAN",
+                        _make_mod(FakeInterface(ssid="Home", bssid=None)))
+    calls = []
+    monkeypatch.setattr(subprocess, "run",
+                        lambda *a, **k: calls.append((a, k)))
+
+    assert sig_mod.read_network_identity() == ("Home", None)
+    assert calls == []
+
+
+def test_identity_uses_networksetup_before_sudo(monkeypatch):
+    """A redacted CoreWLAN SSID falls back without a password prompt."""
+    from wifimap import signal as sig_mod
+    import subprocess
+    monkeypatch.setitem(
+        sys.modules, "CoreWLAN",
+        _make_mod(FakeInterface(ssid=None, bssid=None, name="en0")),
+    )
+    seen = []
+
+    def _fake(cmd, **kw):
+        seen.append(cmd)
+        if cmd == ["/usr/sbin/networksetup", "-getairportnetwork", "en0"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, "Current Wi-Fi Network: GardenNet\n", "")
+        raise AssertionError("sudo must not run after networksetup succeeds")
+
+    monkeypatch.setattr(subprocess, "run", _fake)
+    assert sig_mod.read_network_identity() == ("GardenNet", None)
+    assert seen == [["/usr/sbin/networksetup", "-getairportnetwork", "en0"]]
+
+
+def test_identity_accepts_wdutil_ssid_without_bssid(monkeypatch):
+    """SSID detection must not depend on wdutil exposing a BSSID."""
+    from wifimap import signal as sig_mod
+    import subprocess
+    monkeypatch.setitem(sys.modules, "CoreWLAN",
+                        _make_mod(FakeInterface(ssid=None, bssid=None)))
+
+    def _fake(cmd, **kw):
+        if cmd == ["sudo", "-n", "true"]:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        return _run_ok("SSID: Home\n")
+
+    monkeypatch.setattr(subprocess, "run", _fake)
+    assert sig_mod.read_network_identity() == ("Home", None)
+
+
+def test_identity_rejects_redacted_ssid(monkeypatch):
+    from wifimap import signal as sig_mod
+    import subprocess
+    monkeypatch.setitem(sys.modules, "CoreWLAN",
+                        _make_mod(FakeInterface(ssid=None, bssid=None)))
+
+    def _fake(cmd, **kw):
+        if cmd == ["sudo", "-n", "true"]:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        return _run_ok("SSID: <redacted>\n")
+
+    monkeypatch.setattr(subprocess, "run", _fake)
+    assert sig_mod.read_network_identity() is None
 
 
 def test_identity_prompts_once_then_reads(monkeypatch):
@@ -370,8 +442,9 @@ def test_walk_identity_abort_toasts_and_continues(tmp_path):
     assert tui_mod.format_net_line(st.net_ssid) == "Net: unknown"
 
 
-def test_scan_backfills_ssid_and_warns_on_abort(monkeypatch, tmp_path, capsys):
+def test_scan_uses_selected_ssid_and_backfills_bssid(monkeypatch, tmp_path, capsys):
     from wifimap import signal as sig_mod
+    from wifimap import ssid as ssid_mod
     from wifimap import store as store_mod
     from wifimap.cli import main
     db = str(tmp_path / "scan.db")
@@ -380,6 +453,13 @@ def test_scan_backfills_ssid_and_warns_on_abort(monkeypatch, tmp_path, capsys):
                                                        rssi=-60))
     monkeypatch.setattr(sig_mod, "read_network_identity",
                         lambda: ("ScanNet", "11:22:33:44:55:66"))
+    original_selector = ssid_mod.select_ssid_line
+    def _select(conn, location_id, detected_name=None, requested=None):
+        assert detected_name == "ScanNet"
+        assert requested is None
+        selected_id = store_mod.resolve_ssid(conn, location_id, detected_name)
+        return store_mod.get_ssid(conn, selected_id)
+    monkeypatch.setattr(ssid_mod, "select_ssid_line", _select)
     rc = main(["--db", db, "scan", "--location", "lab", "--room", "R1",
                "--spot", "S1", "--no-speedtest"])
     assert rc == 0
@@ -390,14 +470,23 @@ def test_scan_backfills_ssid_and_warns_on_abort(monkeypatch, tmp_path, capsys):
         assert rows[0]["bssid"] == "11:22:33:44:55:66"
     finally:
         conn.close()
-    # abort path: warn on stderr, exit 0, tagging unaffected
+    # Detection can fail without losing the explicit location SSID.
     db2 = str(tmp_path / "scan2.db")
-    monkeypatch.setattr(sig_mod, "read_network_identity", lambda: None)
+    monkeypatch.setattr(
+        sig_mod, "read_network_identity",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("--ssid must skip automatic detection")),
+    )
+    monkeypatch.setattr(ssid_mod, "select_ssid_line", original_selector)
     rc = main(["--db", db2, "scan", "--location", "lab", "--room", "R1",
-               "--spot", "S1", "--no-speedtest"])
-    out = capsys.readouterr()
+               "--spot", "S1", "--ssid", "ManualNet", "--no-speedtest"])
+    capsys.readouterr()
     assert rc == 0
-    assert "unknown" in out.err.lower() or "warn" in out.err.lower()
+    conn = store_mod.get_db(db2)
+    try:
+        assert store_mod.list_readings(conn)[0]["ssid"] == "ManualNet"
+    finally:
+        conn.close()
 
 
 # --- radio detail fields (mcs/band/security), display-only ---

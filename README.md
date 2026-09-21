@@ -4,8 +4,10 @@ Map home WiFi for connectivity planning. Walk room to room, snapshot
 signal strength (+ internet throughput), tag by location/room/spot. Rows land
 in SQLite; CSV export feeds plotting/heatmap later.
 
-Model: `location` = physical site (e.g. HOME); `room` = room/place with
-floor + outdoors flag; `spot` = precise point (window/bed/corner/desk).
+Model: `location` = physical site (e.g. HOME); `SSID` = a network name owned
+by one location; `room` = room/place with floor + outdoors flag; `spot` =
+precise point (window/bed/corner/desk). Readings and walks reference the SSID
+entity; BSSID remains per reading so mesh access points stay distinguishable.
 
 macOS only. Python 3.9+ (3.9-compatible code). Stdlib-first — no TUI
 framework deps.
@@ -21,7 +23,8 @@ pip install -e .[test]
 #    Requires pyobjc-framework-CoreWLAN above; without it scan exits 2
 #    with an install hint (expected on a fresh machine).
 wifimap --db /tmp/demo.db scan --no-speedtest \
-  --location HOME --room KITCHEN --spot WINDOW --room-floor 0
+  --location HOME --room KITCHEN --spot WINDOW --room-floor 0 \
+  --ssid DEMO-WIFI
 
 # 2. Named house walkthrough (live signal + passive traffic):
 wifimap --db /tmp/demo.db walk --location HOME --name before-install
@@ -41,15 +44,27 @@ wifimap --db /tmp/demo.db eval
 wifimap eval --csv readings.csv
 ```
 
-Real DB defaults to `db/wifi-map.db` inside this project (gitignored) — pass `--db PATH` (global flag,
-before the subcommand) to override. Unknown location/room/spot names
-auto-create on `scan`.
+Real DB defaults to `db/wifi-map.db` inside this project (gitignored) — pass
+`--db PATH` (global flag, before the subcommand) to override. Unknown
+location/room/spot names auto-create on `scan`. `--ssid NAME` selects or
+creates that location's SSID without prompting; omit it in a terminal to
+choose an existing SSID, confirm the automatically detected name, or enter
+one manually.
+
+Existing databases with SSID strings require the explicit one-off migration.
+It makes a timestamped sibling backup before changing the local database:
+
+```sh
+.venv/bin/python scripts/migrate_ssid_entities.py db/wifi-map.db
+```
+
+Rerunning the command is safe and prints `already migrated`.
 
 ## Commands
 
 | Command | What it does |
 |---------|--------------|
-| `wifimap scan --location L --room R --spot S [--room-floor N] [--room-outdoors 0\|1] [--no-speedtest] [--note TEXT]` | Single snapshot row, print, exit |
+| `wifimap scan --location L --room R --spot S [--ssid NAME] [--room-floor N] [--room-outdoors 0\|1] [--no-speedtest] [--note TEXT]` | Select a location SSID, save one snapshot row, print, exit |
 | `wifimap walk [--interval 1.0] [--no-speedtest] [--location L] [--ssid NAME] [--name WALK] [--compare-to ID\|NAME\|latest]` | Named walkthrough with live signal, passive traffic, saved snapshots, and optional prior-walk comparison |
 | `wifimap eval [--csv REPORT.csv]` | Terminal evaluation dashboard; defaults to the project DB, or reads a current-schema CSV export |
 | `wifimap locations list` / `add --name X` | List sites / create one (prints id) |
@@ -167,20 +182,25 @@ the graph is blank if netstat/route is unavailable.
 
 ## Network name (SSID/BSSID)
 
-At session start (`scan` / `walk`) wifimap makes one privileged
-`wdutil info` call to fill SSID/BSSID. One sudo prompt at start, cached
-~5min; skip/abort = `Net: unknown`, tagging unaffected. On macOS 26
-SSID/BSSID come back NULL without Location permission on all APIs —
-that is normal, readings are keyed by your manual location tags.
-`walk --ssid NAME` forces a session SSID (shown as `Net: NAME (manual)`);
-`list`/`export --ssid S` filter by stored SSID.
+At `scan` / `walk` startup, wifimap selects an SSID entity belonging to the
+chosen location. It tries CoreWLAN, then `networksetup`, and, if needed, makes
+one privileged `wdutil info` call. Detection only suggests a choice: confirm
+an existing/detected SSID or create one manually. macOS 26
+may redact the name even after sudo; existing and manual choices still work,
+so new captures are never stored as `Net: unknown`.
+
+`--ssid NAME` selects or creates that SSID non-interactively and skips the
+privileged detection step. `list` / `export --ssid S` filter by the joined
+SSID name.
 
 ## Troubleshooting
 
 | Symptom | Cause / fix |
 |---------|-------------|
-| `scan` exits 2 with install hint | PyObjC missing: `pip install pyobjc-framework-CoreWLAN` (after `pip install --upgrade pip`) |
-| `Net: unknown`, SSID/BSSID `-` | sudo skipped or macOS 26 redaction — normal; use `--ssid NAME` or keep manual tags |
+| `scan` exits 2 with install hint | PyObjC missing: `python -m pip install pyobjc-framework-CoreWLAN` (after upgrading pip) |
+| `SSID selection requires a terminal` | Non-interactive scan/walk: pass both `--location NAME` and `--ssid NAME` |
+| `legacy SSID schema` | Run `.venv/bin/python scripts/migrate_ssid_entities.py db/wifi-map.db`; the script creates a backup first |
+| SSID detection is blank/redacted | Choose an existing SSID or create one manually; use `--ssid NAME` to skip detection/sudo |
 | `Warning: … speedtest …; proceeding signal-only` | Ookla binary missing/failed — row kept with NULL down/up; pass `--no-speedtest` to silence |
 | `walk` falls back to line-buffered keys | No curses/tty (e.g. piped output) — same `s/t/c/l/n/f/b/q` keys followed by Enter; `NO_COLOR=1` disables ANSI colours |
 | `Error: cannot open DB` / `cannot store reading` (exit 3) | Bad `--db` path or permissions; directory must exist |
@@ -211,15 +231,18 @@ selection, `list`, `export`.
 src/wifimap/  cli.py    argparse + exit codes, CSV export
               evaluation.py shared DB/CSV evaluation model + analysis
               eval_tui.py terminal evaluation selectors + dashboard
-              store.py  SQLite (locations→walks/readings + rooms→spots, WAL, FK on)
+              ssid.py   location-scoped existing/detected/manual selector
+              store.py  SQLite (locations→SSIDs/walks + rooms→spots→readings, WAL, FK on)
               signal.py CoreWLAN backend + slow fallback + wdutil identity
               speed.py  Ookla subprocess wrapper (graceful missing-binary path)
               traffic.py default-iface byte counters (netstat/route) for live traffic
               tui.py    curses walk loop + ANSI fallback, snapshot worker thread
 tests/        fixtures/mocks only, no live network
 docs/         plans/ (build history) + superpowers/ (specs)
+scripts/      explicit one-off local database migrations
 spikes/       M0 signal-backend probes (pyobjc vs swift vs wdutil vs system_profiler)
 ```
 
-Design specs: `docs/superpowers/specs/` (location/spot model, walk UI).
+Design specs: `docs/superpowers/specs/` (location/spot model, walk UI,
+location-owned SSIDs).
 Build plan with decision log: `docs/plans/wifimap-v1.md`.

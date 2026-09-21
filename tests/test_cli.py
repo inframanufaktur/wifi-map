@@ -111,7 +111,8 @@ def test_scan_insert_path(monkeypatch, tmp_path, capsys):
     )
     rc, out, err = _run(capsys, "--db", db, "scan",
                         "--location", "home", "--room", "kitchen",
-                        "--spot", "window", "--no-speedtest")
+                        "--spot", "window", "--ssid", "home-net",
+                        "--no-speedtest")
     assert rc == 0
     assert "kitchen" in out
     conn = store_mod.get_db(db)
@@ -121,9 +122,40 @@ def test_scan_insert_path(monkeypatch, tmp_path, capsys):
         assert rows[0]["location_name"] == "home"
         assert rows[0]["room_name"] == "kitchen"
         assert rows[0]["spot_name"] == "window"
+        assert rows[0]["ssid"] == "home-net"
+        assert rows[0]["ssid_id"] is not None
         assert rows[0]["rssi"] == -55
     finally:
         conn.close()
+
+
+def test_scan_ssid_flag_parses():
+    args = cli_mod._build_parser().parse_args([
+        "scan", "--location", "home", "--room", "kitchen",
+        "--spot", "window", "--ssid", "home-net",
+    ])
+
+    assert args.ssid == "home-net"
+
+
+def test_scan_requires_ssid_in_noninteractive_mode(
+        monkeypatch, tmp_path, capsys):
+    db = _db_path(monkeypatch, tmp_path)
+    sampled = []
+    monkeypatch.setattr(signal_mod, "read_network_identity", lambda: None)
+    monkeypatch.setattr(
+        signal_mod, "sample_signal",
+        lambda *a, **k: sampled.append(True) or signal_mod.Signal(rssi=-55),
+    )
+
+    rc, out, err = _run(
+        capsys, "--db", db, "scan", "--location", "home",
+        "--room", "kitchen", "--spot", "window", "--no-speedtest",
+    )
+
+    assert rc == cli_mod.EXIT_STORAGE
+    assert "--ssid" in err
+    assert sampled == []
 
 
 def test_scan_prints_sampling_notice(monkeypatch, tmp_path, capsys):
@@ -134,7 +166,8 @@ def test_scan_prints_sampling_notice(monkeypatch, tmp_path, capsys):
     )
     rc, out, err = _run(capsys, "--db", db, "scan",
                         "--location", "home", "--room", "kitchen",
-                        "--spot", "window", "--no-speedtest")
+                        "--spot", "window", "--ssid", "home-net",
+                        "--no-speedtest")
     assert rc == 0
     assert "sampling 5s... 5" in err
     assert "sampling 5s... 1" in err
@@ -150,7 +183,8 @@ def test_scan_sampling_countdown_ticks(monkeypatch, tmp_path, capsys):
     )
     rc, out, err = _run(capsys, "--db", db, "scan",
                         "--location", "home", "--room", "kitchen",
-                        "--spot", "window", "--no-speedtest")
+                        "--spot", "window", "--ssid", "home-net",
+                        "--no-speedtest")
     assert rc == 0
     assert "sampling 5s... 5" in err
     assert "sampling 5s... 1" in err
@@ -164,7 +198,8 @@ def test_scan_no_wifi_exit_2(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(signal_mod, "sample_signal", _boom)
     rc, out, err = _run(capsys, "--db", db, "scan",
                         "--location", "home", "--room", "kitchen",
-                        "--spot", "window", "--no-speedtest")
+                        "--spot", "window", "--ssid", "home-net",
+                        "--no-speedtest")
     assert rc == 2
     assert err.strip() != ""
 
@@ -176,7 +211,8 @@ def test_scan_signal_unavailable_exit_2(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(signal_mod, "sample_signal", _boom)
     rc, out, err = _run(capsys, "--db", db, "scan",
                         "--location", "home", "--room", "kitchen",
-                        "--spot", "window", "--no-speedtest")
+                        "--spot", "window", "--ssid", "home-net",
+                        "--no-speedtest")
     assert rc == 2
     assert "PyObjC" in err or "backend" in err or "hint" in err.lower()
 
@@ -192,7 +228,7 @@ def test_scan_speedtest_fail_stores_nulls(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(speed_mod, "run_speedtest", _fail)
     rc, out, err = _run(capsys, "--db", db, "scan",
                         "--location", "home", "--room", "den",
-                        "--spot", "window")
+                        "--spot", "window", "--ssid", "home-net")
     assert rc == 0
     conn = store_mod.get_db(db)
     try:
@@ -217,7 +253,7 @@ def test_scan_speedtest_unavailable_warns_and_keeps_signal(
     monkeypatch.setattr(speed_mod, "run_speedtest", _missing)
     rc, out, err = _run(capsys, "--db", db, "scan",
                         "--location", "home", "--room", "den2",
-                        "--spot", "window")
+                        "--spot", "window", "--ssid", "home-net")
     assert rc == 0
     assert "speedtest" in err.lower() or "warn" in err.lower()
     conn = store_mod.get_db(db)
@@ -238,6 +274,7 @@ def test_scan_resolve_autocreate_with_flags(monkeypatch, tmp_path, capsys):
     rc, out, err = _run(
         capsys, "--db", db, "scan", "--location", "home",
         "--room", "attic", "--spot", "window",
+        "--ssid", "home-net",
         "--room-floor", "1", "--room-outdoors", "1",
         "--no-speedtest")
     assert rc == 0
@@ -530,7 +567,8 @@ def test_scan_location_room_spot(monkeypatch, tmp_path):
     monkeypatch.setattr(signal_mod, "sample_signal",
         lambda *a, **k: signal_mod.Signal(ssid="h", rssi=-55))
     rc = main(["--db", db, "scan", "--location", "home",
-               "--room", "kitchen", "--spot", "window", "--no-speedtest"])
+               "--room", "kitchen", "--spot", "window",
+               "--ssid", "home-net", "--no-speedtest"])
     assert rc == 0
     conn = store_mod.get_db(db)
     try:
@@ -713,7 +751,8 @@ def test_scan_shows_delta_when_benchmark(monkeypatch, tmp_path, capsys):
             channel="36", phy="802.11ax", tx_rate="800"),
     )
     rc = main(["--db", db, "scan", "--location", "HOME",
-               "--room", "K", "--spot", "W", "--no-speedtest"])
+               "--room", "K", "--spot", "W", "--ssid", "home-net",
+               "--no-speedtest"])
     out = capsys.readouterr()
     assert rc == 0
     assert "vs bench" in out.out

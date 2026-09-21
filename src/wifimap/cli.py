@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from wifimap import signal as signal_mod
+from wifimap import ssid as ssid_mod
 from wifimap import speed as speed_mod
 from wifimap import store as store_mod
 from wifimap import evaluation as evaluation_mod
@@ -73,6 +74,10 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument("--location", required=True, help="Location ID|NAME")
     s.add_argument("--room", required=True, help="Room ID|NAME")
     s.add_argument("--spot", required=True, help="Spot ID|NAME")
+    s.add_argument(
+        "--ssid", default=None,
+        help="Use or create this location SSID (prompts when omitted)",
+    )
     s.add_argument("--room-floor", type=int, default=0)
     s.add_argument("--room-outdoors", type=int, choices=(0, 1),
                    default=0)
@@ -84,7 +89,7 @@ def _build_parser() -> argparse.ArgumentParser:
     w.add_argument("--no-speedtest", action="store_true")
     w.add_argument("--location", default=None, help="Preset ID|NAME")
     w.add_argument("--ssid", default=None,
-                   help="Session SSID override (manual)")
+                   help="Use or create this location SSID")
     w.add_argument(
         "--name", default=None,
         help="Name this saved walk (defaults to its start timestamp)")
@@ -179,10 +184,25 @@ def _cmd_scan(db_path: str, args: argparse.Namespace) -> int:
             print("Error: cannot resolve location: %s" % (exc,),
                   file=sys.stderr)
             return EXIT_STORAGE
+        identity = None
+        if args.ssid is None:
+            try:
+                identity = signal_mod.read_network_identity()
+            except Exception:  # noqa: BLE001 - identity is best-effort
+                identity = None
         try:
-            identity = signal_mod.read_network_identity()
-        except Exception:  # noqa: BLE001 - identity is best-effort
-            identity = None
+            selected_ssid = ssid_mod.select_ssid_line(
+                conn,
+                loc_id,
+                detected_name=identity[0] if identity is not None else None,
+                requested=args.ssid,
+            )
+        except ssid_mod.SSIDSelectionCancelled:
+            print("SSID selection cancelled", file=sys.stderr)
+            return EXIT_OK
+        except (ssid_mod.SSIDSelectionError, sqlite3.Error, ValueError) as exc:
+            print("Error: cannot select SSID: %s" % (exc,), file=sys.stderr)
+            return EXIT_STORAGE
         _sample_countdown()
         try:
             sig = signal_mod.sample_signal()
@@ -194,14 +214,10 @@ def _cmd_scan(db_path: str, args: argparse.Namespace) -> int:
                   "(hint: pip install pyobjc-framework-CoreWLAN)"
                   % (exc,), file=sys.stderr)
             return EXIT_NOWIFI
+        sig.ssid = selected_ssid.name
         if identity is not None:
-            if sig.ssid is None:
-                sig.ssid = identity[0]
             if sig.bssid is None:
                 sig.bssid = identity[1]
-        elif sig.ssid is None or sig.bssid is None:
-            print("Warning: network name unavailable (sudo skipped); "
-                  "SSID unknown, tagging unaffected", file=sys.stderr)
         ping_ms: Optional[float] = None
         down_mbps: Optional[float] = None
         up_mbps: Optional[float] = None
@@ -219,7 +235,7 @@ def _cmd_scan(db_path: str, args: argparse.Namespace) -> int:
                 ping_ms, down_mbps, up_mbps, server = None, None, None, "ERROR"
         try:
             rid = store_mod.add_reading(
-                conn, spot_id, ssid=sig.ssid, bssid=sig.bssid,
+                conn, spot_id, ssid_id=selected_ssid.id, bssid=sig.bssid,
                 rssi=sig.rssi, noise=sig.noise, snr=sig.snr,
                 channel=sig.channel, phy=sig.phy, tx_rate=sig.tx_rate,
                 ping_ms=ping_ms, down_mbps=down_mbps, up_mbps=up_mbps,

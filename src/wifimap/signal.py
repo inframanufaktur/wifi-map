@@ -243,6 +243,7 @@ _CHANNEL_RE = re.compile(r"Channel:\s*(\S[^\n]*)")
 _SUDO_CHECK_TIMEOUT = 10.0
 _SUDO_PROMPT_TIMEOUT = 120.0
 _WDUTIL_TIMEOUT = 15.0
+_NETWORKSETUP_TIMEOUT = 5.0
 
 #: Tolerant `wdutil info` labels (case-insensitive, `:` or `=` sep).
 #: verify: compare against real `sudo wdutil info` output on hardware;
@@ -251,25 +252,39 @@ _SSID_RE = re.compile(
     r"(?im)^\s*(?:SSID|Network\s*Name)\s*[:=]\s*(.+?)\s*$")
 _BSSID_RE = re.compile(
     r"(?im)^\s*(?:BSSID|BSS)\s*[:=]\s*([0-9A-Fa-f:\-]{11,})\s*$")
+_NETWORKSETUP_SSID_RE = re.compile(
+    r"(?im)^\s*Current\s+(?:Wi-Fi|AirPort)\s+Network\s*:\s*(.+?)\s*$")
 
 
-def _parse_wdutil_identity(text: str) -> Optional[Tuple[str, str]]:
-    """Parse (ssid, bssid) from `wdutil info` output; None on failure."""
+def _clean_ssid(value: object) -> Optional[str]:
+    """Return a usable SSID, excluding empty and privacy-redacted values."""
+    if value is None:
+        return None
+    ssid = str(value).strip().strip("\"'")
+    if not ssid or ssid.casefold() == "<redacted>":
+        return None
+    return ssid
+
+
+def _parse_wdutil_identity(
+    text: str,
+) -> Optional[Tuple[str, Optional[str]]]:
+    """Parse SSID and optional BSSID from ``wdutil info`` output."""
     if not text:
         return None
     ssid_m = _SSID_RE.search(text)
     bssid_m = _BSSID_RE.search(text)
-    if not ssid_m or not bssid_m:
+    if not ssid_m:
         return None
-    ssid = ssid_m.group(1).strip().strip("\"'")
-    bssid = bssid_m.group(1).strip()
-    if not ssid or not bssid:
+    ssid = _clean_ssid(ssid_m.group(1))
+    if ssid is None:
         return None
+    bssid = bssid_m.group(1).strip() if bssid_m else None
     return (ssid, bssid)
 
 
-def _read_corewlan_identity() -> Optional[Tuple[str, str]]:
-    """CoreWLAN ssid/bssid when Location-granted; None if redacted/missing."""
+def _read_corewlan_identity() -> Optional[Tuple[str, Optional[str]]]:
+    """Read a CoreWLAN SSID, retaining BSSID when macOS exposes it."""
     try:
         from CoreWLAN import CWWiFiClient
     except Exception:
@@ -283,15 +298,48 @@ def _read_corewlan_identity() -> Optional[Tuple[str, str]]:
         bssid = iface.bssid()
     except Exception:
         return None
-    if ssid is None or bssid is None:
+    ssid_s = _clean_ssid(ssid)
+    if ssid_s is None:
         return None
-    ssid_s, bssid_s = str(ssid).strip(), str(bssid).strip()
-    if not ssid_s or not bssid_s:
-        return None
+    bssid_s = str(bssid).strip() if bssid is not None else None
+    if not bssid_s:
+        bssid_s = None
     return (ssid_s, bssid_s)
 
 
-def _run_wdutil_info() -> Optional[Tuple[str, str]]:
+def _read_corewlan_interface_name() -> Optional[str]:
+    """Return the active CoreWLAN interface name even when SSID is hidden."""
+    try:
+        from CoreWLAN import CWWiFiClient
+        client = CWWiFiClient.sharedWiFiClient()
+        iface = client.interface() if client is not None else None
+        name = iface.interfaceName() if iface is not None else None
+    except Exception:
+        return None
+    name_s = str(name).strip() if name is not None else None
+    return name_s or None
+
+
+def _read_networksetup_identity(
+    interface_name: str,
+) -> Optional[Tuple[str, Optional[str]]]:
+    """Read the current SSID from macOS ``networksetup`` without sudo."""
+    try:
+        proc = subprocess.run(
+            ["/usr/sbin/networksetup", "-getairportnetwork", interface_name],
+            capture_output=True, text=True, timeout=_NETWORKSETUP_TIMEOUT,
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    match = _NETWORKSETUP_SSID_RE.search(
+        "\n".join((proc.stdout or "", proc.stderr or "")))
+    ssid = _clean_ssid(match.group(1)) if match else None
+    return (ssid, None) if ssid is not None else None
+
+
+def _run_wdutil_info() -> Optional[Tuple[str, Optional[str]]]:
     """Run `sudo -n wdutil info` once and parse; None on any failure."""
     try:
         proc = subprocess.run(
@@ -308,11 +356,12 @@ def _run_wdutil_info() -> Optional[Tuple[str, str]]:
         return None
 
 
-def read_network_identity() -> Optional[Tuple[str, str]]:
-    """Session network identity: (ssid, bssid) or None.
+def read_network_identity() -> Optional[Tuple[str, Optional[str]]]:
+    """Session network identity: ``(ssid, optional_bssid)`` or ``None``.
 
-    Order: (a) CoreWLAN current ssid/bssid when non-None (no sudo
-    needed); (b) else one privileged ``wdutil info`` lookup: if
+    Order: (a) CoreWLAN current SSID, plus BSSID when available; (b)
+    ``networksetup`` for the CoreWLAN interface; (c) one privileged
+    ``wdutil info`` lookup. For the latter, if
     ``sudo -n true`` succeeds, read directly; otherwise run ``sudo -v``
     ONCE (user prompted in terminal, cached ~5min) then read. Non-tty
     sessions skip the prompt and return None. Abort/wrong-password,
@@ -325,6 +374,11 @@ def read_network_identity() -> Optional[Tuple[str, str]]:
     found = _read_corewlan_identity()
     if found is not None:
         return found
+    interface_name = _read_corewlan_interface_name()
+    if interface_name is not None:
+        found = _read_networksetup_identity(interface_name)
+        if found is not None:
+            return found
     try:
         check = subprocess.run(
             ["sudo", "-n", "true"],

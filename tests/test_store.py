@@ -1,13 +1,18 @@
+import importlib.util
 import sqlite3
+from pathlib import Path
 
 import pytest
 
 from wifimap.store import (
+    SSID,
+    SchemaMigrationRequired,
     Walk,
     add_reading,
     clear_benchmark,
     create_location,
     create_room,
+    create_ssid,
     create_spot,
     create_walk,
     finish_walk,
@@ -16,19 +21,35 @@ from wifimap.store import (
     get_db,
     get_location,
     get_room,
+    get_ssid,
     get_spot,
     get_walk,
     list_locations,
     list_readings,
     list_rooms,
+    list_ssids,
     list_spots,
     list_walks,
     resolve_location,
     resolve_room,
+    resolve_ssid,
     resolve_spot,
     set_benchmark,
     update_room_floor,
 )
+
+
+def _load_ssid_migration():
+    script_path = (
+        Path(__file__).resolve().parents[1]
+        / "scripts" / "migrate_ssid_entities.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "migrate_ssid_entities", script_path)
+    assert spec is not None and spec.loader is not None
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+    return migration
 
 
 @pytest.fixture
@@ -265,6 +286,45 @@ def test_list_readings_ssid_filter(db):
     assert len(list_readings(db)) == 2
 
 
+def test_ssids_are_unique_within_location(db):
+    home = create_location(db, "home")
+    office = create_location(db, "office")
+    home_ssid = create_ssid(db, home, "shared-net")
+    office_ssid = create_ssid(db, office, "shared-net")
+
+    assert home_ssid != office_ssid
+    assert get_ssid(db, home_ssid) == SSID(home_ssid, home, "shared-net")
+    assert list_ssids(db, home) == [SSID(home_ssid, home, "shared-net")]
+    assert resolve_ssid(db, home, "shared-net") == home_ssid
+    with pytest.raises(sqlite3.IntegrityError):
+        create_ssid(db, home, "shared-net")
+
+
+def test_ssid_names_are_nonblank_and_case_sensitive(db):
+    location_id = create_location(db, "home")
+    with pytest.raises(ValueError, match="blank"):
+        create_ssid(db, location_id, "   ")
+    upper = create_ssid(db, location_id, "HomeNet")
+    lower = create_ssid(db, location_id, "homenet")
+    assert upper != lower
+
+
+def test_reading_rejects_ssid_from_another_location(db):
+    home, _, home_spot = _three_levels(db, loc="home")
+    office, _, _ = _three_levels(db, loc="office")
+    office_ssid = create_ssid(db, office, "office-net")
+
+    with pytest.raises(ValueError, match="different location"):
+        add_reading(db, home_spot, ssid_id=office_ssid, rssi=-60)
+
+    home_ssid = create_ssid(db, home, "home-net")
+    reading_id = add_reading(db, home_spot, ssid_id=home_ssid, rssi=-60)
+    row = list_readings(db)[0]
+    assert row["id"] == reading_id
+    assert row["ssid_id"] == home_ssid
+    assert row["ssid"] == "home-net"
+
+
 def test_list_readings_room_spot_id_filters(db):
     _, rid, sid = _three_levels(db)
     r1 = add_reading(db, sid, rssi=-50)
@@ -303,7 +363,11 @@ def test_new_schema_tables(tmp_path):
     try:
         tables = {r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-        assert {"locations", "rooms", "spots", "readings"} <= tables
+        assert {"locations", "ssids", "rooms", "spots", "readings"} <= tables
+        reading_columns = {r[1] for r in conn.execute(
+            "PRAGMA table_info(readings)").fetchall()}
+        assert "ssid_id" in reading_columns
+        assert "ssid" not in reading_columns
     finally:
         conn.close()
 
@@ -514,7 +578,7 @@ def test_list_readings_walk_filter_preserves_positional_limit(db):
         first + 1, first]
 
 
-def test_get_db_migrates_legacy_readings_idempotently(tmp_path):
+def test_explicit_script_migrates_legacy_ssids_idempotently(tmp_path):
     path = tmp_path / "legacy.db"
     legacy = sqlite3.connect(str(path))
     legacy.executescript("""
@@ -537,13 +601,21 @@ def test_get_db_migrates_legacy_readings_idempotently(tmp_path):
         INSERT INTO locations(id, name) VALUES (1, 'home');
         INSERT INTO rooms(id, location_id, name) VALUES (1, 1, 'kitchen');
         INSERT INTO spots(id, room_id, name) VALUES (1, 1, 'window');
-        INSERT INTO readings(id, ts, spot_id, rssi)
-          VALUES (1, '2026-09-20T10:00:00+00:00', 1, -70);
+        INSERT INTO readings(id, ts, spot_id, ssid, rssi)
+          VALUES (1, '2026-09-20T10:00:00+00:00', 1, 'home-net', -70);
+        PRAGMA user_version = 1;
     """)
     legacy.close()
 
-    conn = get_db(path)
-    conn.close()
+    with pytest.raises(SchemaMigrationRequired, match="migrate_ssid_entities"):
+        get_db(path)
+
+    migrate_database = _load_ssid_migration().migrate_database
+
+    backup = migrate_database(path)
+    assert backup is not None and backup.is_file()
+    assert migrate_database(path) is None
+
     conn = get_db(path)
     try:
         columns = {
@@ -556,13 +628,63 @@ def test_get_db_migrates_legacy_readings_idempotently(tmp_path):
         indexes = {
             row[1] for row in conn.execute("PRAGMA index_list(readings)")
         }
-        row = conn.execute(
-            "SELECT id, rssi, walk_id FROM readings WHERE id = 1"
-        ).fetchone()
+        row = list_readings(conn)[0]
+        ssids = list_ssids(conn, 1)
         assert "walk_id" in columns
+        assert "ssid_id" in columns
+        assert "ssid" not in columns
         assert "walks" in tables
+        assert "ssids" in tables
         assert "idx_readings_walk_spot" in indexes
-        assert row == (1, -70, None)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] >= 1
+        assert row["id"] == 1 and row["rssi"] == -70
+        assert row["ssid"] == "home-net"
+        assert row["ssid_id"] == ssids[0].id
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         conn.close()
+
+
+def test_explicit_migration_refuses_legacy_foreign_key_violations(tmp_path):
+    path = tmp_path / "orphan.db"
+    legacy = sqlite3.connect(str(path))
+    legacy.executescript("""
+        PRAGMA foreign_keys = OFF;
+        CREATE TABLE locations(id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
+        CREATE TABLE rooms(
+          id INTEGER PRIMARY KEY,
+          location_id INTEGER NOT NULL REFERENCES locations(id),
+          name TEXT NOT NULL, floor INTEGER NOT NULL DEFAULT 0,
+          outdoors INTEGER NOT NULL DEFAULT 0,
+          UNIQUE(location_id, name, floor));
+        CREATE TABLE spots(
+          id INTEGER PRIMARY KEY, room_id INTEGER NOT NULL REFERENCES rooms(id),
+          name TEXT NOT NULL, UNIQUE(room_id, name));
+        CREATE TABLE readings(
+          id INTEGER PRIMARY KEY, ts TEXT NOT NULL,
+          spot_id INTEGER NOT NULL REFERENCES spots(id),
+          ssid TEXT, bssid TEXT, rssi INTEGER, noise INTEGER, snr INTEGER,
+          channel TEXT, phy TEXT, tx_rate TEXT, ping_ms REAL,
+          down_mbps REAL, up_mbps REAL, server TEXT, note TEXT);
+        INSERT INTO readings(id, ts, spot_id, ssid)
+          VALUES (1, '2026-09-20T10:00:00+00:00', 999, 'orphan-net');
+    """)
+    legacy.close()
+
+    migrate_database = _load_ssid_migration().migrate_database
+    with pytest.raises(sqlite3.IntegrityError, match="foreign-key violations"):
+        migrate_database(path)
+
+    unchanged = sqlite3.connect(str(path))
+    try:
+        columns = {
+            row[1] for row in unchanged.execute("PRAGMA table_info(readings)")
+        }
+        assert "ssid" in columns and "ssid_id" not in columns
+        assert unchanged.execute("SELECT COUNT(*) FROM readings").fetchone()[0] == 1
+        assert "ssids" not in {
+            row[0] for row in unchanged.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+    finally:
+        unchanged.close()
