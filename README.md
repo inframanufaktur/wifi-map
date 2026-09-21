@@ -23,10 +23,14 @@ pip install -e .[test]
 wifimap --db /tmp/demo.db scan --no-speedtest \
   --location HOME --room KITCHEN --spot WINDOW --room-floor 0
 
-# 2. House walkthrough (live RSSI/noise/SNR table):
-wifimap --db /tmp/demo.db walk --no-speedtest --location HOME
-# keys: s snapshot (room→spot drilldown, Enter confirms) | b benchmark |
-#       l switch | n new room+spot | f edit floor | q quit. DB writes only on s.
+# 2. Named house walkthrough (live signal + passive traffic):
+wifimap --db /tmp/demo.db walk --location HOME --name before-install
+# keys: s snapshot+save | t unsaved throughput probe | c compare walk |
+#       l switch spot | n new room+spot | f floor | b benchmark | q quit.
+
+# After changing the infrastructure, compare live against the first walk:
+wifimap --db /tmp/demo.db walk --location HOME --name after-install \
+  --compare-to before-install
 
 # 3. Review + export:
 wifimap --db /tmp/demo.db list
@@ -46,7 +50,7 @@ auto-create on `scan`.
 | Command | What it does |
 |---------|--------------|
 | `wifimap scan --location L --room R --spot S [--room-floor N] [--room-outdoors 0\|1] [--no-speedtest] [--note TEXT]` | Single snapshot row, print, exit |
-| `wifimap walk [--interval 1.0] [--no-speedtest] [--location L] [--ssid NAME]` | Live RSSI/noise/SNR/down/up graph meters, BSSID/channel table + snapshot keys above |
+| `wifimap walk [--interval 1.0] [--no-speedtest] [--location L] [--ssid NAME] [--name WALK] [--compare-to ID\|NAME\|latest]` | Named walkthrough with live signal, passive traffic, saved snapshots, and optional prior-walk comparison |
 | `wifimap eval [--csv REPORT.csv]` | Terminal evaluation dashboard; defaults to the project DB, or reads a current-schema CSV export |
 | `wifimap locations list` / `add --name X` | List sites / create one (prints id) |
 | `wifimap rooms list --location L` / `add --location L --name X --floor N [--outdoors]` | List / create rooms in a site |
@@ -81,12 +85,45 @@ immutable export with `wifimap eval --csv export/report.csv`.
 
 Startup first asks whether to evaluate by Location or SSID, then asks for the
 specific value. `Unknown` includes readings without an SSID. The dashboard
-starts with per-spot medians ranked worst-first; `v` toggles individual
-readings, `Tab`/`Shift+Tab` cycles forward/backward through RSSI/SNR/ping/down/up
-and benchmark-delta metrics, `r`
-reverses the ranking, arrows or `j`/`k` move, and Escape returns to selection.
-Rows identify each result as `room / floor / spot`; RSSI/SNR ratings use the
-same GREAT/OK/WEAK thresholds as walk mode.
+starts in `spot summary` mode with per-spot medians ranked worst-first; `m`
+switches to `individual readings` mode. `Tab`/`Shift+Tab` cycles
+forward/backward through RSSI/noise/SNR/TX rate/ping/down/up and
+benchmark-delta metrics,
+`r` reverses the ranking, arrows or `j`/`k` move, and Escape returns to
+selection. Rows identify each result as `room / floor / spot`; RSSI/SNR ratings
+use the same GREAT/OK/WEAK thresholds as walk mode. Enter opens the selected
+spot's newest-first reading history (or the selected individual reading), with
+SSID/BSSID, channel, PHY, tx rate, signal and benchmark deltas, throughput,
+server, and notes.
+
+Press `c` from the dashboard to compare two named walks. Choose the before
+walk and after walk; the comparison matches physical spots, reduces repeated
+reads to per-walk medians, and shows `BETTER`, `WORSE`, `NEW`, or
+`NOT REVISITED`. `Tab`/`Shift+Tab` cycles the seven raw measurements, `r`
+changes improvement order, `x` swaps before/after, and Enter opens both
+walk histories with their exact radio and throughput data. Walks from
+different locations are never paired, including when evaluation was entered
+through an SSID selection.
+
+## Named walks and live comparison
+
+A named walk is a database record wrapping all readings saved during one
+`walk` invocation. It stores the location, name, start time, and end time;
+each reading points back to its walk. Names are human-facing and may repeat,
+while IDs remain unambiguous. If a repeated name is used with `--compare-to`,
+the command reports the matching IDs to choose from. Existing readings remain
+valid but unassigned until explicitly migrated into a walk.
+
+With `--compare-to`, the active spot shows rolling live RSSI, noise, SNR, and
+TX-rate values beside the selected walk's per-spot medians. `t` runs an
+asynchronous Ookla throughput probe without saving a reading; `s` measures and
+saves into the current walk. Both show ping/down/up changes when finished.
+Switching spots clears spot-specific live results, and overlapping speed tests
+are blocked.
+
+The continuously updating `traffic down/up` graphs are interface utilization,
+not a capacity test, so they are intentionally never compared with stored
+Ookla results.
 
 CSV evaluation requires all current export columns, including the four delta
 columns. Blank values are valid; missing required columns and malformed
@@ -124,7 +161,7 @@ upstream, "will be disabled on 2027-01-18"), which uses different
 flags/output and does **not** match our `--format=json` parser. Do not
 substitute it. Without the Ookla binary everything still works via
 `--no-speedtest` (rows stored with NULL down/up). In `walk`, the live
-down/up meters come from default-route interface byte counters via
+traffic down/up meters come from default-route interface byte counters via
 `netstat`/`route`; VPN tunnels (utun) count as the internet path, and
 the graph is blank if netstat/route is unavailable.
 
@@ -145,7 +182,7 @@ that is normal, readings are keyed by your manual location tags.
 | `scan` exits 2 with install hint | PyObjC missing: `pip install pyobjc-framework-CoreWLAN` (after `pip install --upgrade pip`) |
 | `Net: unknown`, SSID/BSSID `-` | sudo skipped or macOS 26 redaction — normal; use `--ssid NAME` or keep manual tags |
 | `Warning: … speedtest …; proceeding signal-only` | Ookla binary missing/failed — row kept with NULL down/up; pass `--no-speedtest` to silence |
-| `walk` falls back to `s/l/n/f/q + Enter` mode | No curses/tty (e.g. piped output) — same keys, line-buffered; `NO_COLOR=1` disables ANSI colours |
+| `walk` falls back to line-buffered keys | No curses/tty (e.g. piped output) — same `s/t/c/l/n/f/b/q` keys followed by Enter; `NO_COLOR=1` disables ANSI colours |
 | `Error: cannot open DB` / `cannot store reading` (exit 3) | Bad `--db` path or permissions; directory must exist |
 
 ## CSV + tests
@@ -153,27 +190,31 @@ that is normal, readings are keyed by your manual location tags.
 `export` columns: `id, ts, spot_id, room_id, location_id,
 location_name, room_name, spot_name, floor, outdoors, ssid, bssid,
 rssi, noise, snr, channel, phy, tx_rate, ping_ms, down_mbps, up_mbps,
-server, note, delta_rssi, delta_snr, delta_down_mbps, delta_up_mbps`.
+server, note, delta_rssi, delta_snr, delta_down_mbps, delta_up_mbps,
+walk_id, walk_name, walk_started_at, walk_ended_at`.
 NULLs render as `-` in terminal tables, `""` in CSV. Delta columns are
 reading minus the location benchmark; blank when no benchmark exists or
 either value is missing.
 
 ```sh
 pip install -e .[test]
-pytest   # 140 passed (verified 2026-09-18, clean venv). Fixtures/mocks only — no live network in tests.
+pytest   # 283 passed (verified 2026-09-21). Fixtures/mocks only — no live network in tests.
 ```
 
-Manual gates (no automation): `scan`, walk key flow (`s`/`l`/`n`/`f`/`q`),
-`list`, `export`.
+Manual gates (no automation): `scan`, walk key flow
+(`s`/`t`/`c`/`l`/`n`/`f`/`b`/`q`), eval Location/SSID and walk-comparison
+selection, `list`, `export`.
 
 ## Architecture
 
 ```
 src/wifimap/  cli.py    argparse + exit codes, CSV export
-              store.py  SQLite (locations→rooms→spots→readings, WAL, FK on)
+              evaluation.py shared DB/CSV evaluation model + analysis
+              eval_tui.py terminal evaluation selectors + dashboard
+              store.py  SQLite (locations→walks/readings + rooms→spots, WAL, FK on)
               signal.py CoreWLAN backend + slow fallback + wdutil identity
               speed.py  Ookla subprocess wrapper (graceful missing-binary path)
-              traffic.py default-iface byte counters (netstat/route) for live down/up
+              traffic.py default-iface byte counters (netstat/route) for live traffic
               tui.py    curses walk loop + ANSI fallback, snapshot worker thread
 tests/        fixtures/mocks only, no live network
 docs/         plans/ (build history) + superpowers/ (specs)
