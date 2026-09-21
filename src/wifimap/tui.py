@@ -16,7 +16,6 @@ import sys
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
 from wifimap import signal as signal_mod
@@ -45,6 +44,16 @@ from wifimap.walk_picker import (
     _prompt_curses,
     _room_picker_curses,
     _spot_picker_curses,
+)
+from wifimap.walk_snapshot import (
+    MetricComparison,
+    SnapshotResult,
+    SpeedProbeResult,
+    SpotBaseline,
+    _finish_benchmark,
+    _sample_guarded,
+    finish_snapshot,
+    start_snapshot_thread,
 )
 from wifimap.walk_ui import (
     SparkHistory,
@@ -105,260 +114,6 @@ WORKER_DRAIN_TIMEOUT = 130.0
 def _poll_timeout_ms(interval: float) -> int:
     """Poll getch timeout for walk loop; floor keeps fast intervals usable."""
     return max(POLL_TIMEOUT_MIN_MS, int(interval * 1000))
-
-# ---------------------------------------------------------------------------
-# Snapshot background worker (thread-safe: own DB connection)
-# ---------------------------------------------------------------------------
-
-@dataclass
-class SnapshotResult:
-    ok: bool
-    reading_id: Optional[int] = None
-    message: str = ""
-    ping_ms: Optional[float] = None
-    down_mbps: Optional[float] = None
-    up_mbps: Optional[float] = None
-    rssi: Optional[int] = None
-    snr: Optional[int] = None
-
-
-@dataclass(frozen=True)
-class SpotBaseline:
-    """Median values for one spot within the selected baseline walk."""
-
-    spot_id: int
-    rssi: Optional[float] = None
-    noise: Optional[float] = None
-    snr: Optional[float] = None
-    tx_rate: Optional[float] = None
-    ping_ms: Optional[float] = None
-    down_mbps: Optional[float] = None
-    up_mbps: Optional[float] = None
-    ssid: Optional[str] = None
-    bssid: Optional[str] = None
-    channel: Optional[str] = None
-    server: Optional[str] = None
-
-
-@dataclass(frozen=True)
-class MetricComparison:
-    """Current, baseline and arithmetic delta for one metric."""
-
-    current: Optional[float]
-    baseline: Optional[float]
-    delta: Optional[float]
-
-
-@dataclass(frozen=True)
-class SpeedProbeResult:
-    """Transient speedtest result; never persisted as a reading."""
-
-    ok: bool
-    spot_id: int
-    generation: int
-    ping_ms: Optional[float] = None
-    down_mbps: Optional[float] = None
-    up_mbps: Optional[float] = None
-    server: Optional[str] = None
-    message: str = ""
-
-
-def _sample_guarded() -> Tuple[Optional[signal_mod.Signal], str]:
-    """sample_signal with attempt_read-style guards; (sig, error_msg).
-
-    ``NoWiFiError`` → (None, "NO-WIFI: ...") — caller aborts the
-    capture with that message. Any other error → (empty Signal, "")
-    so the capture still stores an UNKNOWN row (walk must never crash).
-    """
-    try:
-        return (signal_mod.sample_signal(), "")
-    except signal_mod.NoWiFiError as exc:
-        return (None, "NO-WIFI: %s" % (exc,))
-    except Exception:  # noqa: BLE001 - walk must never crash
-        return (signal_mod.Signal(), "")
-
-
-def finish_snapshot(
-    db_path: str,
-    spot_id: int,
-    ssid_override: Optional[str] = None,
-    run_speedtest_fn: Optional[Callable[[], speed_mod.Speed]] = None,
-    no_speedtest: bool = False,
-    walk_id: Optional[int] = None,
-    ssid_id: Optional[int] = None,
-) -> SnapshotResult:
-    """Sample signal, run speedtest (unless skipped), insert reading.
-
-    Samples via ``signal_mod.sample_signal`` (5s average) BEFORE the
-    speedtest. Always opens/closes its OWN ``store.get_db`` connection —
-    never share the UI thread's connection (row_factory toggling is not
-    thread-safe). ``NoWiFiError`` → ok=False + "NO-WIFI" message; other
-    sampling errors → empty Signal (UNKNOWN row). Speedtest fail →
-    NULLs + server="ERROR", signal kept (spec 4). Missing binary →
-    signal-only row + warning message (same as scan). DB error →
-    ok=False + error message (caller toasts, walk continues).
-    """
-    sig, err = _sample_guarded()
-    if sig is None:
-        return SnapshotResult(ok=False, message=err)
-    if ssid_override is not None:
-        sig.ssid = ssid_override
-    ping_ms = down = up = None
-    server: Optional[str] = None
-    notice = ""
-    if not no_speedtest:
-        fn = run_speedtest_fn or speed_mod.run_speedtest
-        try:
-            sp = fn()
-            ping_ms, down, up, server = (
-                sp.ping_ms, sp.down_mbps, sp.up_mbps, sp.server)
-        except speed_mod.SpeedtestUnavailableError as exc:
-            notice = "Warning: %s; signal-only" % (exc,)
-        except speed_mod.SpeedtestFailedError:
-            ping_ms, down, up, server = None, None, None, "ERROR"
-            notice = "speedtest failed; signal kept"
-    try:
-        conn = store_mod.get_db(db_path)
-    except (sqlite3.Error, OSError) as exc:
-        return SnapshotResult(ok=False, message="DB error: %s" % (exc,))
-    try:
-        try:
-            rid = store_mod.add_reading(
-                conn, spot_id,
-                ssid=None if ssid_id is not None else sig.ssid,
-                ssid_id=ssid_id,
-                bssid=sig.bssid,
-                rssi=sig.rssi,
-                noise=sig.noise,
-                snr=sig.snr,
-                channel=sig.channel,
-                phy=sig.phy,
-                tx_rate=sig.tx_rate,
-                ping_ms=ping_ms, down_mbps=down,
-                up_mbps=up,
-                server=server,
-                walk_id=walk_id,
-            )
-        except (sqlite3.Error, OSError, ValueError) as exc:
-            return SnapshotResult(ok=False, message="DB error: %s" % (exc,))
-    finally:
-        conn.close()
-    msg = "saved #%d" % rid
-    if not no_speedtest:
-        msg += " down %s up %s Mbps" % (fmt_mbps(down), fmt_mbps(up))
-    if notice:
-        msg += " (%s)" % notice
-    return SnapshotResult(ok=True, reading_id=rid, message=msg,
-                          ping_ms=ping_ms, down_mbps=down, up_mbps=up,
-                          rssi=sig.rssi, snr=sig.snr)
-
-
-def start_snapshot_thread(
-    db_path: str,
-    location_id: int,
-    no_speedtest: bool = False,
-    ssid_override: Optional[str] = None,
-    on_done: Optional[Callable[[SnapshotResult], None]] = None,
-    run_speedtest_fn: Optional[Callable[[], speed_mod.Speed]] = None,
-    walk_id: Optional[int] = None,
-    ssid_id: Optional[int] = None,
-) -> "threading.Thread":
-    """Spawn daemon thread: sample signal + insert on its own connection.
-
-    The worker calls ``finish_snapshot`` (samples + opens its own DB
-    connection), so the UI thread only hands over ids/overrides.
-    """
-
-    def _work() -> None:
-        res = finish_snapshot(
-            db_path, location_id,
-            ssid_override=ssid_override,
-            ssid_id=ssid_id,
-            run_speedtest_fn=run_speedtest_fn,
-            no_speedtest=no_speedtest,
-            walk_id=walk_id,
-        )
-        if on_done is not None:
-            on_done(res)
-
-    t = threading.Thread(target=_work, daemon=True)
-    t.start()
-    return t
-
-
-def _finish_benchmark(
-    db_path: str,
-    location_id: int,
-    note: str = "",
-    ssid_override: Optional[str] = None,
-    run_speedtest_fn: Optional[Callable[[], speed_mod.Speed]] = None,
-    no_speedtest: bool = False,
-    ssid_id: Optional[int] = None,
-) -> SnapshotResult:
-    """Sample signal, run speedtest (unless skipped), upsert benchmark.
-
-    Mirrors ``finish_snapshot`` but writes the per-location benchmark row
-    instead of a reading. Always opens/closes its OWN ``store.get_db``
-    connection — never share the UI thread's connection.
-    """
-    sig, err = _sample_guarded()
-    if sig is None:
-        return SnapshotResult(ok=False, message=err)
-    if ssid_override is not None:
-        sig.ssid = ssid_override
-    ping_ms = down = up = None
-    server: Optional[str] = None
-    notice = ""
-    if not no_speedtest:
-        fn = run_speedtest_fn or speed_mod.run_speedtest
-        try:
-            sp = fn()
-            ping_ms, down, up, server = (
-                sp.ping_ms, sp.down_mbps, sp.up_mbps, sp.server)
-        except speed_mod.SpeedtestUnavailableError as exc:
-            notice = "Warning: %s; signal-only" % (exc,)
-        except speed_mod.SpeedtestFailedError:
-            ping_ms, down, up, server = None, None, None, "ERROR"
-            notice = "speedtest failed; signal kept"
-    try:
-        conn = store_mod.get_db(db_path)
-    except (sqlite3.Error, OSError) as exc:
-        return SnapshotResult(ok=False, message="DB error: %s" % (exc,))
-    try:
-        try:
-            store_mod.set_benchmark(
-                conn, location_id,
-                ssid=None if ssid_id is not None else sig.ssid,
-                ssid_id=ssid_id,
-                bssid=sig.bssid,
-                rssi=sig.rssi,
-                noise=sig.noise,
-                snr=sig.snr,
-                channel=sig.channel,
-                phy=sig.phy,
-                tx_rate=sig.tx_rate,
-                ping_ms=ping_ms, down_mbps=down,
-                up_mbps=up,
-                server=server,
-                note=note or None,
-            )
-        except (sqlite3.Error, OSError, ValueError) as exc:
-            return SnapshotResult(ok=False, message="DB error: %s" % (exc,))
-    finally:
-        conn.close()
-
-    def _d(v: object) -> str:
-        return "-" if v is None else str(v)
-
-    msg = "benchmark set for #%d rssi=%s snr=%s down=%s up=%s" % (
-        location_id, _d(sig.rssi), _d(sig.snr),
-        fmt_mbps(down), fmt_mbps(up))
-    if notice:
-        msg += " (%s)" % notice
-    return SnapshotResult(ok=True, message=msg, ping_ms=ping_ms,
-                          down_mbps=down, up_mbps=up,
-                          rssi=sig.rssi, snr=sig.snr)
-
 
 # ---------------------------------------------------------------------------
 # Walk state (shared by curses + fallback loops)
