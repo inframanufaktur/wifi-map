@@ -9,8 +9,6 @@ callbacks and UI-thread reads are serialized by ``WalkState._lock``.
 """
 from __future__ import annotations
 
-import math
-import os
 import shutil
 import sqlite3
 import statistics
@@ -26,6 +24,35 @@ from wifimap import ssid as ssid_mod
 from wifimap import speed as speed_mod
 from wifimap import store as store_mod
 from wifimap import traffic as traffic_mod
+from wifimap.walk_ui import (
+    SparkHistory,
+    ansi_wrap,
+    attempt_read,
+    fmt_mbps,
+    fmt_rate_val,
+    format_addr_line,
+    format_extra_line,
+    format_meter_left,
+    format_meter_row,
+    format_net_line,
+    format_radio_line,
+    format_signal_line,
+    graph_width,
+    grouped_graph_width,
+    history_cap,
+    layout_mode,
+    meter_layout,
+    parse_floor_input,
+    picker_move,
+    picker_press,
+    picker_start_cursor,
+    rate_rssi,
+    rate_snr,
+    rating_style,
+    snapshot_payload,
+    wide_graph_width,
+)
+from wifimap.walk_ui import METER_LABEL_W, METER_VAL_W, WIDE_MIN_WIDTH
 
 
 # ---------------------------------------------------------------------------
@@ -63,316 +90,6 @@ def _poll_timeout_ms(interval: float) -> int:
 
 #: Picker outcome: a location id, the ``"new"`` create row, or None (cancel).
 PickerSelection = Union[int, Literal["new"]]
-
-
-# ---------------------------------------------------------------------------
-# Pure helpers (unit-tested)
-# ---------------------------------------------------------------------------
-
-def format_signal_line(sig: signal_mod.Signal) -> str:
-    """One-line live readout; None fields render as UNKNOWN/-."""
-
-    def _v(v: object) -> str:
-        return "-" if v is None else str(v)
-
-    rssi = "UNKNOWN" if sig.rssi is None else "%d dBm" % sig.rssi
-    noise = "UNKNOWN" if sig.noise is None else "%d dBm" % sig.noise
-    snr = "UNKNOWN" if sig.snr is None else "%d dB" % sig.snr
-    return "rssi=%s noise=%s snr=%s ssid=%s bssid=%s ch=%s phy=%s tx=%s" % (
-        rssi, noise, snr, _v(sig.ssid), _v(sig.bssid),
-        _v(sig.channel), _v(sig.phy), _v(sig.tx_rate),
-    )
-
-
-def format_net_line(ssid: Optional[str]) -> str:
-    """Session header: ``Net: <ssid>`` or ``Net: unknown``."""
-    return "Net: %s" % (ssid if ssid else "unknown")
-
-
-def fmt_mbps(v: Optional[float]) -> str:
-    """Compact Mbps value; None renders as ``-`` (matches table style)."""
-    return "-" if v is None else "%.1f" % v
-
-
-def fmt_rate_val(v: Optional[float]) -> str:
-    """Meter value cell for live down/up: ``267.5 Mbps`` / ``-``."""
-    return "-" if v is None else "%.1f Mbps" % v
-
-
-def rate_rssi(v: Optional[int]) -> str:
-    """Rate RSSI: >=-60 GREAT, >=-70 OK, else WEAK, None UNKNOWN."""
-    if v is None:
-        return "UNKNOWN"
-    if v >= -60:
-        return "GREAT"
-    if v >= -70:
-        return "OK"
-    return "WEAK"
-
-
-def rate_snr(v: Optional[int]) -> str:
-    """Rate SNR: >=25 GREAT, >=15 OK, else WEAK, None UNKNOWN."""
-    if v is None:
-        return "UNKNOWN"
-    if v >= 25:
-        return "GREAT"
-    if v >= 15:
-        return "OK"
-    return "WEAK"
-
-
-_RATING_STYLE = {
-    "GREAT": (1, "32"),
-    "OK": (2, "33"),
-    "WEAK": (3, "31"),
-    "UNKNOWN": (0, "37"),
-}
-
-WIDE_MIN_WIDTH = 100
-
-
-def rating_style(rating: str) -> Tuple[int, str]:
-    """Map GREAT/OK/WEAK/UNKNOWN to (curses_pair, ansi_code)."""
-    return _RATING_STYLE.get(rating, (0, "37"))
-
-
-def layout_mode(width: int) -> str:
-    """Wide side-by-side at >=100 cols, else stacked narrow."""
-    return "wide" if width >= WIDE_MIN_WIDTH else "narrow"
-
-
-def graph_width(total_w: int, label_len: int = 6, suffix_len: int = 6) -> int:
-    """Width for narrow stacked graph line so label+bar+suffix fits w-1."""
-    return max(10, total_w - label_len - suffix_len - 1)
-
-
-def wide_graph_width(total_w: int, left_len: int, label_len: int = 6,
-                     sep_len: int = 3, suffix_len: int = 0) -> int:
-    """Width for wide side-by-side graph so full line fits w-1."""
-    return max(10, total_w - 1 - left_len - sep_len - label_len - suffix_len)
-
-
-def grouped_graph_width(total_w: int, prefixes) -> int:
-    """Shared bar width so grouped metric+graph rows right-align.
-
-    ``prefixes`` are the three row prefixes (text before each bar);
-    width leaves room for the longest prefix plus ``" [60s]"`` in w-1.
-    """
-    lens = []
-    for p in prefixes:
-        try:
-            lens.append(len(p) if isinstance(p, str) else int(p))
-        except Exception:
-            continue
-    max_pre = max(lens) if lens else 0
-    return max(10, total_w - max_pre - len(" [60s]") - 1)
-
-
-#: Fixed width of the meter value column (e.g. ``" -63 dBm  "``).
-METER_VAL_W = 10
-
-#: Fixed width of the meter label column (``"RSSI  "``/``"SNR   "``/``"noise "``).
-METER_LABEL_W = 6
-
-
-def format_meter_left(label: str, value: str, rating: Optional[str]) -> str:
-    """Left side of a meter row: label + value + hugging ``[rating]``.
-
-    No padding inside brackets; alignment padding is applied AFTER ``]``
-    by the caller via ``ljust(maxLeft)`` so all ``|`` line up.
-    """
-    lab = (label if label is not None else "").ljust(METER_LABEL_W)[:METER_LABEL_W]
-    val = (value if value is not None else "UNKNOWN").ljust(METER_VAL_W)
-    if rating:
-        return "%s%s[%s]" % (lab, val, rating)
-    return "%s%s" % (lab, val)
-
-
-def format_meter_row(label: str, value: str, rating: Optional[str],
-                     bar: str, max_left: int) -> str:
-    """Full meter row with ``|`` separator and ``[60s]`` suffix."""
-    left = format_meter_left(label, value, rating).ljust(max_left)
-    return "%s | %s [60s]" % (left, bar)
-
-
-def meter_layout(total_w: int, lefts: List[str]) -> Tuple[int, int]:
-    """Return ``(maxLeft, gw)`` so grouped rows share bar width."""
-    max_left = max((len(s) for s in lefts), default=0)
-    gw = max(10, total_w - max_left - len(" | ") - len(" [60s]") - 1)
-    return (max_left, gw)
-
-
-def format_extra_line(ch: str, phy: str, tx: str) -> str:
-    """Fourth info row: ``ch <ch> phy <phy> tx <tx>``."""
-    return "ch %s phy %s tx %s" % (ch, phy, tx)
-
-
-def format_radio_line(mcs: object, band: Optional[str],
-                      security: Optional[str]) -> str:
-    """Radio detail row: ``mcs <m> band <band> sec <security>``; None → `-`."""
-    m = "-" if mcs is None else str(mcs)
-    b = band if band else "-"
-    s = security if security else "-"
-    return "mcs %s band %s sec %s" % (m, b, s)
-
-
-def format_addr_line(ip: Optional[str], router: Optional[str],
-                     mac: Optional[str]) -> str:
-    """Session addr header; ``""`` when all unknown (caller omits)."""
-    if not ip and not router and not mac:
-        return ""
-    return "IP %s RTR %s MAC %s" % (ip or "-", router or "-", mac or "-")
-
-
-def ansi_wrap(s: str, code: str) -> str:
-    """Wrap s in ANSI colour; plain when NO_COLOR is set."""
-    if os.environ.get("NO_COLOR"):
-        return s
-    return "\x1b[%sm%s\x1b[0m" % (code, s)
-
-
-_SPARK_CHARS = "▁▂▃▄▅▆▇█"
-
-
-class SparkHistory:
-    """Fixed-length sample ring; renders ASCII block sparkline."""
-
-    def __init__(self, maxlen: int = 60) -> None:
-        self._buf: deque = deque(maxlen=max(1, maxlen))
-
-    def append(self, v: Optional[float]) -> None:
-        self._buf.append(v)
-
-    def sparkline(self, lo: float, hi: float, width: int, align: str = "right") -> str:
-        vals = list(self._buf)[-width:] if width > 0 else []
-        if not vals:
-            return ""
-        span = hi - lo
-        out = []
-        for v in vals:
-            if v is None:
-                out.append(" ")
-                continue
-            if span <= 0:
-                lvl = 6
-            else:
-                frac = (v - lo) / span
-                frac = 0.0 if frac < 0.0 else (1.0 if frac > 1.0 else frac)
-                lvl = int(round(frac * 6))
-            out.append(_SPARK_CHARS[lvl])
-        s = "".join(out)
-        if align == "right" and len(s) < width:
-            s = " " * (width - len(s)) + s
-        return s
-
-    def sparkline_auto(self, width: int, min_hi: float = 1.0) -> str:
-        """Sparkline scaled 0..max(buffer); floor ``min_hi`` keeps flatlines visible."""
-        vals = [v for v in self._buf if v is not None]
-        hi = max(vals) if vals else min_hi
-        return self.sparkline(0.0, max(hi, min_hi), width)
-
-
-def history_cap(interval: float) -> int:
-    """Samples covering ~60s at the poll interval; at least 1."""
-    return max(1, int(math.ceil(60.0 / interval)))
-
-
-def picker_start_cursor(loc_ids: List[int],
-                        active: Optional[int]) -> int:
-    """Cursor position with the active location preselected (spec §1).
-
-    Positions ``0..count-1`` are locations, ``count`` is the create row.
-    Returns the active index, or 0 when active is unset/missing/empty.
-    """
-    if active is not None:
-        try:
-            return loc_ids.index(active)
-        except ValueError:
-            pass
-    return 0
-
-
-def picker_move(cursor: int, direction: int, count: int) -> int:
-    """Move cursor ±1 with wraparound over locations + create row."""
-    total = count + 1  # create row always exists, even with zero locations
-    return (cursor + direction) % total
-
-
-def picker_press(keypress: str, cursor: int,
-                 count: int) -> Tuple[int, str, Optional[int]]:
-    """Pure picker key model; cursor roams ``0..count`` (``count`` = create).
-
-    Returns ``(new_cursor, action, index)`` with action one of:
-    - ``"confirm"``: Enter (``""``/``"\\n"``/``"\\r"``/``"enter"``) confirms
-      the cursor, digits ``1``-``9`` jump to and confirm that row,
-      ``"+"`` confirms the create row.
-      ``index == count`` means the create row.
-    - ``"move"``: arrows (``"up"``/``"down"``) reposition the cursor;
-      keep waiting.
-    - ``"cancel"``: ``q``/Escape; ``"ignore"``: anything else.
-    """
-    if keypress in ("", "\n", "\r", "enter"):
-        return (cursor, "confirm", cursor)
-    if keypress in ("q", "Q", "\x1b", "esc"):
-        return (cursor, "cancel", None)
-    if keypress in ("up", "down"):
-        step = -1 if keypress == "up" else 1
-        return (picker_move(cursor, step, count), "move", None)
-    if keypress == "+":
-        return (count, "confirm", count)
-    if len(keypress) == 1 and "1" <= keypress <= "9":
-        idx = int(keypress) - 1
-        if 0 <= idx < count:
-            return (idx, "confirm", idx)
-        return (cursor, "ignore", None)
-    return (cursor, "ignore", None)
-
-
-def parse_floor_input(s: str) -> int:
-    """Parse floor int (negative = basement); raises ValueError on bad input."""
-    t = s.strip()
-    if not t:
-        raise ValueError("floor must be an integer, got empty input")
-    try:
-        return int(t, 10)
-    except ValueError as exc:
-        raise ValueError("floor must be an integer, got %r" % (s,)) from exc
-
-
-def snapshot_payload(sig: signal_mod.Signal) -> Dict[str, object]:
-    """Freeze a signal copy into a store.add_reading kwargs dict."""
-    return {
-        "ssid": sig.ssid,
-        "bssid": sig.bssid,
-        "rssi": sig.rssi,
-        "noise": sig.noise,
-        "snr": sig.snr,
-        "channel": sig.channel,
-        "phy": sig.phy,
-        "tx_rate": sig.tx_rate,
-    }
-
-
-def attempt_read(
-    read_fn: Callable[[], signal_mod.Signal],
-    max_retries: int = 3,
-) -> signal_mod.Signal:
-    """Poll once with retry; parse-fail retries ``max_retries``x then UNKNOWN.
-
-    ``NoWiFiError`` propagates immediately (caller shows NO-WIFI).
-    Any other exception is retried; after exhaustion returns an empty
-    ``Signal()`` (UNKNOWN row), never raises.
-    """
-    last_exc: Optional[Exception] = None
-    for _ in range(max_retries + 1):
-        try:
-            return read_fn()
-        except signal_mod.NoWiFiError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - walk must never crash
-            last_exc = exc
-    _ = last_exc
-    return signal_mod.Signal()
 
 
 # ---------------------------------------------------------------------------
