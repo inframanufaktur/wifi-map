@@ -113,6 +113,88 @@ def test_read_signal_none_ssid_bssid_ok(monkeypatch):
     assert sig.snr == 35
 
 
+def test_read_signal_fills_redacted_identity_from_wifiwand(monkeypatch):
+    from wifimap import signal as sig_mod
+    from wifimap.wifiwand import WifiIdentity
+
+    monkeypatch.setitem(sys.modules, "CoreWLAN",
+                        _make_mod(FakeInterface(ssid=None, bssid=None)))
+    monkeypatch.setattr(
+        sig_mod, "read_wifiwand_identity",
+        lambda max_age=None: WifiIdentity(
+            "mesh-net", "11:22:33:44:55:66"),
+    )
+
+    sig = read_signal()
+
+    assert sig.ssid == "mesh-net"
+    assert sig.bssid == "11:22:33:44:55:66"
+
+
+def test_read_signal_checks_ap_less_often_while_signal_is_strong(monkeypatch):
+    from wifimap import signal as sig_mod
+    from wifimap.wifiwand import WifiIdentity
+
+    monkeypatch.setitem(sys.modules, "CoreWLAN", _make_mod(
+        FakeInterface(ssid=None, bssid=None, rssi=-60)))
+    cache_ages = []
+    monkeypatch.setattr(
+        sig_mod, "read_wifiwand_identity",
+        lambda max_age=None, force=False: (
+            cache_ages.append((max_age, force))
+            or WifiIdentity("mesh-net", "11:22:33:44:55:66")
+        ),
+    )
+
+    read_signal()
+
+    assert cache_ages == [(10.0, False)]
+
+
+def test_read_signal_checks_ap_each_second_near_roam_threshold(monkeypatch):
+    from wifimap import signal as sig_mod
+    from wifimap.wifiwand import WifiIdentity
+
+    monkeypatch.setitem(sys.modules, "CoreWLAN", _make_mod(
+        FakeInterface(ssid=None, bssid=None, rssi=-72)))
+    cache_ages = []
+    monkeypatch.setattr(
+        sig_mod, "read_wifiwand_identity",
+        lambda max_age=None, force=False: (
+            cache_ages.append((max_age, force))
+            or WifiIdentity("mesh-net", "11:22:33:44:55:66")
+        ),
+    )
+
+    read_signal()
+
+    assert cache_ages == [(1.0, False)]
+
+
+def test_sample_signal_forces_fresh_identity_before_returning(monkeypatch):
+    from wifimap import signal as sig_mod
+    from wifimap.wifiwand import WifiIdentity
+
+    monkeypatch.setattr(
+        sig_mod, "read_signal",
+        lambda: sig_mod.Signal(
+            ssid="mesh-net", bssid="old-ap", rssi=-60, noise=-90),
+    )
+    cache_ages = []
+    monkeypatch.setattr(
+        sig_mod, "read_wifiwand_identity",
+        lambda max_age=None, force=False: (
+            cache_ages.append((max_age, force))
+            or WifiIdentity("mesh-net", "11:22:33:44:55:66")
+        ),
+    )
+
+    sig = sig_mod.sample_signal(seconds=0, sleep_fn=lambda _seconds: None)
+
+    assert sig.bssid == "11:22:33:44:55:66"
+    assert cache_ages == [(None, True)]
+
+
 def test_read_signal_no_interface_raises(monkeypatch):
     monkeypatch.setitem(sys.modules, "CoreWLAN", _make_mod(None))
     with pytest.raises(NoWiFiError):
@@ -222,199 +304,74 @@ def test_sample_signal_default_read_fn_resolved_late(monkeypatch):
     assert sig.snr == 40
 
 
-# --- read_network_identity (networksetup/wdutil, session-start only) ---
-
-def _run_ok(stdout):
-    import subprocess
-
-    return subprocess.CompletedProcess(
-        args=["sudo", "wdutil", "info"], returncode=0,
-        stdout=stdout, stderr="")
+# --- read_network_identity (CoreWLAN/WifiWand/networksetup) ---
 
 
-def test_identity_prefers_corewlan_when_present(monkeypatch):
-    """Location-granted case: CoreWLAN ssid/bssid wins, no sudo needed."""
-    import subprocess
-
+def test_identity_prefers_complete_corewlan_identity(monkeypatch):
     from wifimap import signal as sig_mod
-    monkeypatch.setitem(sys.modules, "CoreWLAN",
-                        _make_mod(FakeInterface(ssid="Home", bssid="aa:bb:cc:dd:ee:ff")))
-    calls = []
-    monkeypatch.setattr(subprocess, "run",
-                        lambda *a, **k: calls.append((a, k)) or _run_ok("SSID: X\nBSSID: Y\n"))
-    assert sig_mod.read_network_identity() == ("Home", "aa:bb:cc:dd:ee:ff")
-    assert calls == []
+
+    monkeypatch.setitem(sys.modules, "CoreWLAN", _make_mod(
+        FakeInterface(ssid="Home", bssid="aa:bb:cc:dd:ee:ff")))
+    monkeypatch.setattr(
+        sig_mod, "read_wifiwand_identity",
+        lambda: (_ for _ in ()).throw(AssertionError("helper must not run")),
+    )
+
+    assert sig_mod.read_network_identity() == (
+        "Home", "aa:bb:cc:dd:ee:ff")
 
 
-def test_identity_passwordless_sudo_parses_wdutil(monkeypatch):
+def test_identity_uses_wifiwand_for_redacted_bssid(monkeypatch):
     from wifimap import signal as sig_mod
-    import subprocess
-    monkeypatch.setitem(sys.modules, "CoreWLAN",
-                        _make_mod(FakeInterface(ssid=None, bssid=None)))
+    from wifimap.wifiwand import WifiIdentity
 
-    def _fake(cmd, **kw):
-        if cmd == ["sudo", "-n", "true"]:
-            return subprocess.CompletedProcess(cmd, 0, "", "")
-        if cmd[:3] == ["sudo", "-n", "wdutil"]:
-            return _run_ok("SSID : MyNet\nBSSID : 11:22:33:44:55:66\n")
-        raise AssertionError("unexpected cmd %r" % (cmd,))
-
-    monkeypatch.setattr(subprocess, "run", _fake)
-    assert sig_mod.read_network_identity() == ("MyNet", "11:22:33:44:55:66")
-
-
-def test_identity_parses_variant_labels(monkeypatch):
-    from wifimap import signal as sig_mod
-    import subprocess
-    monkeypatch.setitem(sys.modules, "CoreWLAN",
-                        _make_mod(FakeInterface(ssid=None, bssid=None)))
-
-    def _fake(cmd, **kw):
-        if cmd == ["sudo", "-n", "true"]:
-            return subprocess.CompletedProcess(cmd, 0, "", "")
-        return _run_ok("ssid=VariantNet\nbss: AA-BB-CC-DD-EE-FF\n")
-
-    monkeypatch.setattr(subprocess, "run", _fake)
-    assert sig_mod.read_network_identity() == ("VariantNet", "AA-BB-CC-DD-EE-FF")
-
-
-def test_identity_accepts_corewlan_ssid_without_bssid(monkeypatch):
-    """macOS may expose the network name while redacting the AP address."""
-    from wifimap import signal as sig_mod
-    import subprocess
     monkeypatch.setitem(sys.modules, "CoreWLAN",
                         _make_mod(FakeInterface(ssid="Home", bssid=None)))
-    calls = []
-    monkeypatch.setattr(subprocess, "run",
-                        lambda *a, **k: calls.append((a, k)))
+    monkeypatch.setattr(
+        sig_mod, "read_wifiwand_identity",
+        lambda: WifiIdentity("Home", "11:22:33:44:55:66"),
+    )
+
+    assert sig_mod.read_network_identity() == (
+        "Home", "11:22:33:44:55:66")
+
+
+def test_identity_accepts_corewlan_ssid_when_helper_unavailable(monkeypatch):
+    from wifimap import signal as sig_mod
+
+    monkeypatch.setitem(sys.modules, "CoreWLAN",
+                        _make_mod(FakeInterface(ssid="Home", bssid=None)))
+    monkeypatch.setattr(sig_mod, "read_wifiwand_identity", lambda: None)
 
     assert sig_mod.read_network_identity() == ("Home", None)
-    assert calls == []
 
 
-def test_identity_uses_networksetup_before_sudo(monkeypatch):
-    """A redacted CoreWLAN SSID falls back without a password prompt."""
-    from wifimap import signal as sig_mod
+def test_identity_uses_networksetup_as_ssid_only_fallback(monkeypatch):
     import subprocess
+
+    from wifimap import signal as sig_mod
+
     monkeypatch.setitem(
         sys.modules, "CoreWLAN",
         _make_mod(FakeInterface(ssid=None, bssid=None, name="en0")),
     )
-    seen = []
+    monkeypatch.setattr(sig_mod, "read_wifiwand_identity", lambda: None)
 
-    def _fake(cmd, **kw):
-        seen.append(cmd)
-        if cmd == ["/usr/sbin/networksetup", "-getairportnetwork", "en0"]:
-            return subprocess.CompletedProcess(
-                cmd, 0, "Current Wi-Fi Network: GardenNet\n", "")
-        raise AssertionError("sudo must not run after networksetup succeeds")
+    def _fake(cmd, **kwargs):
+        return subprocess.CompletedProcess(
+            cmd, 0, "Current Wi-Fi Network: GardenNet\n", "")
 
     monkeypatch.setattr(subprocess, "run", _fake)
+
     assert sig_mod.read_network_identity() == ("GardenNet", None)
-    assert seen == [["/usr/sbin/networksetup", "-getairportnetwork", "en0"]]
 
 
-def test_identity_accepts_wdutil_ssid_without_bssid(monkeypatch):
-    """SSID detection must not depend on wdutil exposing a BSSID."""
+def test_identity_returns_none_when_all_sources_are_unavailable(monkeypatch):
     from wifimap import signal as sig_mod
-    import subprocess
-    monkeypatch.setitem(sys.modules, "CoreWLAN",
-                        _make_mod(FakeInterface(ssid=None, bssid=None)))
 
-    def _fake(cmd, **kw):
-        if cmd == ["sudo", "-n", "true"]:
-            return subprocess.CompletedProcess(cmd, 0, "", "")
-        return _run_ok("SSID: Home\n")
-
-    monkeypatch.setattr(subprocess, "run", _fake)
-    assert sig_mod.read_network_identity() == ("Home", None)
-
-
-def test_identity_rejects_redacted_ssid(monkeypatch):
-    from wifimap import signal as sig_mod
-    import subprocess
-    monkeypatch.setitem(sys.modules, "CoreWLAN",
-                        _make_mod(FakeInterface(ssid=None, bssid=None)))
-
-    def _fake(cmd, **kw):
-        if cmd == ["sudo", "-n", "true"]:
-            return subprocess.CompletedProcess(cmd, 0, "", "")
-        return _run_ok("SSID: <redacted>\n")
-
-    monkeypatch.setattr(subprocess, "run", _fake)
-    assert sig_mod.read_network_identity() is None
-
-
-def test_identity_prompts_once_then_reads(monkeypatch):
-    """sudo needs password: one `sudo -v` prompt, then `sudo wdutil info`."""
-    from wifimap import signal as sig_mod
-    import subprocess
-    monkeypatch.setitem(sys.modules, "CoreWLAN",
-                        _make_mod(FakeInterface(ssid=None, bssid=None)))
-    seen = []
-
-    def _fake(cmd, **kw):
-        seen.append(cmd)
-        if cmd == ["sudo", "-n", "true"]:
-            return subprocess.CompletedProcess(cmd, 1, "", "password required")
-        if cmd == ["sudo", "-v"]:
-            return subprocess.CompletedProcess(cmd, 0, "", "")
-        if cmd[:3] == ["sudo", "-n", "wdutil"]:
-            return _run_ok("SSID: PromptNet\nBSSID: 00:11:22:33:44:55\n")
-        raise AssertionError("unexpected cmd %r" % (cmd,))
-
-    monkeypatch.setattr(subprocess, "run", _fake)
-    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    assert sig_mod.read_network_identity() == ("PromptNet", "00:11:22:33:44:55")
-    assert seen.count(["sudo", "-v"]) == 1
-
-
-def test_identity_abort_returns_none(monkeypatch):
-    from wifimap import signal as sig_mod
-    import subprocess
-    monkeypatch.setitem(sys.modules, "CoreWLAN",
-                        _make_mod(FakeInterface(ssid=None, bssid=None)))
-
-    def _fake(cmd, **kw):
-        if cmd == ["sudo", "-n", "true"]:
-            return subprocess.CompletedProcess(cmd, 1, "", "password required")
-        if cmd == ["sudo", "-v"]:
-            return subprocess.CompletedProcess(cmd, 1, "", "aborted")
-        raise AssertionError("must not reach wdutil after abort: %r" % (cmd,))
-
-    monkeypatch.setattr(subprocess, "run", _fake)
-    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    assert sig_mod.read_network_identity() is None
-
-
-def test_identity_no_sudo_no_tty_returns_none(monkeypatch):
-    """Non-interactive (tests/daemons): no prompt, never hang."""
-    from wifimap import signal as sig_mod
-    import subprocess
     monkeypatch.setitem(sys.modules, "CoreWLAN", None)
-    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    monkeypatch.setattr(sig_mod, "read_wifiwand_identity", lambda: None)
 
-    def _fake(cmd, **kw):
-        if cmd == ["sudo", "-n", "true"]:
-            return subprocess.CompletedProcess(cmd, 1, "", "password required")
-        raise AssertionError("must not prompt without tty: %r" % (cmd,))
-
-    monkeypatch.setattr(subprocess, "run", _fake)
-    assert sig_mod.read_network_identity() is None
-
-
-def test_identity_parse_failure_returns_none(monkeypatch):
-    from wifimap import signal as sig_mod
-    import subprocess
-    monkeypatch.setitem(sys.modules, "CoreWLAN",
-                        _make_mod(FakeInterface(ssid=None, bssid=None)))
-
-    def _fake(cmd, **kw):
-        if cmd == ["sudo", "-n", "true"]:
-            return subprocess.CompletedProcess(cmd, 0, "", "")
-        return _run_ok("usage: sudo wdutil info ...\n")
-
-    monkeypatch.setattr(subprocess, "run", _fake)
     assert sig_mod.read_network_identity() is None
 
 

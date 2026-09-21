@@ -13,12 +13,12 @@ from __future__ import annotations
 
 import re
 import subprocess
-import sys
 import time
 from typing import Optional, Tuple
 
 from wifimap.signal_models import NoWiFiError, Signal, SignalUnavailableError
 from wifimap.signal_profiler import read_signal_profiler
+from wifimap.wifiwand import read_identity as read_wifiwand_identity
 
 
 # CWPHYMode enum (Apple docs): 0 none, 1 a, 2 b, 3 g, 4 n, 5 ac, 6 ax.
@@ -58,6 +58,13 @@ _SECURITY_MODES = {
     4: "WPA2 Personal",
     8: "WPA3 Personal",
 }
+
+# Apple documents -75 dBm as the Mac roaming trigger. Start watching the AP
+# identity a little earlier, then query once per live-poll second while weak.
+# https://support.apple.com/guide/deployment/wi-fi-roaming-support-dep98f116c0f/web
+_ROAM_WATCH_RSSI = -70
+_AP_STABLE_MAX_AGE = 10.0
+_AP_ROAM_MAX_AGE = 1.0
 
 
 def _security_name(mode: object) -> Optional[str]:
@@ -140,6 +147,20 @@ def read_signal(timeout: float = 2.0) -> Signal:
         raise NoWiFiError("WiFi not associated (RSSI %r)" % (rssi,))
     ssid = iface.ssid()
     bssid = iface.bssid()
+    if ssid is None or bssid is None:
+        identity = read_wifiwand_identity(
+            max_age=(
+                _AP_ROAM_MAX_AGE if int(rssi) <= _ROAM_WATCH_RSSI
+                else _AP_STABLE_MAX_AGE
+            )
+        )
+        if identity is not None and (
+            ssid is None or str(ssid).strip() == identity.ssid
+        ):
+            if ssid is None:
+                ssid = identity.ssid
+            if bssid is None:
+                bssid = identity.bssid
     snr = rssi - noise if noise is not None else None
     rate = iface.transmitRate()
     wlan_ch = None
@@ -178,7 +199,8 @@ def sample_signal(seconds: float = 5.0, read_fn=None,
     averaging). ``read_fn`` defaults to ``read_signal`` resolved at
     call time so tests can monkeypatch the module attribute.
     """
-    if read_fn is None:
+    default_reader = read_fn is None
+    if default_reader:
         read_fn = read_signal
     samples = [read_fn()]
     step = 0.5
@@ -196,9 +218,20 @@ def sample_signal(seconds: float = 5.0, read_fn=None,
     snr = (avg_rssi - avg_noise
            if avg_rssi is not None and avg_noise is not None else None)
     last = samples[-1]
+    last_ssid = last.ssid
+    last_bssid = last.bssid
+    if default_reader:
+        identity = read_wifiwand_identity(force=True)
+        if identity is not None and (
+            last_ssid is None or last_ssid == identity.ssid
+        ):
+            if last_ssid is None:
+                last_ssid = identity.ssid
+            if identity.bssid is not None:
+                last_bssid = identity.bssid
     return Signal(
-        ssid=last.ssid,
-        bssid=last.bssid,
+        ssid=last_ssid,
+        bssid=last_bssid,
         rssi=avg_rssi,
         noise=avg_noise,
         snr=snr,
@@ -212,20 +245,9 @@ def sample_signal(seconds: float = 5.0, read_fn=None,
 
 
 
-#: Timeouts (s) for the one-shot session identity lookup. Every
-#: subprocess call has a timeout so walk/scan can never hang.
-_SUDO_CHECK_TIMEOUT = 10.0
-_SUDO_PROMPT_TIMEOUT = 120.0
-_WDUTIL_TIMEOUT = 15.0
+#: Timeout (s) for the one-shot networksetup identity lookup.
 _NETWORKSETUP_TIMEOUT = 5.0
 
-#: Tolerant `wdutil info` labels (case-insensitive, `:` or `=` sep).
-#: verify: compare against real `sudo wdutil info` output on hardware;
-#: unit fixtures below cover SSID/BSSID/BSS spellings only.
-_SSID_RE = re.compile(
-    r"(?im)^\s*(?:SSID|Network\s*Name)\s*[:=]\s*(.+?)\s*$")
-_BSSID_RE = re.compile(
-    r"(?im)^\s*(?:BSSID|BSS)\s*[:=]\s*([0-9A-Fa-f:\-]{11,})\s*$")
 _NETWORKSETUP_SSID_RE = re.compile(
     r"(?im)^\s*Current\s+(?:Wi-Fi|AirPort)\s+Network\s*:\s*(.+?)\s*$")
 
@@ -235,26 +257,9 @@ def _clean_ssid(value: object) -> Optional[str]:
     if value is None:
         return None
     ssid = str(value).strip().strip("\"'")
-    if not ssid or ssid.casefold() == "<redacted>":
+    if not ssid or ssid.casefold() in ("<hidden>", "<redacted>"):
         return None
     return ssid
-
-
-def _parse_wdutil_identity(
-    text: str,
-) -> Optional[Tuple[str, Optional[str]]]:
-    """Parse SSID and optional BSSID from ``wdutil info`` output."""
-    if not text:
-        return None
-    ssid_m = _SSID_RE.search(text)
-    bssid_m = _BSSID_RE.search(text)
-    if not ssid_m:
-        return None
-    ssid = _clean_ssid(ssid_m.group(1))
-    if ssid is None:
-        return None
-    bssid = bssid_m.group(1).strip() if bssid_m else None
-    return (ssid, bssid)
 
 
 def _read_corewlan_identity() -> Optional[Tuple[str, Optional[str]]]:
@@ -313,39 +318,21 @@ def _read_networksetup_identity(
     return (ssid, None) if ssid is not None else None
 
 
-def _run_wdutil_info() -> Optional[Tuple[str, Optional[str]]]:
-    """Run `sudo -n wdutil info` once and parse; None on any failure."""
-    try:
-        proc = subprocess.run(
-            ["sudo", "-n", "wdutil", "info"],
-            capture_output=True, text=True, timeout=_WDUTIL_TIMEOUT,
-        )
-    except Exception:
-        return None
-    if proc.returncode != 0:
-        return None
-    try:
-        return _parse_wdutil_identity(proc.stdout or "")
-    except Exception:
-        return None
-
-
 def read_network_identity() -> Optional[Tuple[str, Optional[str]]]:
     """Session network identity: ``(ssid, optional_bssid)`` or ``None``.
 
-    Order: (a) CoreWLAN current SSID, plus BSSID when available; (b)
-    ``networksetup`` for the CoreWLAN interface; (c) one privileged
-    ``wdutil info`` lookup. For the latter, if
-    ``sudo -n true`` succeeds, read directly; otherwise run ``sudo -v``
-    ONCE (user prompted in terminal, cached ~5min) then read. Non-tty
-    sessions skip the prompt and return None. Abort/wrong-password,
-    timeouts, and parse failures all return None — never raise, never
-    hang (every subprocess call has a timeout).
-
-    verify: run ``sudo wdutil info`` on real hardware and confirm
-    ``_parse_wdutil_identity`` extracts the SSID/BSSID labels shown.
+    Order: CoreWLAN when unredacted, the signed WifiWand helper, then
+    ``networksetup`` as an SSID-only fallback. Failures return ``None``;
+    this path never prompts for administrator privileges.
     """
     found = _read_corewlan_identity()
+    if found is not None and found[1] is not None:
+        return found
+    wifiwand = read_wifiwand_identity()
+    if wifiwand is not None and (
+        found is None or found[0] == wifiwand.ssid
+    ):
+        return (wifiwand.ssid, wifiwand.bssid)
     if found is not None:
         return found
     interface_name = _read_corewlan_interface_name()
@@ -353,30 +340,7 @@ def read_network_identity() -> Optional[Tuple[str, Optional[str]]]:
         found = _read_networksetup_identity(interface_name)
         if found is not None:
             return found
-    try:
-        check = subprocess.run(
-            ["sudo", "-n", "true"],
-            capture_output=True, text=True, timeout=_SUDO_CHECK_TIMEOUT,
-        )
-    except Exception:
-        return None
-    if check.returncode == 0:
-        return _run_wdutil_info()
-    try:
-        if not sys.stdin.isatty():
-            return None
-    except Exception:
-        return None
-    try:
-        prompt = subprocess.run(
-            ["sudo", "-v"],
-            timeout=_SUDO_PROMPT_TIMEOUT,
-        )
-    except Exception:
-        return None
-    if prompt.returncode != 0:
-        return None
-    return _run_wdutil_info()
+    return None
 
 
 #: Timeout (s) for each one-shot local-addr subprocess call.
