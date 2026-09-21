@@ -650,7 +650,7 @@ def test_explicit_script_migrates_legacy_ssids_idempotently(tmp_path):
         assert row["id"] == 1 and row["rssi"] == -70
         assert row["ssid"] == "home-net"
         assert row["ssid_id"] == ssids[0].id
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         conn.close()

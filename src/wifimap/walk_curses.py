@@ -158,6 +158,7 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
         state.refresh_benchmark(conn)
         state.ensure_identity()
         state.ensure_addrs()
+        state.start_path_monitor()
         if location_preset is not None and state.active_location_id is None:
             state.set_toast(
                 "unknown preset %r; press `l` to pick" % (location_preset,))
@@ -456,5 +457,6 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
     except KeyboardInterrupt:
         return 0
     finally:
+        state.stop_path_monitor()
         _finish_walk_session(conn, state)
         conn.close()

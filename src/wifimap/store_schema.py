@@ -52,6 +52,11 @@ CREATE TABLE IF NOT EXISTS readings(
   rssi INTEGER, noise INTEGER, snr INTEGER,
   channel TEXT, phy TEXT, tx_rate TEXT,
   ping_ms REAL, down_mbps REAL, up_mbps REAL,
+  path_probe_count INTEGER,
+  gateway_rtt_ms REAL, gateway_p95_ms REAL, gateway_loss_pct REAL,
+  gateway_max_outage_ms INTEGER,
+  internet_rtt_ms REAL, internet_p95_ms REAL, internet_loss_pct REAL,
+  internet_max_outage_ms INTEGER,
   server TEXT, note TEXT,
   walk_id INTEGER REFERENCES walks(id) ON DELETE SET NULL
 );
@@ -71,7 +76,19 @@ CREATE TABLE IF NOT EXISTS benchmarks(
   server TEXT, note TEXT
 );
 """
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 4
+
+_PATH_READING_COLUMNS = {
+    "path_probe_count": "INTEGER",
+    "gateway_rtt_ms": "REAL",
+    "gateway_p95_ms": "REAL",
+    "gateway_loss_pct": "REAL",
+    "gateway_max_outage_ms": "INTEGER",
+    "internet_rtt_ms": "REAL",
+    "internet_p95_ms": "REAL",
+    "internet_loss_pct": "REAL",
+    "internet_max_outage_ms": "INTEGER",
+}
 
 
 class SchemaMigrationRequired(sqlite3.DatabaseError):
@@ -123,6 +140,11 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         row[1] for row in conn.execute("PRAGMA table_info(readings)")
     }
     with conn:
+        for name, sql_type in _PATH_READING_COLUMNS.items():
+            if name not in columns:
+                conn.execute(
+                    "ALTER TABLE readings ADD COLUMN %s %s" % (
+                        name, sql_type))
         if "walk_id" not in columns:
             conn.execute(
                 "ALTER TABLE readings ADD COLUMN walk_id INTEGER "

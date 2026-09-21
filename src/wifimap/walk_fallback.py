@@ -114,6 +114,7 @@ def _walk_fallback(db_path: str, interval: float,
         state.refresh_benchmark(conn)
         state.ensure_identity()
         state.ensure_addrs()
+        state.start_path_monitor()
         print("walk fallback (no curses): type a key + Enter", flush=True)
         print("keys: s snapshot | t throughput | c compare | b benchmark | "
               "l switch | n new | f floor | q quit", flush=True)
@@ -317,5 +318,6 @@ def _walk_fallback(db_path: str, interval: float,
     except KeyboardInterrupt:
         return 0
     finally:
+        state.stop_path_monitor()
         _finish_walk_session(conn, state)
         conn.close()

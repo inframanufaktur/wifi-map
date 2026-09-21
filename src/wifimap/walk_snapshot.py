@@ -9,6 +9,7 @@ from typing import Callable, Optional, Tuple
 from wifimap import signal as signal_mod
 from wifimap import speed as speed_mod
 from wifimap import store as store_mod
+from wifimap.path_monitor import PathSnapshot
 from wifimap.walk_ui import fmt_mbps
 
 
@@ -83,6 +84,7 @@ def finish_snapshot(
     no_speedtest: bool = False,
     walk_id: Optional[int] = None,
     ssid_id: Optional[int] = None,
+    path_snapshot: Optional[PathSnapshot] = None,
 ) -> SnapshotResult:
     """Sample signal and speed, then store a reading on a private connection."""
     sig, err = _sample_guarded()
@@ -110,6 +112,8 @@ def finish_snapshot(
         return SnapshotResult(ok=False, message="DB error: %s" % (exc,))
     try:
         try:
+            path_fields = (path_snapshot.reading_fields()
+                           if path_snapshot is not None else {})
             reading_id = store_mod.add_reading(
                 conn, spot_id,
                 ssid=None if ssid_id is not None else sig.ssid,
@@ -126,6 +130,7 @@ def finish_snapshot(
                 up_mbps=up,
                 server=server,
                 walk_id=walk_id,
+                **path_fields,
             )
         except (sqlite3.Error, OSError, ValueError) as exc:
             return SnapshotResult(ok=False, message="DB error: %s" % (exc,))
@@ -157,6 +162,7 @@ def start_snapshot_thread(
     run_speedtest_fn: Optional[Callable[[], speed_mod.Speed]] = None,
     walk_id: Optional[int] = None,
     ssid_id: Optional[int] = None,
+    path_snapshot: Optional[PathSnapshot] = None,
 ) -> "threading.Thread":
     """Sample and store a reading on a new daemon thread."""
 
@@ -168,6 +174,7 @@ def start_snapshot_thread(
             run_speedtest_fn=run_speedtest_fn,
             no_speedtest=no_speedtest,
             walk_id=walk_id,
+            path_snapshot=path_snapshot,
         )
         if on_done is not None:
             on_done(result)

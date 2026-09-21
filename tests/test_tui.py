@@ -1408,6 +1408,10 @@ def test_walk_curses_labels_passive_rates_as_traffic(
         tui_mod.WalkState, "ensure_identity", lambda self: None)
     monkeypatch.setattr(
         tui_mod.WalkState, "ensure_addrs", lambda self: None)
+    monkeypatch.setattr(
+        tui_mod.WalkState, "start_path_monitor", lambda self: None)
+    monkeypatch.setattr(
+        tui_mod.WalkState, "stop_path_monitor", lambda self: None)
     screen = RecordingScreen()
 
     assert tui_mod._walk_curses(
@@ -1750,6 +1754,10 @@ def test_walk_curses_creates_and_finishes_named_walk(tmp_path, monkeypatch):
         tui_mod.WalkState, "ensure_identity", lambda self: None)
     monkeypatch.setattr(
         tui_mod.WalkState, "ensure_addrs", lambda self: None)
+    monkeypatch.setattr(
+        tui_mod.WalkState, "start_path_monitor", lambda self: None)
+    monkeypatch.setattr(
+        tui_mod.WalkState, "stop_path_monitor", lambda self: None)
 
     result = tui_mod._walk_curses(
         QuitScreen(), db, interval=1.0, location_preset="home",

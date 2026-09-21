@@ -11,6 +11,12 @@ from wifimap import signal as signal_mod
 from wifimap import speed as speed_mod
 from wifimap import store as store_mod
 from wifimap import traffic as traffic_mod
+from wifimap.path_monitor import (
+    PathMonitor,
+    PathSample,
+    PathSnapshot,
+    PathTracker,
+)
 from wifimap.walk_baseline import load_baseline, median_values
 from wifimap.walk_snapshot import (
     MetricComparison,
@@ -92,6 +98,8 @@ class WalkState:
         self.router: Optional[str] = None
         self.mac: Optional[str] = None
         self._addrs_done: bool = False
+        self._path_tracker = PathTracker(window_size=60, interval=1.0)
+        self._path_monitor: Optional[PathMonitor] = None
         self._lock = threading.Lock()
 
     @property
@@ -112,10 +120,33 @@ class WalkState:
             self._comparison_generation += 1
             for values in self._comparison_signal.values():
                 values.clear()
+            self._path_tracker.reset()
             self._speed_probe = None
             if self.pending:
                 self.toast = ""
             self.last_result = ""
+
+    def record_path_sample(self, sample: PathSample) -> None:
+        with self._lock:
+            self._path_tracker.record(sample)
+
+    def path_snapshot(self) -> PathSnapshot:
+        with self._lock:
+            return self._path_tracker.snapshot()
+
+    def start_path_monitor(self) -> None:
+        """Start continuous gateway and Internet probes for this walk."""
+        self.stop_path_monitor()
+        monitor = PathMonitor(
+            gateway=self.router, on_sample=self.record_path_sample)
+        self._path_monitor = monitor
+        monitor.start()
+
+    def stop_path_monitor(self) -> None:
+        monitor = self._path_monitor
+        self._path_monitor = None
+        if monitor is not None:
+            monitor.stop()
 
     @staticmethod
     def _median(values) -> Optional[float]:
@@ -473,6 +504,7 @@ class WalkState:
             on_done=_cb,
             run_speedtest_fn=run_speedtest_fn,
             walk_id=self.current_walk_id,
+            path_snapshot=self.path_snapshot(),
         )
         with self._lock:
             self._workers.append(t)
