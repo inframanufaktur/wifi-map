@@ -230,14 +230,18 @@ selection, `list`, `export`.
 
 ```
 src/wifimap/  cli.py    argparse + exit codes, CSV export
-              evaluation.py shared DB/CSV evaluation model + analysis
-              eval_tui.py terminal evaluation selectors + dashboard
+              evaluation.py DB/CSV loading + analysis facade
+              evaluation_models.py immutable report + metric contracts
+              eval_state.py evaluation navigation state machine
+              eval_tui.py terminal evaluation rendering + runtime
               ssid.py   location-scoped existing/detected/manual selector
-              store.py  SQLite (locations→SSIDs/walks + rooms→spots→readings, WAL, FK on)
+              store.py  SQLite CRUD/query facade
+              store_schema.py schema setup + persistent record types (WAL, FK on)
               signal.py CoreWLAN backend + slow fallback + wdutil identity
               speed.py  Ookla subprocess wrapper (graceful missing-binary path)
               traffic.py default-iface byte counters (netstat/route) for live traffic
               tui.py    curses walk loop + ANSI fallback, snapshot worker thread
+              walk_ui.py pure walk formatting, meters, sparklines + picker input
 tests/        fixtures/mocks only, no live network
 docs/         plans/ (build history) + superpowers/ (specs)
 scripts/      explicit one-off local database migrations
