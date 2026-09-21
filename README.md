@@ -229,11 +229,16 @@ selection, `list`, `export`.
 ## Architecture
 
 ```
-src/wifimap/  cli.py    argparse + exit codes, CSV export
-              evaluation.py DB/CSV loading + analysis facade
+src/wifimap/  cli.py    argparse, live commands + dispatch facade
+              cli_common.py shared exit codes + command helpers
+              cli_storage_commands.py storage, export + benchmark commands
+              evaluation.py analysis + comparison facade
+              evaluation_io.py CSV/SQLite report loading
               evaluation_models.py immutable report + metric contracts
+              eval_render_common.py shared formatting + selector screens
+              eval_render_dashboard.py dashboard + reading-detail views
               eval_state.py evaluation navigation state machine
-              eval_tui.py terminal evaluation rendering + runtime
+              eval_tui.py comparison-detail rendering + terminal runtime
               ssid.py   location-scoped existing/detected/manual selector
               store.py  SQLite CRUD/query facade
               store_benchmarks.py benchmark persistence + delta formatting
@@ -241,7 +246,9 @@ src/wifimap/  cli.py    argparse + exit codes, CSV export
               store_places.py location/room/spot hierarchy persistence
               store_readings.py reading persistence + joined queries
               store_schema.py schema setup + persistent record types (WAL, FK on)
-              signal.py CoreWLAN backend + slow fallback + wdutil identity
+              signal.py CoreWLAN backend + network/address identity
+              signal_models.py signal readings + backend errors
+              signal_profiler.py slow system_profiler fallback
               speed.py  Ookla subprocess wrapper (graceful missing-binary path)
               traffic.py default-iface byte counters (netstat/route) for live traffic
               tui.py    compatibility facade + walk-mode entry point
