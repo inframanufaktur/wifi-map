@@ -1,8 +1,9 @@
 # wifimap
 
-Map home WiFi for connectivity planning. Walk room to room, snapshot
-signal strength (+ internet throughput), tag by location/room/spot. Rows land
-in SQLite; CSV export feeds plotting/heatmap later.
+Map home WiFi for connectivity planning. Walk room to room, snapshot signal
+strength, local/Internet path quality, and optional Internet throughput, then
+tag by location/room/spot. Rows land in SQLite; CSV export feeds
+plotting/heatmap later.
 
 Model: `location` = physical site (e.g. HOME); `SSID` = a network name owned
 by one location; `room` = room/place with floor + outdoors flag; `spot` =
@@ -30,7 +31,7 @@ wifimap --db /tmp/demo.db scan --no-speedtest \
 # 2. Named house walkthrough (live signal + passive traffic):
 wifimap --db /tmp/demo.db walk --location HOME --name before-install
 # keys: s snapshot+save | t unsaved throughput probe | c compare walk |
-#       l switch spot | n new room+spot | f floor | b benchmark | q quit.
+#       l switch spot | n new room+spot | b benchmark | q quit.
 
 # After changing the infrastructure, compare live against the first walk:
 wifimap --db /tmp/demo.db walk --location HOME --name after-install \
@@ -66,11 +67,12 @@ Rerunning the command is safe and prints `already migrated`.
 | Command | What it does |
 |---------|--------------|
 | `wifimap scan --location L --room R --spot S [--ssid NAME] [--room-floor N] [--room-outdoors 0\|1] [--no-speedtest] [--note TEXT]` | Select a location SSID, save one snapshot row, print, exit |
-| `wifimap walk [--interval 1.0] [--no-speedtest] [--location L] [--ssid NAME] [--name WALK] [--compare-to ID\|NAME\|latest]` | Named walkthrough with live signal, passive traffic, saved snapshots, and optional prior-walk comparison |
+| `wifimap walk [--interval 1.0] [--no-speedtest] [--location L] [--ssid NAME] [--name WALK] [--compare-to ID\|NAME\|latest]` | Named walkthrough with live signal, router/Internet path quality, passive traffic, saved snapshots, and optional prior-walk comparison |
 | `wifimap eval [--csv REPORT.csv]` | Terminal evaluation dashboard; defaults to the project DB, or reads a current-schema CSV export |
 | `wifimap locations list` / `add --name X` | List sites / create one (prints id) |
 | `wifimap rooms list --location L` / `add --location L --name X --floor N [--outdoors]` | List / create rooms in a site |
 | `wifimap spots list --location L --room R` / `add --location L --room R --name X` | List / create spots in a room |
+| `wifimap aps current` / `name --name NAME [--bssid MAC]` / `list` | Show or name the current (or explicit) access point so router and mesh nodes are recognizable |
 | `wifimap list [--location L] [--room R] [--spot S] [--floor N] [--ssid S] [--limit 50]` | History, joined with location/room/spot (newest first) |
 | `wifimap export --csv out.csv [same filters as list]` | CSV dump (up to 1M rows) |
 | `wifimap benchmark set --location L [--no-speedtest] [--note T] [--force]` / `show` / `clear` | Capture/show/delete ideal-conditions reference (one per location, overwrite prompts) |
@@ -114,9 +116,10 @@ server, and notes.
 
 Press `c` from the dashboard to compare two named walks. Choose the before
 walk and after walk; the comparison matches physical spots, reduces repeated
-reads to per-walk medians, and shows `BETTER`, `WORSE`, `NEW`, or
-`NOT REVISITED`. `Tab`/`Shift+Tab` cycles the seven raw measurements, `r`
-changes improvement order, `x` swaps before/after, and Enter opens both
+reads to per-walk medians, and initially shows only spots captured in both
+walks. Press `f` to show all spots, including `NEW` and `NOT REVISITED`.
+`Tab`/`Shift+Tab` cycles the seven raw measurements, `r` changes improvement
+order, `x` swaps before/after, and Enter opens both
 walk histories with their exact radio and throughput data. Walks from
 different locations are never paired, including when evaluation was entered
 through an SSID selection.
@@ -136,6 +139,18 @@ asynchronous Ookla throughput probe without saving a reading; `s` measures and
 saves into the current walk. Both show ping/down/up changes when finished.
 Switching spots clears spot-specific live results, and overlapping speed tests
 are blocked.
+
+The `PATH` instrument probes the default router and Cloudflare's `1.1.1.1`
+once per second. A missed Internet reply is checked against Google's
+`8.8.8.8`, so `×` means both independent external targets missed. Its rolling
+median, p95, loss, outage history, and sparkline reset when the active spot
+changes. Pressing `s` freezes the current spot window into the saved reading;
+only the aggregate probe count, median, p95, loss, and longest outage are
+stored, not every one-second sample.
+
+These are small ICMP probes, not DNS queries: neither provider receives the
+SSID, BSSID, room, or spot. As with any Internet request, they can observe the
+public source IP and timing. The router probe stays on the local network.
 
 The continuously updating `traffic down/up` graphs are interface utilization,
 not a capacity test, so they are intentionally never compared with stored
@@ -184,11 +199,32 @@ the graph is blank if netstat/route is unavailable.
 ## Network name (SSID/BSSID)
 
 At `scan` / `walk` startup, wifimap selects an SSID entity belonging to the
-chosen location. It tries CoreWLAN, then `networksetup`, and, if needed, makes
-one privileged `wdutil info` call. Detection only suggests a choice: confirm
-an existing/detected SSID or create one manually. macOS 26
-may redact the name even after sudo; existing and manual choices still work,
-so new captures are never stored as `Net: unknown`.
+chosen location. It tries CoreWLAN, the optional WifiWand macOS helper, then
+`networksetup` as an SSID-only fallback. It never requests administrator
+privileges. Detection only suggests a choice: confirm an existing/detected
+SSID or create one manually.
+
+On macOS 14+, WifiWand's signed helper is the preferred way to obtain the
+unredacted SSID and current AP BSSID. It requests its own Location Services
+permission, runs only when queried, returns local JSON, and neither stores nor
+sends the result. Install WifiWand with Ruby 3.2+ and run its one-time setup:
+
+```sh
+gem install wifi-wand
+wifiwand-macos-setup
+```
+
+wifimap automatically finds the newest helper under
+`~/Library/Application Support/WifiWand/`. For a development or custom
+installation, set `WIFIMAP_WIFIWAND_HELPER` to the helper executable. See
+[WifiWand's helper documentation](https://github.com/keithrbennett/wifiwand/blob/main/docs/MACOS_HELPER_APP_DETAILS.md).
+
+During a walk, wifimap shows the current BSSID as `AP`. It refreshes every 10
+seconds while RSSI is stronger than -70 dBm, every second near Apple's -75 dBm
+Mac roaming threshold, and once immediately before saving a reading. This
+captures mesh handoffs without launching the helper on every strong-signal
+frame. Without the helper, existing/manual SSID selection and all signal
+metrics continue to work.
 
 `--ssid NAME` selects or creates that SSID non-interactively and skips the
 privileged detection step. `list` / `export --ssid S` filter by the joined
@@ -201,9 +237,9 @@ SSID name.
 | `scan` exits 2 with install hint | PyObjC missing: `python -m pip install pyobjc-framework-CoreWLAN` (after upgrading pip) |
 | `SSID selection requires a terminal` | Non-interactive scan/walk: pass both `--location NAME` and `--ssid NAME` |
 | `legacy SSID schema` | Run `.venv/bin/python scripts/migrate_ssid_entities.py db/wifi-map.db`; the script creates a backup first |
-| SSID detection is blank/redacted | Choose an existing SSID or create one manually; use `--ssid NAME` to skip detection/sudo |
+| SSID detection is blank/redacted | Run `wifiwand-macos-setup`, or choose an existing SSID / pass `--ssid NAME`; BSSID capture requires the helper or unredacted CoreWLAN |
 | `Warning: … speedtest …; proceeding signal-only` | Ookla binary missing/failed — row kept with NULL down/up; pass `--no-speedtest` to silence |
-| `walk` falls back to line-buffered keys | No curses/tty (e.g. piped output) — same `s/t/c/l/n/f/b/q` keys followed by Enter; `NO_COLOR=1` disables ANSI colours |
+| `walk` falls back to line-buffered keys | No curses/tty (e.g. piped output) — same `s/t/c/l/n/b/q` keys followed by Enter; `NO_COLOR=1` disables ANSI colours |
 | `Error: cannot open DB` / `cannot store reading` (exit 3) | Bad `--db` path or permissions; directory must exist |
 
 ## CSV + tests
@@ -212,18 +248,23 @@ SSID name.
 location_name, room_name, spot_name, floor, outdoors, ssid, bssid,
 rssi, noise, snr, channel, phy, tx_rate, ping_ms, down_mbps, up_mbps,
 server, note, delta_rssi, delta_snr, delta_down_mbps, delta_up_mbps,
-walk_id, walk_name, walk_started_at, walk_ended_at`.
+ap_name, path_probe_count, gateway_rtt_ms, gateway_p95_ms,
+gateway_loss_pct, gateway_max_outage_ms, internet_rtt_ms,
+internet_p95_ms, internet_loss_pct, internet_max_outage_ms, walk_id,
+walk_name, walk_started_at, walk_ended_at`.
+`bssid` is the access point captured for that snapshot; `ap_name` is its
+optional local alias.
 NULLs render as `-` in terminal tables, `""` in CSV. Delta columns are
 reading minus the location benchmark; blank when no benchmark exists or
 either value is missing.
 
 ```sh
 python -m pip install -e '.[test]'
-pytest   # 300 passed (verified 2026-09-21). Fixtures/mocks only — no live network in tests.
+pytest   # 342 passed (verified 2026-09-21). Fixtures/mocks only — no live network in tests.
 ```
 
 Manual gates (no automation): `scan`, walk key flow
-(`s`/`t`/`c`/`l`/`n`/`f`/`b`/`q`), eval Location/SSID and walk-comparison
+(`s`/`t`/`c`/`l`/`n`/`b`/`q`), eval Location/SSID and walk-comparison
 selection, `list`, `export`.
 
 ## Architecture
@@ -239,6 +280,7 @@ src/wifimap/  cli.py    argparse, live commands + dispatch facade
               eval_render_dashboard.py dashboard + reading-detail views
               eval_state.py evaluation navigation state machine
               eval_tui.py comparison-detail rendering + terminal runtime
+              path_monitor.py rolling gateway/Internet ICMP path probes
               ssid.py   location-scoped existing/detected/manual selector
               store.py  SQLite CRUD/query facade
               store_benchmarks.py benchmark persistence + delta formatting
@@ -249,6 +291,7 @@ src/wifimap/  cli.py    argparse, live commands + dispatch facade
               signal.py CoreWLAN backend + network/address identity
               signal_models.py signal readings + backend errors
               signal_profiler.py slow system_profiler fallback
+              wifiwand.py signed-helper discovery, JSON validation + identity cache
               speed.py  Ookla subprocess wrapper (graceful missing-binary path)
               traffic.py default-iface byte counters (netstat/route) for live traffic
               tui.py    compatibility facade + walk-mode entry point
