@@ -509,21 +509,3 @@ class WalkState:
         with self._lock:
             self._workers.append(t)
         return t
-
-    def set_floor(self, conn: sqlite3.Connection, floor: int) -> str:
-        """Update active spot's room floor; returns toast message."""
-        if self.active_spot_id is None:
-            return "no active spot"
-        try:
-            spot = store_mod.get_spot(conn, self.active_spot_id)
-        except (sqlite3.Error, OSError) as exc:
-            return "DB error: %s" % (exc,)
-        if spot is None:
-            return "unknown spot id: %r" % (self.active_spot_id,)
-        try:
-            store_mod.update_room_floor(conn, spot.room_id, floor)
-        except ValueError:
-            return "unknown room id: %r" % (spot.room_id,)
-        except (sqlite3.Error, OSError) as exc:
-            return "DB error: %s" % (exc,)
-        return "floor set to %d" % floor

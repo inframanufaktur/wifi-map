@@ -11,7 +11,6 @@ from wifimap.walk_keys import (
     KEY_BENCHMARK,
     KEY_COMPARE,
     KEY_CTRL_C,
-    KEY_FLOOR,
     KEY_NEW,
     KEY_NO_INPUT,
     KEY_QUIT,
@@ -441,18 +440,6 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                         conn, state.active_spot_id))
                 else:
                     state.set_toast("new spot cancelled/invalid")
-            elif key == KEY_FLOOR:
-                if state.active_spot_id is None:
-                    state.set_toast("no active spot")
-                else:
-                    raw = _prompt_curses(
-                        stdscr, "floor (int): ", poll_timeout_ms)
-                    try:
-                        floor = parse_floor_input(raw)
-                    except ValueError as exc:
-                        state.set_toast(str(exc))
-                    else:
-                        state.set_toast(state.set_floor(conn, floor))
             # loop; timeout already paces polling
     except KeyboardInterrupt:
         return 0

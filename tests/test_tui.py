@@ -426,54 +426,6 @@ def test_walk_state_nowifi_blocks_snapshot(tmp_path):
     assert "blocked" in st.toast.lower()
 
 
-def test_walk_state_set_floor(tmp_path):
-    db = _db(tmp_path)
-    conn = store_mod.get_db(db)
-    try:
-        _, rid, (sid, _) = _seed_3level(conn, loc="home", room="attic",
-                                        floor=0)
-        st = tui_mod.WalkState(db)
-        st.active_location_id = store_mod.resolve_location(conn, "home")
-        st.active_spot_id = sid
-        assert "1" in st.set_floor(conn, 1)
-        assert store_mod.get_room(conn, rid).floor == 1
-        with pytest.raises(ValueError):
-            tui_mod.parse_floor_input("bad")
-    finally:
-        conn.close()
-
-
-def test_walk_state_set_floor_unknown_spot_toasts(tmp_path):
-    db = _db(tmp_path)
-    conn = store_mod.get_db(db)
-    try:
-        _seed_3level(conn)
-        st = tui_mod.WalkState(db)
-        st.active_spot_id = 9999
-        assert "unknown" in st.set_floor(conn, 0).lower()
-        st2 = tui_mod.WalkState(db)
-        assert "no active" in st2.set_floor(conn, 0).lower()
-    finally:
-        conn.close()
-
-
-def test_walk_state_set_floor_unique_conflict_toasts(tmp_path):
-    db = _db(tmp_path)
-    conn = store_mod.get_db(db)
-    try:
-        lid = store_mod.create_location(conn, "home")
-        store_mod.create_room(conn, lid, "dup", floor=0)
-        other = store_mod.create_room(conn, lid, "dup", floor=1)
-        other_spot = store_mod.create_spot(conn, other, "s")
-        st = tui_mod.WalkState(db)
-        st.active_location_id = lid
-        st.active_spot_id = other_spot
-        assert "DB error" in st.set_floor(conn, 0)
-        assert store_mod.get_room(conn, other).floor == 1
-    finally:
-        conn.close()
-
-
 def test_walk_state_poll_unknown_after_retries(monkeypatch, tmp_path):
     st = tui_mod.WalkState(str(tmp_path / "w.db"))
     monkeypatch.setattr(
@@ -659,27 +611,6 @@ def test_fallback_create_valid_and_invalid(monkeypatch, tmp_path):
         tui_mod._fallback_create(conn, st)
         assert st.active_spot_id == before
         assert "cancelled" in st.ui_snapshot()[0].lower()
-    finally:
-        conn.close()
-
-
-def test_fallback_floor_valid_and_invalid(monkeypatch, tmp_path):
-    db = _db(tmp_path)
-    conn = store_mod.get_db(db)
-    try:
-        lid, rid, (sid, _) = _seed_3level(conn, loc="home", room="office",
-                                          floor=0)
-        st = tui_mod.WalkState(db)
-        st.active_location_id = lid
-        st.active_spot_id = sid
-        monkeypatch.setattr("builtins.input", lambda *args: "2")
-        tui_mod._fallback_floor(conn, st)
-        assert store_mod.get_room(conn, rid).floor == 2
-        assert "2" in st.ui_snapshot()[0]
-        monkeypatch.setattr("builtins.input", lambda *args: "bad")
-        tui_mod._fallback_floor(conn, st)
-        assert store_mod.get_room(conn, rid).floor == 2
-        assert "integer" in st.ui_snapshot()[0].lower()
     finally:
         conn.close()
 

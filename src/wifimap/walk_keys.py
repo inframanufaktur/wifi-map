@@ -4,7 +4,6 @@ KEY_SNAPSHOT = "s"
 KEY_BENCHMARK = "b"
 KEY_SWITCH = "l"
 KEY_NEW = "n"
-KEY_FLOOR = "f"
 KEY_COMPARE = "c"
 KEY_SPEED_PROBE = "t"
 KEY_QUIT = "q"
@@ -21,5 +20,5 @@ WORKER_DRAIN_TIMEOUT = 130.0
 
 
 def poll_timeout_ms(interval: float) -> int:
-    """Poll getch timeout for walk loop; floor keeps fast intervals usable."""
+    """Poll getch timeout for walk loop while keeping intervals usable."""
     return max(POLL_TIMEOUT_MIN_MS, int(interval * 1000))

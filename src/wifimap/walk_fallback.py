@@ -12,7 +12,6 @@ from wifimap.walk_keys import (
     FALLBACK_SETTLE_SLEEP,
     KEY_BENCHMARK,
     KEY_COMPARE,
-    KEY_FLOOR,
     KEY_NEW,
     KEY_SNAPSHOT,
     KEY_SPEED_PROBE,
@@ -21,7 +20,6 @@ from wifimap.walk_keys import (
 )
 from wifimap.walk_picker import (
     _fallback_create,
-    _fallback_floor,
     _fallback_pick,
 )
 from wifimap.walk_session import (
@@ -90,7 +88,7 @@ def _walk_fallback(db_path: str, interval: float,
     """ANSI fallback when curses/tty unavailable.
 
     Limit: keys are line-buffered (type a key + Enter); no live refresh
-    while waiting for input. Same ``s``/``b``/``l``/``n``/``f``/``q`` keys.
+    while waiting for input. Same ``s``/``b``/``l``/``n``/``q`` keys.
     """
     import select
 
@@ -117,7 +115,7 @@ def _walk_fallback(db_path: str, interval: float,
         state.start_path_monitor()
         print("walk fallback (no curses): type a key + Enter", flush=True)
         print("keys: s snapshot | t throughput | c compare | b benchmark | "
-              "l switch | n new | f floor | q quit", flush=True)
+              "l switch | n new | q quit", flush=True)
         while True:
             state.poll()
             if state.no_wifi:
@@ -313,8 +311,6 @@ def _walk_fallback(db_path: str, interval: float,
                 _fallback_pick(conn, state)
             elif key == KEY_NEW:
                 _fallback_create(conn, state)
-            elif key == KEY_FLOOR:
-                _fallback_floor(conn, state)
     except KeyboardInterrupt:
         return 0
     finally:

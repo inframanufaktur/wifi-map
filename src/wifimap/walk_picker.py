@@ -389,14 +389,3 @@ def _fallback_create(conn: sqlite3.Connection, state: "WalkState") -> None:
             state.set_toast("cancelled/invalid")
         return
     state.set_active_spot(spot_id)
-
-
-def _fallback_floor(conn: sqlite3.Connection, state: "WalkState") -> None:
-    """Prompt for and update the active room's floor."""
-    try:
-        raw = input("floor (int): ")
-        floor = parse_floor_input(raw)
-    except (EOFError, OSError, ValueError) as exc:
-        state.set_toast(str(exc))
-        return
-    state.set_toast(state.set_floor(conn, floor))
