@@ -16,11 +16,12 @@ framework deps.
 
 ```sh
 python3 -m venv .venv && source .venv/bin/activate
-pip install --upgrade pip   # REQUIRED: stock pip pulls pyobjc-core source and fails
-pip install -e .[test]
+python -m pip install --upgrade pip   # REQUIRED: stock pip pulls pyobjc-core source and fails
+python -m pip install -e '.[test]'
+python -m pip install pyobjc-framework-CoreWLAN
 
 # 1. First snapshot (signal-only, throwaway DB):
-#    Requires pyobjc-framework-CoreWLAN above; without it scan exits 2
+#    Uses pyobjc-framework-CoreWLAN installed above; without it scan exits 2
 #    with an install hint (expected on a fresh machine).
 wifimap --db /tmp/demo.db scan --no-speedtest \
   --location HOME --room KITCHEN --spot WINDOW --room-floor 0 \
@@ -153,10 +154,10 @@ Floor convention (on room): 0 ground, -1 first basement, +1 first upper.
 ```sh
 python3 -m venv .venv   # or /tmp/wifimap-venv (both gitignored)
 source .venv/bin/activate
-pip install --upgrade pip
-pip install -e .
-pip install -e .[test]              # for pytest
-pip install pyobjc-framework-CoreWLAN   # real 1s signal reads on macOS
+python -m pip install --upgrade pip
+python -m pip install -e .
+python -m pip install -e '.[test]'              # for pytest
+python -m pip install pyobjc-framework-CoreWLAN # real 1s signal reads on macOS
 ```
 
 Signal backend: CoreWLAN poll ~5ms, live read
@@ -217,8 +218,8 @@ reading minus the location benchmark; blank when no benchmark exists or
 either value is missing.
 
 ```sh
-pip install -e .[test]
-pytest   # 283 passed (verified 2026-09-21). Fixtures/mocks only — no live network in tests.
+python -m pip install -e '.[test]'
+pytest   # 300 passed (verified 2026-09-21). Fixtures/mocks only — no live network in tests.
 ```
 
 Manual gates (no automation): `scan`, walk key flow
