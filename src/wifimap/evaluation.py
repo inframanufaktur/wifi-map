@@ -18,6 +18,10 @@ REQUIRED_FIELDS: Tuple[str, ...] = (
     "delta_snr", "delta_down_mbps", "delta_up_mbps",
 )
 
+OPTIONAL_WALK_FIELDS: Tuple[str, ...] = (
+    "walk_id", "walk_name", "walk_started_at", "walk_ended_at",
+)
+
 
 class ReportError(ValueError):
     """Raised when an evaluation source cannot be opened or parsed."""
@@ -85,6 +89,10 @@ class Reading:
     delta_snr: Optional[float]
     delta_down_mbps: Optional[float]
     delta_up_mbps: Optional[float]
+    walk_id: Optional[int] = None
+    walk_name: Optional[str] = None
+    walk_started_at: Optional[str] = None
+    walk_ended_at: Optional[str] = None
 
     @classmethod
     def from_mapping(cls, row: Mapping[str, object],
@@ -127,6 +135,10 @@ class Reading:
                 row.get("delta_down_mbps"), "delta_down_mbps", row_number),
             delta_up_mbps=_number(
                 row.get("delta_up_mbps"), "delta_up_mbps", row_number),
+            walk_id=_integer(row.get("walk_id"), "walk_id", row_number),
+            walk_name=_optional_text(row.get("walk_name")),
+            walk_started_at=_optional_text(row.get("walk_started_at")),
+            walk_ended_at=_optional_text(row.get("walk_ended_at")),
         )
 
 
@@ -155,7 +167,9 @@ class MetricSpec:
 
 METRICS: Tuple[MetricSpec, ...] = (
     MetricSpec("rssi", "RSSI", "dBm", True, 0),
+    MetricSpec("noise", "noise", "dBm", False, 0),
     MetricSpec("snr", "SNR", "dB", True, 0),
+    MetricSpec("tx_rate", "TX rate", "Mbps", True, 0),
     MetricSpec("ping_ms", "ping", "ms", False, 1),
     MetricSpec("down_mbps", "down", "Mbps", True, 1),
     MetricSpec("up_mbps", "up", "Mbps", True, 1),
@@ -166,6 +180,16 @@ METRICS: Tuple[MetricSpec, ...] = (
 )
 
 _METRIC_BY_KEY = {metric.key: metric for metric in METRICS}
+
+_COMPARISON_METRIC_KEYS = (
+    "rssi", "noise", "snr", "tx_rate", "ping_ms", "down_mbps", "up_mbps",
+)
+COMPARISON_METRICS: Tuple[MetricSpec, ...] = tuple(
+    _METRIC_BY_KEY[key] for key in _COMPARISON_METRIC_KEYS
+)
+_COMPARISON_METRIC_BY_KEY = {
+    metric.key: metric for metric in COMPARISON_METRICS
+}
 
 
 @dataclass(frozen=True)
@@ -194,6 +218,7 @@ class AnalysisRow:
     delta_snr: Optional[float]
     delta_down_mbps: Optional[float]
     delta_up_mbps: Optional[float]
+    readings: Tuple[Reading, ...]
 
 
 @dataclass(frozen=True)
@@ -203,6 +228,52 @@ class MetricSummary:
     minimum: Optional[float]
     median: Optional[float]
     maximum: Optional[float]
+
+
+@dataclass(frozen=True)
+class WalkOption:
+    walk_id: int
+    name: str
+    location_id: Optional[int]
+    location_name: str
+    started_at: Optional[str]
+    ended_at: Optional[str]
+    reading_count: int
+    spot_count: int
+
+
+@dataclass(frozen=True)
+class PlaceKey:
+    spot_id: Optional[int]
+    location_name: str
+    room_name: str
+    floor: Optional[int]
+    spot_name: str
+
+
+@dataclass(frozen=True)
+class ComparisonRow:
+    place: PlaceKey
+    status: str
+    before: Optional[AnalysisRow]
+    after: Optional[AnalysisRow]
+
+
+@dataclass(frozen=True)
+class ComparisonSummary:
+    before_spots: int
+    after_spots: int
+    matched_spots: int
+    before_only: int
+    after_only: int
+    comparable: int
+    improved: int
+    unchanged: int
+    worse: int
+    metric_missing: int
+    before_median: Optional[float]
+    after_median: Optional[float]
+    median_delta: Optional[float]
 
 
 def load_csv(path: Union[str, Path]) -> Report:
@@ -226,12 +297,12 @@ def load_csv(path: Union[str, Path]) -> Report:
     return Report(source=str(source), readings=readings)
 
 
-_DB_QUERY = """
+_DB_QUERY_TEMPLATE = """
 SELECT r.id, r.ts, r.spot_id, s.room_id, l.id AS location_id,
        l.name AS location_name, m.name AS room_name, s.name AS spot_name,
        m.floor, m.outdoors, r.ssid, r.bssid, r.rssi, r.noise, r.snr,
        r.channel, r.phy, r.tx_rate, r.ping_ms, r.down_mbps, r.up_mbps,
-       r.server, r.note,
+       r.server, r.note, {walk_fields},
        CASE WHEN r.rssi IS NOT NULL AND b.rssi IS NOT NULL
             THEN r.rssi - b.rssi END AS delta_rssi,
        CASE WHEN r.snr IS NOT NULL AND b.snr IS NOT NULL
@@ -245,8 +316,38 @@ JOIN spots s ON s.id = r.spot_id
 JOIN rooms m ON m.id = s.room_id
 JOIN locations l ON l.id = m.location_id
 LEFT JOIN benchmarks b ON b.location_id = l.id
+{walk_join}
 ORDER BY r.id DESC
 """
+
+_DB_QUERY = _DB_QUERY_TEMPLATE.format(
+    walk_fields=(
+        "r.walk_id, w.name AS walk_name, "
+        "w.started_at AS walk_started_at, w.ended_at AS walk_ended_at"
+    ),
+    walk_join="LEFT JOIN walks w ON w.id = r.walk_id",
+)
+
+_LEGACY_DB_QUERY = _DB_QUERY_TEMPLATE.format(
+    walk_fields=(
+        "NULL AS walk_id, NULL AS walk_name, "
+        "NULL AS walk_started_at, NULL AS walk_ended_at"
+    ),
+    walk_join="",
+)
+
+
+def _has_walk_schema(conn: sqlite3.Connection) -> bool:
+    reading_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(readings)")
+    }
+    walk_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(walks)")
+    }
+    return (
+        "walk_id" in reading_columns
+        and {"id", "name", "started_at", "ended_at"} <= walk_columns
+    )
 
 
 def load_db(path: Union[str, Path]) -> Report:
@@ -258,7 +359,8 @@ def load_db(path: Union[str, Path]) -> Report:
         conn = sqlite3.connect(uri, uri=True)
         conn.row_factory = sqlite3.Row
         try:
-            rows = conn.execute(_DB_QUERY).fetchall()
+            query = _DB_QUERY if _has_walk_schema(conn) else _LEGACY_DB_QUERY
+            rows = conn.execute(query).fetchall()
         finally:
             conn.close()
     except sqlite3.Error as exc:
@@ -331,14 +433,13 @@ def _analysis_row(readings: Sequence[Reading]) -> AnalysisRow:
         bssid=_common_reading_value(readings, "bssid"),
         channel=_common_reading_value(readings, "channel"),
         phy=_common_reading_value(readings, "phy"),
-        tx_rate=_median_reading_value(readings, "tx_rate"),
         server=_common_reading_value(readings, "server"),
         note=_common_reading_value(readings, "note"),
-        noise=_median_reading_value(readings, "noise"),
         **{
             key: _median_reading_value(readings, key)
             for key in _ANALYSIS_METRIC_KEYS
-        }
+        },
+        readings=tuple(readings),
     )
 
 
@@ -400,9 +501,254 @@ def metric_summary(rows: Sequence[AnalysisRow], metric: str) -> MetricSummary:
     )
 
 
+def _spot_identity(reading: Reading) -> tuple:
+    if reading.spot_id is not None:
+        return ("spot_id", reading.spot_id)
+    return (
+        "place", reading.location_name, reading.room_name,
+        reading.floor, reading.spot_name,
+    )
+
+
+def _place_key(reading: Reading) -> PlaceKey:
+    return PlaceKey(
+        spot_id=reading.spot_id,
+        location_name=reading.location_name,
+        room_name=reading.room_name,
+        floor=reading.floor,
+        spot_name=reading.spot_name,
+    )
+
+
+def _walk_location(readings: Sequence[Reading],
+                   walk_id: int) -> Tuple[Optional[int], str]:
+    location_ids = {
+        reading.location_id for reading in readings
+        if reading.location_id is not None
+    }
+    location_names = {reading.location_name for reading in readings}
+    if len(location_ids) > 1 or len(location_names) > 1:
+        raise ValueError("walk %r spans multiple locations" % walk_id)
+    location_id = next(iter(location_ids)) if location_ids else None
+    location_name = next(iter(location_names)) if location_names else ""
+    return location_id, location_name
+
+
+def _same_location(before: Tuple[Optional[int], str],
+                   after: Tuple[Optional[int], str]) -> bool:
+    before_id, before_name = before
+    after_id, after_name = after
+    if before_id is not None and after_id is not None:
+        return before_id == after_id
+    return before_name == after_name
+
+
+def walk_options(readings: Sequence[Reading]) -> List[WalkOption]:
+    """Return named walks represented by the already scope-filtered readings."""
+    groups = {}
+    for reading in readings:
+        if reading.walk_id is None or reading.walk_name is None:
+            continue
+        groups.setdefault(reading.walk_id, []).append(reading)
+
+    options = []
+    for walk_id, group in groups.items():
+        location_id, location_name = _walk_location(group, walk_id)
+        starts = [reading.walk_started_at for reading in group
+                  if reading.walk_started_at is not None]
+        ends = [reading.walk_ended_at for reading in group
+                if reading.walk_ended_at is not None]
+        options.append(WalkOption(
+            walk_id=walk_id,
+            name=group[0].walk_name or "Walk #%d" % walk_id,
+            location_id=location_id,
+            location_name=location_name,
+            started_at=min(starts) if starts else None,
+            ended_at=max(ends) if ends else None,
+            reading_count=len(group),
+            spot_count=len({_spot_identity(reading) for reading in group}),
+        ))
+    options.sort(
+        key=lambda option: (
+            option.started_at or "", option.walk_id, option.name,
+        ),
+        reverse=True,
+    )
+    return options
+
+
+def _walk_rows(readings: Sequence[Reading], walk_id: int):
+    groups = {}
+    for reading in readings:
+        if reading.walk_id == walk_id:
+            groups.setdefault(_spot_identity(reading), []).append(reading)
+    return {
+        identity: (_place_key(group[0]), _analysis_row(group))
+        for identity, group in groups.items()
+    }
+
+
+def compare_walks(readings: Sequence[Reading], before_walk_id: int,
+                  after_walk_id: int) -> List[ComparisonRow]:
+    """Compare two walks using per-spot medians and their spot union."""
+    if before_walk_id == after_walk_id:
+        raise ValueError("before and after walks must be different")
+    before_readings = [
+        reading for reading in readings
+        if reading.walk_id == before_walk_id
+    ]
+    after_readings = [
+        reading for reading in readings
+        if reading.walk_id == after_walk_id
+    ]
+    if not before_readings:
+        raise ValueError("unknown or empty before walk: %r" % before_walk_id)
+    if not after_readings:
+        raise ValueError("unknown or empty after walk: %r" % after_walk_id)
+    before_location = _walk_location(before_readings, before_walk_id)
+    after_location = _walk_location(after_readings, after_walk_id)
+    if not _same_location(before_location, after_location):
+        raise ValueError("cannot compare walks from different locations")
+
+    before = _walk_rows(readings, before_walk_id)
+    after = _walk_rows(readings, after_walk_id)
+
+    rows = []
+    for identity in before.keys() | after.keys():
+        before_item = before.get(identity)
+        after_item = after.get(identity)
+        before_row = before_item[1] if before_item is not None else None
+        after_row = after_item[1] if after_item is not None else None
+        if before_row is not None and after_row is not None:
+            status = "matched"
+        elif before_row is not None:
+            status = "before_only"
+        else:
+            status = "after_only"
+        place = (before_item or after_item)[0]
+        rows.append(ComparisonRow(
+            place=place, status=status,
+            before=before_row, after=after_row,
+        ))
+    rows.sort(key=_comparison_place_sort_key)
+    return rows
+
+
+def _comparison_metric(metric: str) -> MetricSpec:
+    try:
+        return _COMPARISON_METRIC_BY_KEY[metric]
+    except KeyError as exc:
+        raise ValueError("unknown comparison metric: %r" % metric) from exc
+
+
+def comparison_delta(row: ComparisonRow, metric: str) -> Optional[float]:
+    """Return the raw after-minus-before change for a comparison row."""
+    _comparison_metric(metric)
+    if row.before is None or row.after is None:
+        return None
+    before = getattr(row.before, metric)
+    after = getattr(row.after, metric)
+    if before is None or after is None:
+        return None
+    return float(after - before)
+
+
+def comparison_direction(row: ComparisonRow, metric: str) -> str:
+    """Return ``improved``, ``unchanged``, ``worse``, or ``missing``."""
+    spec = _comparison_metric(metric)
+    delta = comparison_delta(row, metric)
+    if delta is None:
+        return "missing"
+    improvement = delta if spec.higher_is_better else -delta
+    if improvement > 0:
+        return "improved"
+    if improvement < 0:
+        return "worse"
+    return "unchanged"
+
+
+def _comparison_place_sort_key(row: ComparisonRow) -> tuple:
+    floor = row.place.floor
+    return (
+        row.place.location_name, floor is None, floor or 0,
+        row.place.room_name, row.place.spot_name,
+        row.place.spot_id if row.place.spot_id is not None else -1,
+    )
+
+
+def _comparison_improvement(row: ComparisonRow, metric: str) -> float:
+    spec = _comparison_metric(metric)
+    delta = comparison_delta(row, metric)
+    if delta is None:
+        raise ValueError("comparison row has no paired metric")
+    return delta if spec.higher_is_better else -delta
+
+
+def rank_comparison_rows(rows: Sequence[ComparisonRow], metric: str,
+                         reverse: bool = False) -> List[ComparisonRow]:
+    """Rank paired changes, keeping coverage exceptions visible."""
+    _comparison_metric(metric)
+    before_only = [row for row in rows if row.status == "before_only"]
+    after_only = [row for row in rows if row.status == "after_only"]
+    comparable = [
+        row for row in rows
+        if row.status == "matched" and comparison_delta(row, metric) is not None
+    ]
+    metric_missing = [
+        row for row in rows
+        if row.status == "matched" and comparison_delta(row, metric) is None
+    ]
+    for group in (before_only, after_only, comparable, metric_missing):
+        group.sort(key=_comparison_place_sort_key)
+    comparable.sort(
+        key=lambda row: _comparison_improvement(row, metric),
+        reverse=reverse,
+    )
+    return before_only + comparable + after_only + metric_missing
+
+
+def comparison_summary(rows: Sequence[ComparisonRow],
+                       metric: str) -> ComparisonSummary:
+    """Summarize coverage and paired changes for one raw metric."""
+    _comparison_metric(metric)
+    paired = [
+        row for row in rows
+        if row.status == "matched" and comparison_delta(row, metric) is not None
+    ]
+    directions = [comparison_direction(row, metric) for row in paired]
+    before_values = [getattr(row.before, metric) for row in paired]
+    after_values = [getattr(row.after, metric) for row in paired]
+    deltas = [comparison_delta(row, metric) for row in paired]
+
+    def _median(values) -> Optional[float]:
+        return float(statistics.median(values)) if values else None
+
+    return ComparisonSummary(
+        before_spots=sum(row.before is not None for row in rows),
+        after_spots=sum(row.after is not None for row in rows),
+        matched_spots=sum(row.status == "matched" for row in rows),
+        before_only=sum(row.status == "before_only" for row in rows),
+        after_only=sum(row.status == "after_only" for row in rows),
+        comparable=len(paired),
+        improved=directions.count("improved"),
+        unchanged=directions.count("unchanged"),
+        worse=directions.count("worse"),
+        metric_missing=sum(
+            row.status == "matched" and comparison_delta(row, metric) is None
+            for row in rows
+        ),
+        before_median=_median(before_values),
+        after_median=_median(after_values),
+        median_delta=_median(deltas),
+    )
+
+
 __all__ = [
-    "REQUIRED_FIELDS", "ReportError", "Reading", "Report", "ScopeOption",
-    "MetricSpec", "METRICS", "AnalysisRow", "MetricSummary", "load_csv",
-    "load_db", "scope_options", "filter_scope", "analysis_rows",
-    "rank_rows", "metric_summary",
+    "REQUIRED_FIELDS", "OPTIONAL_WALK_FIELDS", "ReportError", "Reading",
+    "Report", "ScopeOption", "MetricSpec", "METRICS", "COMPARISON_METRICS",
+    "AnalysisRow", "MetricSummary", "WalkOption", "PlaceKey",
+    "ComparisonRow", "ComparisonSummary", "load_csv", "load_db",
+    "scope_options", "filter_scope", "analysis_rows", "rank_rows",
+    "metric_summary", "walk_options", "compare_walks", "comparison_delta",
+    "comparison_direction", "rank_comparison_rows", "comparison_summary",
 ]

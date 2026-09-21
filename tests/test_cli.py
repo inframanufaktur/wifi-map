@@ -354,6 +354,36 @@ def test_export_csv_includes_benchmark_delta(tmp_path, capsys):
     assert away["delta_up_mbps"] == ""
 
 
+def test_export_csv_includes_walk_metadata(tmp_path, capsys):
+    db = str(tmp_path / "cli.db")
+    conn = store_mod.get_db(db)
+    try:
+        location_id = store_mod.create_location(conn, "home")
+        room_id = store_mod.create_room(conn, location_id, "kitchen")
+        spot_id = store_mod.create_spot(conn, room_id, "window")
+        walk_id = store_mod.create_walk(
+            conn, location_id, "before-install",
+            started_at="2026-09-21T08:00:00+00:00",
+        )
+        store_mod.finish_walk(
+            conn, walk_id, ended_at="2026-09-21T08:30:00+00:00")
+        store_mod.add_reading(conn, spot_id, rssi=-65, walk_id=walk_id)
+    finally:
+        conn.close()
+
+    csv_path = str(tmp_path / "out.csv")
+    rc, _, _ = _run(
+        capsys, "--db", db, "export", "--csv", csv_path)
+
+    assert rc == cli_mod.EXIT_OK
+    with open(csv_path, newline="") as fh:
+        row = next(csv.DictReader(fh))
+    assert row["walk_id"] == str(walk_id)
+    assert row["walk_name"] == "before-install"
+    assert row["walk_started_at"] == "2026-09-21T08:00:00+00:00"
+    assert row["walk_ended_at"] == "2026-09-21T08:30:00+00:00"
+
+
 def test_scan_db_error_exit_3(monkeypatch, tmp_path, capsys):
     def _boom(path):
         raise sqlite3.Error("locked")
