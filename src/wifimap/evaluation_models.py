@@ -17,6 +17,14 @@ REQUIRED_FIELDS: Tuple[str, ...] = (
 OPTIONAL_WALK_FIELDS: Tuple[str, ...] = (
     "walk_id", "walk_name", "walk_started_at", "walk_ended_at",
 )
+OPTIONAL_AP_FIELDS: Tuple[str, ...] = ("ap_name",)
+OPTIONAL_PATH_FIELDS: Tuple[str, ...] = (
+    "path_probe_count",
+    "gateway_rtt_ms", "gateway_p95_ms", "gateway_loss_pct",
+    "gateway_max_outage_ms",
+    "internet_rtt_ms", "internet_p95_ms", "internet_loss_pct",
+    "internet_max_outage_ms",
+)
 
 
 class ReportError(ValueError):
@@ -89,6 +97,16 @@ class Reading:
     walk_name: Optional[str] = None
     walk_started_at: Optional[str] = None
     walk_ended_at: Optional[str] = None
+    ap_name: Optional[str] = None
+    path_probe_count: Optional[int] = None
+    gateway_rtt_ms: Optional[float] = None
+    gateway_p95_ms: Optional[float] = None
+    gateway_loss_pct: Optional[float] = None
+    gateway_max_outage_ms: Optional[int] = None
+    internet_rtt_ms: Optional[float] = None
+    internet_p95_ms: Optional[float] = None
+    internet_loss_pct: Optional[float] = None
+    internet_max_outage_ms: Optional[int] = None
 
     @classmethod
     def from_mapping(cls, row: Mapping[str, object],
@@ -135,6 +153,27 @@ class Reading:
             walk_name=_optional_text(row.get("walk_name")),
             walk_started_at=_optional_text(row.get("walk_started_at")),
             walk_ended_at=_optional_text(row.get("walk_ended_at")),
+            ap_name=_optional_text(row.get("ap_name")),
+            path_probe_count=_integer(
+                row.get("path_probe_count"), "path_probe_count", row_number),
+            gateway_rtt_ms=_number(
+                row.get("gateway_rtt_ms"), "gateway_rtt_ms", row_number),
+            gateway_p95_ms=_number(
+                row.get("gateway_p95_ms"), "gateway_p95_ms", row_number),
+            gateway_loss_pct=_number(
+                row.get("gateway_loss_pct"), "gateway_loss_pct", row_number),
+            gateway_max_outage_ms=_integer(
+                row.get("gateway_max_outage_ms"),
+                "gateway_max_outage_ms", row_number),
+            internet_rtt_ms=_number(
+                row.get("internet_rtt_ms"), "internet_rtt_ms", row_number),
+            internet_p95_ms=_number(
+                row.get("internet_p95_ms"), "internet_p95_ms", row_number),
+            internet_loss_pct=_number(
+                row.get("internet_loss_pct"), "internet_loss_pct", row_number),
+            internet_max_outage_ms=_integer(
+                row.get("internet_max_outage_ms"),
+                "internet_max_outage_ms", row_number),
         )
 
 

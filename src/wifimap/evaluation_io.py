@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Union
 
 from wifimap.evaluation_models import (
+    OPTIONAL_PATH_FIELDS,
     REQUIRED_FIELDS,
     Reading,
     Report,
@@ -38,7 +39,8 @@ def load_csv(path: Union[str, Path]) -> Report:
 _DB_QUERY_TEMPLATE = """
 SELECT r.id, r.ts, r.spot_id, s.room_id, l.id AS location_id,
        l.name AS location_name, m.name AS room_name, s.name AS spot_name,
-       m.floor, m.outdoors, {ssid_field}, r.bssid, r.rssi, r.noise, r.snr,
+       m.floor, m.outdoors, {ssid_field}, r.bssid, {ap_name_field},
+       r.rssi, r.noise, r.snr, {path_fields},
        r.channel, r.phy, r.tx_rate, r.ping_ms, r.down_mbps, r.up_mbps,
        r.server, r.note, {walk_fields},
        CASE WHEN r.rssi IS NOT NULL AND b.rssi IS NOT NULL
@@ -55,49 +57,35 @@ JOIN rooms m ON m.id = s.room_id
 JOIN locations l ON l.id = m.location_id
 LEFT JOIN benchmarks b ON b.location_id = l.id
 {ssid_join}
+{ap_join}
 {walk_join}
 ORDER BY r.id DESC
 """
 
-_DB_QUERY = _DB_QUERY_TEMPLATE.format(
-    ssid_field="n.name AS ssid",
-    ssid_join="LEFT JOIN ssids n ON n.id = r.ssid_id",
-    walk_fields=(
-        "r.walk_id, w.name AS walk_name, "
-        "w.started_at AS walk_started_at, w.ended_at AS walk_ended_at"
-    ),
-    walk_join="LEFT JOIN walks w ON w.id = r.walk_id",
-)
-
-_LEGACY_DB_QUERY = _DB_QUERY_TEMPLATE.format(
-    ssid_field="n.name AS ssid",
-    ssid_join="LEFT JOIN ssids n ON n.id = r.ssid_id",
-    walk_fields=(
-        "NULL AS walk_id, NULL AS walk_name, "
-        "NULL AS walk_started_at, NULL AS walk_ended_at"
-    ),
-    walk_join="",
-)
-
-_STRING_DB_QUERY = _DB_QUERY_TEMPLATE.format(
-    ssid_field="r.ssid",
-    ssid_join="",
-    walk_fields=(
-        "r.walk_id, w.name AS walk_name, "
-        "w.started_at AS walk_started_at, w.ended_at AS walk_ended_at"
-    ),
-    walk_join="LEFT JOIN walks w ON w.id = r.walk_id",
-)
-
-_STRING_LEGACY_DB_QUERY = _DB_QUERY_TEMPLATE.format(
-    ssid_field="r.ssid",
-    ssid_join="",
-    walk_fields=(
-        "NULL AS walk_id, NULL AS walk_name, "
-        "NULL AS walk_started_at, NULL AS walk_ended_at"
-    ),
-    walk_join="",
-)
+def _db_query(normalized: bool, has_walks: bool,
+              has_access_points: bool, reading_columns: set) -> str:
+    return _DB_QUERY_TEMPLATE.format(
+        ssid_field="n.name AS ssid" if normalized else "r.ssid",
+        ssid_join=("LEFT JOIN ssids n ON n.id = r.ssid_id"
+                   if normalized else ""),
+        ap_name_field=("a.name AS ap_name" if has_access_points
+                       else "NULL AS ap_name"),
+        ap_join=("LEFT JOIN access_points a ON a.bssid = r.bssid"
+                 if has_access_points else ""),
+        path_fields=", ".join(
+            ("r.%s" % field) if field in reading_columns
+            else "NULL AS %s" % field
+            for field in OPTIONAL_PATH_FIELDS),
+        walk_fields=(
+            "r.walk_id, w.name AS walk_name, "
+            "w.started_at AS walk_started_at, w.ended_at AS walk_ended_at"
+            if has_walks else
+            "NULL AS walk_id, NULL AS walk_name, "
+            "NULL AS walk_started_at, NULL AS walk_ended_at"
+        ),
+        walk_join=("LEFT JOIN walks w ON w.id = r.walk_id"
+                   if has_walks else ""),
+    )
 
 
 def _has_walk_schema(conn: sqlite3.Connection) -> bool:
@@ -119,6 +107,13 @@ def _has_normalized_ssid_schema(conn: sqlite3.Connection) -> bool:
     }
 
 
+def _has_access_point_schema(conn: sqlite3.Connection) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+        "AND name = 'access_points'"
+    ).fetchone() is not None
+
+
 def load_db(path: Union[str, Path]) -> Report:
     source = Path(path).expanduser()
     if not source.is_file():
@@ -130,11 +125,12 @@ def load_db(path: Union[str, Path]) -> Report:
         try:
             has_walks = _has_walk_schema(conn)
             normalized = _has_normalized_ssid_schema(conn)
-            if normalized:
-                query = _DB_QUERY if has_walks else _LEGACY_DB_QUERY
-            else:
-                query = (_STRING_DB_QUERY if has_walks
-                         else _STRING_LEGACY_DB_QUERY)
+            reading_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(readings)")
+            }
+            query = _db_query(
+                normalized, has_walks, _has_access_point_schema(conn),
+                reading_columns)
             rows = conn.execute(query).fetchall()
         finally:
             conn.close()

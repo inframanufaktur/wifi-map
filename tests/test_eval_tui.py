@@ -280,11 +280,17 @@ def test_enter_opens_spot_history_with_all_stored_reading_data():
     report = evaluation.Report(
         source="db/wifi-map.db",
         readings=(_reading(
-            1, bssid="aa:bb:cc", channel="36 (160MHz)", phy="802.11ac",
+            1, bssid="aa:bb:cc", ap_name="Kitchen mesh",
+            channel="36 (160MHz)", phy="802.11ac",
             tx_rate=650, server="nearby (42)", note="router-side",
             noise=-93, snr=33, down_mbps=210.5, up_mbps=36.2,
             delta_rssi=-12, delta_snr=-8,
-            delta_down_mbps=-69.5, delta_up_mbps=1.2),),
+            delta_down_mbps=-69.5, delta_up_mbps=1.2,
+            path_probe_count=60,
+            gateway_rtt_ms=3, gateway_p95_ms=6,
+            gateway_loss_pct=0, gateway_max_outage_ms=0,
+            internet_rtt_ms=18, internet_p95_ms=31,
+            internet_loss_pct=2, internet_max_outage_ms=1000),),
     )
     state = eval_tui.EvalState(report)
     state.press("enter")
@@ -297,13 +303,17 @@ def test_enter_opens_spot_history_with_all_stored_reading_data():
     assert state.screen == "detail"
     assert "Reading history" in output
     assert "home / kitchen / 0 / window" in output
-    assert "SSID home-net" in output and "BSSID aa:bb:cc" in output
+    assert "SSID home-net" in output
+    assert "AP Kitchen mesh · aa:bb:cc" in output
     assert "channel 36 (160MHz)" in output and "PHY 802.11ac" in output
     assert "tx 650" in output
     assert "noise -93" in output and "SNR 33" in output
     assert "ΔRSSI -12" in output and "ΔSNR -8" in output
     assert "ping 20.0" in output and "down 210.5" in output
     assert "up 36.2" in output and "server nearby (42)" in output
+    assert "path router: median 3 ms | p95 6 ms | loss 0%" in output
+    assert "path internet: median 18 ms | p95 31 ms | loss 2%" in output
+    assert output.count("60 probes") == 2
     assert "note: router-side" in output
 
 
@@ -328,14 +338,14 @@ def test_spot_history_contains_each_reading_newest_first():
         line.text for line in eval_tui.render(state, 140, 30))
     assert "2 readings" in output
     assert "channel 44" in output
-    assert "BSSID aa:02" in output
+    assert "AP aa:02" in output
 
     state.press("down")
     output = "\n".join(
         line.text for line in eval_tui.render(state, 140, 30))
     assert state.detail_index == 1
     assert "channel 36" in output
-    assert "BSSID aa:01" in output
+    assert "AP aa:01" in output
 
     state.press("esc")
     assert state.screen == "dashboard"
@@ -618,7 +628,7 @@ def test_comparison_detail_shows_all_metrics_both_histories_and_full_reading():
     assert "Before history — before mesh" in output
     assert "After history — after mesh" in output
     assert "channel 36" in output
-    assert "BSSID aa:02" in output
+    assert "AP aa:02" in output
     assert "baseline two" in output
 
     state.press("right")
@@ -626,7 +636,7 @@ def test_comparison_detail_shows_all_metrics_both_histories_and_full_reading():
         line.text for line in eval_tui.render(state, 140, 42))
     assert state.comparison_detail_side == "after"
     assert "channel 44" in output
-    assert "BSSID bb:01" in output
+    assert "AP bb:01" in output
     assert "mesh installed" in output
 
     state.press("esc")
@@ -766,7 +776,7 @@ def test_compact_comparison_detail_pages_make_all_content_reachable():
     history_output = "\n".join(histories)
     assert "Before history — before mesh" in history_output
     assert "After history — after mesh" in history_output
-    assert "BSSID aa:02" in history_output
+    assert "AP aa:02" in history_output
     assert any("section" in line and "Tab/Shift+Tab" in line
                for line in histories)
 

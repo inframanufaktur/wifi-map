@@ -13,6 +13,8 @@ from wifimap.evaluation_models import (
     MetricSpec,
     MetricSummary,
     OPTIONAL_WALK_FIELDS,
+    OPTIONAL_AP_FIELDS,
+    OPTIONAL_PATH_FIELDS,
     PlaceKey,
     REQUIRED_FIELDS,
     Reading,
@@ -395,7 +397,9 @@ def comparison_summary(rows: Sequence[ComparisonRow],
 
 
 __all__ = [
-    "REQUIRED_FIELDS", "OPTIONAL_WALK_FIELDS", "ReportError", "Reading",
+    "REQUIRED_FIELDS", "OPTIONAL_AP_FIELDS", "OPTIONAL_PATH_FIELDS",
+    "OPTIONAL_WALK_FIELDS",
+    "ReportError", "Reading",
     "Report", "ScopeOption", "MetricSpec", "METRICS", "COMPARISON_METRICS",
     "AnalysisRow", "MetricSummary", "WalkOption", "PlaceKey",
     "ComparisonRow", "ComparisonSummary", "load_csv", "load_db",

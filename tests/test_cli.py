@@ -123,6 +123,7 @@ def test_scan_insert_path(monkeypatch, tmp_path, capsys):
         assert rows[0]["room_name"] == "kitchen"
         assert rows[0]["spot_name"] == "window"
         assert rows[0]["ssid"] == "home-net"
+        assert rows[0]["bssid"] == "aa:bb"
         assert rows[0]["ssid_id"] is not None
         assert rows[0]["rssi"] == -55
     finally:
@@ -337,7 +338,16 @@ def test_export_csv_content(monkeypatch, tmp_path, capsys):
     conn = store_mod.get_db(db)
     try:
         _seed_3level(conn, loc="kitchen", room="r", spot="s",
-                     rssi=-55, ssid="home")
+                     rssi=-55, ssid="home",
+                     bssid="aa:bb:cc:dd:ee:ff",
+                     path_probe_count=60,
+                     gateway_rtt_ms=3.0, gateway_p95_ms=6.0,
+                     gateway_loss_pct=0.0,
+                     internet_rtt_ms=18.0, internet_p95_ms=31.0,
+                     internet_loss_pct=2.0,
+                     internet_max_outage_ms=1000)
+        store_mod.set_access_point_name(
+            conn, "aa:bb:cc:dd:ee:ff", "Kitchen mesh")
     finally:
         conn.close()
     csv_path = str(tmp_path / "out.csv")
@@ -349,6 +359,11 @@ def test_export_csv_content(monkeypatch, tmp_path, capsys):
     assert len(rows) == 1
     assert rows[0]["location_name"] == "kitchen"
     assert rows[0]["rssi"] == "-55"
+    assert rows[0]["bssid"] == "aa:bb:cc:dd:ee:ff"
+    assert rows[0]["ap_name"] == "Kitchen mesh"
+    assert rows[0]["path_probe_count"] == "60"
+    assert rows[0]["gateway_rtt_ms"] == "3.0"
+    assert rows[0]["internet_loss_pct"] == "2.0"
     assert "floor" in rows[0] and "outdoors" in rows[0]
 
 

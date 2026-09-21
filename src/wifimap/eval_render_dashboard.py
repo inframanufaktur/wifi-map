@@ -110,17 +110,42 @@ def _selected_line(row: evaluation.AnalysisRow, width: int) -> RenderLine:
 
 def _reading_detail_lines(reading: evaluation.Reading,
                           width: int) -> List[RenderLine]:
-    return [
+    network = "network: SSID %s" % (reading.ssid or "Unknown")
+    if reading.bssid:
+        access_point = reading.bssid
+        if reading.ap_name:
+            access_point = "%s · %s" % (reading.ap_name, reading.bssid)
+        network += " | AP %s" % access_point
+    lines = [
         _line("reading: %s | id %s" % (
             reading.ts, reading.id if reading.id is not None else "-"),
             width, "muted"),
-        _line("network: SSID %s | BSSID %s" % (
-            reading.ssid or "Unknown", reading.bssid or "-"),
-            width, "muted"),
+        _line(network, width, "muted"),
         _line("radio: channel %s | PHY %s | tx %s Mbps" % (
             reading.channel or "-", reading.phy or "-",
             _fmt(reading.tx_rate, 0)),
             width, "muted"),
+    ]
+    if reading.path_probe_count is not None:
+        lines.extend([
+            _line("path router: median %s ms | p95 %s ms | loss %s%% | "
+                  "max outage %s ms | %s probes" % (
+                      _fmt(reading.gateway_rtt_ms, 0),
+                      _fmt(reading.gateway_p95_ms, 0),
+                      _fmt(reading.gateway_loss_pct, 0),
+                      _fmt(reading.gateway_max_outage_ms, 0),
+                      reading.path_probe_count),
+                  width, "muted"),
+            _line("path internet: median %s ms | p95 %s ms | loss %s%% | "
+                  "max outage %s ms | %s probes" % (
+                      _fmt(reading.internet_rtt_ms, 0),
+                      _fmt(reading.internet_p95_ms, 0),
+                      _fmt(reading.internet_loss_pct, 0),
+                      _fmt(reading.internet_max_outage_ms, 0),
+                      reading.path_probe_count),
+                  width, "muted"),
+        ])
+    lines.extend([
         _line("signal: RSSI %s dBm | noise %s dBm | SNR %s dB | "
               "ΔRSSI %s dB | ΔSNR %s dB" % (
                   _fmt(reading.rssi, 0), _fmt(reading.noise, 0),
@@ -135,7 +160,8 @@ def _reading_detail_lines(reading: evaluation.Reading,
                   _fmt(reading.delta_up_mbps, 1), reading.server or "-"),
               width, "muted"),
         _line("note: %s" % (reading.note or "-"), width, "muted"),
-    ]
+    ])
+    return lines
 
 
 def _comparison_place(place: evaluation.PlaceKey,
@@ -334,11 +360,19 @@ def _render_dashboard(state: EvalState, width: int,
 
 
 def _history_row(reading: evaluation.Reading) -> str:
-    return ("%s | channel %s | BSSID %s | RSSI %s | SNR %s | down %s" % (
-        reading.ts, reading.channel or "-", reading.bssid or "-",
-        _fmt(reading.rssi, 0), _fmt(reading.snr, 0),
-        _fmt(reading.down_mbps, 1),
+    fields = [reading.ts]
+    if reading.bssid:
+        access_point = reading.bssid
+        if reading.ap_name:
+            access_point = "%s · %s" % (reading.ap_name, reading.bssid)
+        fields.append("AP %s" % access_point)
+    fields.extend((
+        "channel %s" % (reading.channel or "-"),
+        "RSSI %s" % _fmt(reading.rssi, 0),
+        "SNR %s" % _fmt(reading.snr, 0),
+        "down %s" % _fmt(reading.down_mbps, 1),
     ))
+    return " | ".join(fields)
 
 
 def _render_detail(state: EvalState, width: int,

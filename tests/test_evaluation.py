@@ -79,6 +79,35 @@ def test_load_csv_parses_optional_walk_metadata(tmp_path):
     assert reading.walk_ended_at == "2026-09-21T09:30:00+00:00"
 
 
+def test_load_csv_parses_optional_access_point_name(tmp_path):
+    path = tmp_path / "named-ap.csv"
+    fields = evaluation.REQUIRED_FIELDS + evaluation.OPTIONAL_AP_FIELDS
+    _write_csv(path, [_csv_row(
+        bssid="60:8d:26:8d:cf:3d", ap_name="Office mesh")], fields=fields)
+
+    reading = evaluation.load_csv(path).readings[0]
+
+    assert reading.bssid == "60:8d:26:8d:cf:3d"
+    assert reading.ap_name == "Office mesh"
+
+
+def test_load_csv_parses_optional_path_quality(tmp_path):
+    path = tmp_path / "path-quality.csv"
+    fields = evaluation.REQUIRED_FIELDS + evaluation.OPTIONAL_PATH_FIELDS
+    _write_csv(path, [_csv_row(
+        path_probe_count=60, gateway_rtt_ms=3, gateway_p95_ms=6,
+        gateway_loss_pct=0, gateway_max_outage_ms=0,
+        internet_rtt_ms=18, internet_p95_ms=31,
+        internet_loss_pct=2, internet_max_outage_ms=1000,
+    )], fields=fields)
+
+    reading = evaluation.load_csv(path).readings[0]
+
+    assert reading.path_probe_count == 60
+    assert reading.gateway_rtt_ms == 3.0
+    assert reading.internet_loss_pct == 2.0
+
+
 def test_load_csv_requires_all_delta_columns(tmp_path):
     path = tmp_path / "old.csv"
     fields = [f for f in evaluation.REQUIRED_FIELDS if f != "delta_rssi"]
@@ -124,9 +153,17 @@ def test_load_db_reads_joined_rows_and_benchmark_deltas(tmp_path):
         down_mbps=280.0, up_mbps=35.0,
     )
     store.add_reading(
-        conn, spot_id, ssid="home-net", rssi=-61, noise=-92, snr=31,
+        conn, spot_id, ssid="home-net", bssid="60:8d:26:8d:cf:3d",
+        rssi=-61, noise=-92, snr=31,
         ping_ms=18.5, down_mbps=220.4, up_mbps=35.2,
+        path_probe_count=60,
+        gateway_rtt_ms=3, gateway_p95_ms=6, gateway_loss_pct=0,
+        gateway_max_outage_ms=0,
+        internet_rtt_ms=18, internet_p95_ms=31, internet_loss_pct=2,
+        internet_max_outage_ms=1000,
     )
+    store.set_access_point_name(
+        conn, "60:8d:26:8d:cf:3d", "Office mesh")
     conn.close()
 
     report = evaluation.load_db(path)
@@ -137,6 +174,10 @@ def test_load_db_reads_joined_rows_and_benchmark_deltas(tmp_path):
     assert reading.delta_rssi == -11.0
     assert reading.delta_down_mbps == -59.6
     assert reading.walk_id is None
+    assert reading.ap_name == "Office mesh"
+    assert reading.path_probe_count == 60
+    assert reading.gateway_rtt_ms == 3.0
+    assert reading.internet_loss_pct == 2.0
 
 
 def test_load_db_reads_walk_metadata_when_schema_is_available(tmp_path):

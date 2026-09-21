@@ -118,9 +118,14 @@ def list_readings(
         raise ValueError("limit must be >= 0")
     query = (
         "SELECT r.id, r.ts, r.spot_id, r.ssid_id, n.name AS ssid, "
-        "r.bssid, r.rssi,"
+        "r.bssid, a.name AS ap_name, r.rssi,"
         " r.noise, r.snr, r.channel, r.phy, r.tx_rate,"
         " r.ping_ms, r.down_mbps, r.up_mbps, r.server, r.note,"
+        " r.path_probe_count,"
+        " r.gateway_rtt_ms, r.gateway_p95_ms, r.gateway_loss_pct,"
+        " r.gateway_max_outage_ms,"
+        " r.internet_rtt_ms, r.internet_p95_ms, r.internet_loss_pct,"
+        " r.internet_max_outage_ms,"
         " r.walk_id, w.name AS walk_name,"
         " w.started_at AS walk_started_at, w.ended_at AS walk_ended_at,"
         " s.name AS spot_name, s.room_id AS room_id,"
@@ -131,6 +136,7 @@ def list_readings(
         " JOIN rooms m ON s.room_id = m.id"
         " JOIN locations l ON m.location_id = l.id"
         " LEFT JOIN ssids n ON r.ssid_id = n.id"
+        " LEFT JOIN access_points a ON a.bssid = r.bssid"
         " LEFT JOIN walks w ON r.walk_id = w.id"
     )
     clauses = []

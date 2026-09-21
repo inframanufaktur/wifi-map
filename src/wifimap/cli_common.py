@@ -18,7 +18,9 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_DB = str(_PROJECT_ROOT / "db" / "wifi-map.db")
 
 _EXPORT_FIELDS = list(
-    evaluation_mod.REQUIRED_FIELDS + evaluation_mod.OPTIONAL_WALK_FIELDS)
+    evaluation_mod.REQUIRED_FIELDS + evaluation_mod.OPTIONAL_AP_FIELDS
+    + evaluation_mod.OPTIONAL_PATH_FIELDS
+    + evaluation_mod.OPTIONAL_WALK_FIELDS)
 
 _DELTA_SPECS = (
     ("rssi", "delta_rssi", round),
