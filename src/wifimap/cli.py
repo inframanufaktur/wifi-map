@@ -84,6 +84,12 @@ def _build_parser() -> argparse.ArgumentParser:
     w.add_argument("--location", default=None, help="Preset ID|NAME")
     w.add_argument("--ssid", default=None,
                    help="Session SSID override (manual)")
+    w.add_argument(
+        "--name", default=None,
+        help="Name this saved walk (defaults to its start timestamp)")
+    w.add_argument(
+        "--compare-to", default=None, metavar="WALK",
+        help="Compare live measurements with a prior walk ID or name")
 
     ev = sub.add_parser(
         "eval", help="Evaluate saved readings in a terminal UI.")
@@ -252,11 +258,25 @@ def _cmd_walk(db_path: str, args: argparse.Namespace) -> int:
         if not ssid:
             print("Error: --ssid must not be blank", file=sys.stderr)
             return EXIT_STORAGE
+    walk_name = getattr(args, "name", None)
+    if walk_name is not None:
+        walk_name = walk_name.strip()
+        if not walk_name:
+            print("Error: --name must not be blank", file=sys.stderr)
+            return EXIT_STORAGE
+    compare_to = getattr(args, "compare_to", None)
+    if compare_to is not None:
+        compare_to = compare_to.strip()
+        if not compare_to:
+            print("Error: --compare-to must not be blank", file=sys.stderr)
+            return EXIT_STORAGE
     return tui_mod.run_walk(
         db_path, interval=args.interval,
         location_preset=args.location,
         no_speedtest=args.no_speedtest,
         ssid=ssid,
+        walk_name=walk_name,
+        compare_to=compare_to,
     )
 
 

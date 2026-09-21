@@ -13,6 +13,7 @@ import math
 import os
 import shutil
 import sqlite3
+import statistics
 import sys
 import threading
 import time
@@ -35,6 +36,8 @@ KEY_BENCHMARK = "b"
 KEY_SWITCH = "l"
 KEY_NEW = "n"
 KEY_FLOOR = "f"
+KEY_COMPARE = "c"
+KEY_SPEED_PROBE = "t"
 KEY_QUIT = "q"
 KEY_QUIT_UPPER = "Q"
 KEY_CREATE = "+"
@@ -49,6 +52,8 @@ POLL_TIMEOUT_MIN_MS = 50
 PICKER_TIMEOUT_RESTORE_MS = 1000
 FALLBACK_SETTLE_SLEEP = 0.1
 DB_OPEN_FAIL_SLEEP = 2.0
+# Signal averaging (5s) + Ookla's 120s timeout + shutdown overhead.
+WORKER_DRAIN_TIMEOUT = 130.0
 
 
 def _poll_timeout_ms(interval: float) -> int:
@@ -385,6 +390,47 @@ class SnapshotResult:
     snr: Optional[int] = None
 
 
+@dataclass(frozen=True)
+class SpotBaseline:
+    """Median values for one spot within the selected baseline walk."""
+
+    spot_id: int
+    rssi: Optional[float] = None
+    noise: Optional[float] = None
+    snr: Optional[float] = None
+    tx_rate: Optional[float] = None
+    ping_ms: Optional[float] = None
+    down_mbps: Optional[float] = None
+    up_mbps: Optional[float] = None
+    ssid: Optional[str] = None
+    bssid: Optional[str] = None
+    channel: Optional[str] = None
+    server: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class MetricComparison:
+    """Current, baseline and arithmetic delta for one metric."""
+
+    current: Optional[float]
+    baseline: Optional[float]
+    delta: Optional[float]
+
+
+@dataclass(frozen=True)
+class SpeedProbeResult:
+    """Transient speedtest result; never persisted as a reading."""
+
+    ok: bool
+    spot_id: int
+    generation: int
+    ping_ms: Optional[float] = None
+    down_mbps: Optional[float] = None
+    up_mbps: Optional[float] = None
+    server: Optional[str] = None
+    message: str = ""
+
+
 def _sample_guarded() -> Tuple[Optional[signal_mod.Signal], str]:
     """sample_signal with attempt_read-style guards; (sig, error_msg).
 
@@ -406,6 +452,7 @@ def finish_snapshot(
     ssid_override: Optional[str] = None,
     run_speedtest_fn: Optional[Callable[[], speed_mod.Speed]] = None,
     no_speedtest: bool = False,
+    walk_id: Optional[int] = None,
 ) -> SnapshotResult:
     """Sample signal, run speedtest (unless skipped), insert reading.
 
@@ -456,6 +503,7 @@ def finish_snapshot(
                 ping_ms=ping_ms, down_mbps=down,
                 up_mbps=up,
                 server=server,
+                walk_id=walk_id,
             )
         except (sqlite3.Error, OSError, ValueError) as exc:
             return SnapshotResult(ok=False, message="DB error: %s" % (exc,))
@@ -478,6 +526,7 @@ def start_snapshot_thread(
     ssid_override: Optional[str] = None,
     on_done: Optional[Callable[[SnapshotResult], None]] = None,
     run_speedtest_fn: Optional[Callable[[], speed_mod.Speed]] = None,
+    walk_id: Optional[int] = None,
 ) -> "threading.Thread":
     """Spawn daemon thread: sample signal + insert on its own connection.
 
@@ -491,6 +540,7 @@ def start_snapshot_thread(
             ssid_override=ssid_override,
             run_speedtest_fn=run_speedtest_fn,
             no_speedtest=no_speedtest,
+            walk_id=walk_id,
         )
         if on_done is not None:
             on_done(res)
@@ -590,11 +640,15 @@ class WalkState:
     def __init__(self, db_path: str, no_speedtest: bool = False,
                  ssid_override: Optional[str] = None,
                  history_max: int = 60,
-                 traffic_fn: Optional[Callable[[], traffic_mod.Rates]] = None) -> None:
+                 traffic_fn: Optional[Callable[[], traffic_mod.Rates]] = None,
+                 current_walk_id: Optional[int] = None,
+                 comparison_window: int = 5) -> None:
         self.db_path = db_path
         self.no_speedtest = no_speedtest
+        self.current_walk_id = current_walk_id
         self.ssid_override = (ssid_override.strip() or None) if ssid_override is not None else None
         self.history_max = max(1, history_max)
+        self.comparison_window = max(1, comparison_window)
         self.hist_rssi: SparkHistory = SparkHistory(maxlen=self.history_max)
         self.hist_noise: SparkHistory = SparkHistory(maxlen=self.history_max)
         self.hist_snr: SparkHistory = SparkHistory(maxlen=self.history_max)
@@ -606,6 +660,17 @@ class WalkState:
             None if traffic_fn is not None else traffic_mod.TrafficSampler())
         self.active_location_id: Optional[int] = None
         self.active_spot_id: Optional[int] = None
+        self.baseline_walk_id: Optional[int] = None
+        self.baseline_walk_name: Optional[str] = None
+        self._baseline_by_spot: Dict[int, SpotBaseline] = {}
+        self._comparison_generation = 0
+        self._comparison_signal: Dict[str, deque] = {
+            key: deque(maxlen=self.comparison_window)
+            for key in ("rssi", "noise", "snr", "tx_rate")
+        }
+        self._speed_probe: Optional[SpeedProbeResult] = None
+        self._speed_probe_running = False
+        self._workers: List[object] = []
         self.sig: signal_mod.Signal = signal_mod.Signal()
         self.no_wifi: bool = False
         self.no_wifi_msg: str = ""
@@ -628,7 +693,188 @@ class WalkState:
 
     @active_id.setter
     def active_id(self, value: Optional[int]) -> None:
-        self.active_spot_id = value
+        self.set_active_spot(value)
+
+    def set_active_spot(self, spot_id: Optional[int]) -> None:
+        """Change snapshot target and reset spot-specific live comparison."""
+        with self._lock:
+            if spot_id == self.active_spot_id:
+                return
+            self.active_spot_id = spot_id
+            self._comparison_generation += 1
+            for values in self._comparison_signal.values():
+                values.clear()
+            self._speed_probe = None
+            if self.pending:
+                self.toast = ""
+            self.last_result = ""
+
+    @staticmethod
+    def _median(values) -> Optional[float]:
+        numeric = []
+        for value in values:
+            if value is None or isinstance(value, bool):
+                continue
+            try:
+                numeric.append(float(value))
+            except (TypeError, ValueError):
+                continue
+        return (float(statistics.median(numeric)) if numeric else None)
+
+    def select_baseline_walk(
+        self,
+        conn: sqlite3.Connection,
+        id_or_name: Union[int, str],
+    ) -> int:
+        """Select and cache a prior walk in the active location.
+
+        A duplicate name is rejected in favour of an explicit id. All
+        readings are loaded once and reduced to per-spot medians so the live
+        poll loop never queries SQLite.
+        """
+        location_id = self.active_location_id
+        if location_id is None and self.current_walk_id is not None:
+            current = store_mod.get_walk(conn, self.current_walk_id)
+            if current is not None:
+                location_id = current.location_id
+                self.active_location_id = location_id
+        if location_id is None:
+            raise ValueError("comparison requires an active location")
+
+        all_walks = store_mod.list_walks(conn, location_id=location_id)
+        nonempty = _nonempty_walk_ids(conn)
+        walks = [walk for walk in all_walks if walk.id in nonempty]
+        selected = None
+        if isinstance(id_or_name, bool):
+            raise ValueError("invalid baseline walk: %r" % (id_or_name,))
+        if isinstance(id_or_name, int):
+            selected = next((walk for walk in walks
+                             if walk.id == id_or_name), None)
+        else:
+            label = str(id_or_name).strip()
+            try:
+                walk_id = int(label)
+            except ValueError:
+                walk_id = None
+            if walk_id is not None:
+                selected = next((walk for walk in walks
+                                 if walk.id == walk_id), None)
+            if selected is None:
+                named = [walk for walk in walks if walk.name == label]
+                if len(named) > 1:
+                    ids = ", ".join(str(walk.id) for walk in named)
+                    raise ValueError(
+                        "ambiguous baseline walk name %r; use IDs: %s"
+                        % (label, ids))
+                selected = named[0] if named else None
+        if selected is None:
+            known_empty = None
+            if isinstance(id_or_name, int):
+                known_empty = next((walk for walk in all_walks
+                                    if walk.id == id_or_name), None)
+            else:
+                requested = str(id_or_name).strip()
+                known_empty = next((walk for walk in all_walks if (
+                    str(walk.id) == requested or walk.name == requested)),
+                    None)
+            if known_empty is not None and known_empty.id not in nonempty:
+                raise ValueError("baseline walk has no readings: #%d" % (
+                    known_empty.id,))
+            raise ValueError("unknown baseline walk: %r" % (id_or_name,))
+        if selected.id == self.current_walk_id:
+            raise ValueError("current walk cannot be its own baseline")
+
+        rows = store_mod.list_readings(
+            conn, walk_id=selected.id, limit=1_000_000)
+        grouped: Dict[int, List[dict]] = {}
+        for row in rows:
+            grouped.setdefault(int(row["spot_id"]), []).append(row)
+
+        cache = {}
+        numeric_keys = (
+            "rssi", "noise", "snr", "tx_rate", "ping_ms",
+            "down_mbps", "up_mbps",
+        )
+        for spot_id, spot_rows in grouped.items():
+            newest = spot_rows[0]
+            numeric = {
+                key: self._median(row.get(key) for row in spot_rows)
+                for key in numeric_keys
+            }
+            cache[spot_id] = SpotBaseline(
+                spot_id=spot_id,
+                ssid=newest.get("ssid"), bssid=newest.get("bssid"),
+                channel=newest.get("channel"), server=newest.get("server"),
+                **numeric,
+            )
+        with self._lock:
+            self.baseline_walk_id = selected.id
+            self.baseline_walk_name = selected.name
+            self._baseline_by_spot = cache
+            self._comparison_generation += 1
+            self._speed_probe = None
+        return selected.id
+
+    def clear_baseline_walk(self) -> None:
+        with self._lock:
+            self.baseline_walk_id = None
+            self.baseline_walk_name = None
+            self._baseline_by_spot = {}
+            self._comparison_generation += 1
+            self._speed_probe = None
+
+    def baseline_for_active_spot(self) -> Optional[SpotBaseline]:
+        with self._lock:
+            return self._baseline_by_spot.get(self.active_spot_id)
+
+    def speed_probe_for_active_spot(self) -> Optional[SpeedProbeResult]:
+        with self._lock:
+            probe = self._speed_probe
+            if probe is None or probe.spot_id != self.active_spot_id:
+                return None
+            return probe
+
+    def wait_for_workers(self, timeout: float = WORKER_DRAIN_TIMEOUT) -> bool:
+        """Drain tracked snapshot/probe workers within one total deadline."""
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self._lock:
+            workers = tuple(self._workers)
+        for worker in workers:
+            remaining = max(0.0, deadline - time.monotonic())
+            try:
+                worker.join(timeout=remaining)  # type: ignore[attr-defined]
+            except Exception:
+                return False
+            try:
+                if worker.is_alive():  # type: ignore[attr-defined]
+                    return False
+            except AttributeError:
+                pass
+        return True
+
+    def active_comparison(self) -> Dict[str, MetricComparison]:
+        """Return live/probe values compared with the active spot baseline."""
+        with self._lock:
+            baseline = self._baseline_by_spot.get(self.active_spot_id)
+            current = {
+                key: self._median(values)
+                for key, values in self._comparison_signal.items()
+            }
+            probe = self._speed_probe
+            if probe is None or probe.spot_id != self.active_spot_id:
+                probe = None
+            current.update({
+                "ping_ms": probe.ping_ms if probe else None,
+                "down_mbps": probe.down_mbps if probe else None,
+                "up_mbps": probe.up_mbps if probe else None,
+            })
+        out = {}
+        for key, value in current.items():
+            before = getattr(baseline, key) if baseline is not None else None
+            delta = (value - before
+                     if value is not None and before is not None else None)
+            out[key] = MetricComparison(value, before, delta)
+        return out
 
     def ensure_addrs(
         self,
@@ -736,6 +982,11 @@ class WalkState:
         self.hist_rssi.append(self.sig.rssi)
         self.hist_noise.append(self.sig.noise)
         self.hist_snr.append(self.sig.snr)
+        with self._lock:
+            self._comparison_signal["rssi"].append(self.sig.rssi)
+            self._comparison_signal["noise"].append(self.sig.noise)
+            self._comparison_signal["snr"].append(self.sig.snr)
+            self._comparison_signal["tx_rate"].append(self.sig.tx_rate)
         rates: traffic_mod.Rates = None
         try:
             if self._traffic_fn is not None:
@@ -747,6 +998,67 @@ class WalkState:
         self.last_rates = rates
         self.hist_down.append(rates[0] if rates else None)
         self.hist_up.append(rates[1] if rates else None)
+
+    def try_speed_probe(
+        self,
+        run_speedtest_fn: Optional[Callable[[], speed_mod.Speed]] = None,
+    ) -> Optional["threading.Thread"]:
+        """Run an asynchronous transient speedtest without storing a row."""
+        with self._lock:
+            if self.no_wifi:
+                self.toast = "NO-WIFI: `t` blocked (WiFi off/not associated)"
+                return None
+            if self.active_spot_id is None:
+                self.toast = "no active spot: press `l` to pick one"
+                return None
+            if self.no_speedtest:
+                self.toast = "throughput probe disabled by --no-speedtest"
+                return None
+            if self._speed_probe_running or self.pending:
+                self.toast = "another measurement is already running"
+                return None
+            spot_id = self.active_spot_id
+            generation = self._comparison_generation
+            self._speed_probe_running = True
+            self.pending += 1
+            self.toast = "throughput probe running; stay at this spot"
+        fn = run_speedtest_fn or speed_mod.run_speedtest
+
+        def _work() -> None:
+            try:
+                speed = fn()
+                result = SpeedProbeResult(
+                    ok=True, spot_id=spot_id, generation=generation,
+                    ping_ms=speed.ping_ms, down_mbps=speed.down_mbps,
+                    up_mbps=speed.up_mbps, server=speed.server,
+                    message="probe down %s up %s Mbps" % (
+                        fmt_mbps(speed.down_mbps), fmt_mbps(speed.up_mbps)),
+                )
+            except speed_mod.SpeedtestUnavailableError as exc:
+                result = SpeedProbeResult(
+                    ok=False, spot_id=spot_id, generation=generation,
+                    message="throughput probe unavailable: %s" % exc)
+            except speed_mod.SpeedtestFailedError as exc:
+                result = SpeedProbeResult(
+                    ok=False, spot_id=spot_id, generation=generation,
+                    message="throughput probe failed: %s" % exc)
+            except Exception as exc:  # noqa: BLE001 - TUI worker survives
+                result = SpeedProbeResult(
+                    ok=False, spot_id=spot_id, generation=generation,
+                    message="throughput probe failed: %s" % exc)
+            with self._lock:
+                self._speed_probe_running = False
+                self.pending = max(0, self.pending - 1)
+                if (result.generation == self._comparison_generation
+                        and result.spot_id == self.active_spot_id):
+                    self._speed_probe = result if result.ok else None
+                    self.toast = result.message
+
+        thread = threading.Thread(target=_work, daemon=True)
+        thread.start()
+        with self._lock:
+            self._workers.append(thread)
+        return thread
 
     def try_snapshot(
         self,
@@ -764,14 +1076,35 @@ class WalkState:
             self.set_toast("no active spot: press `l` to pick one")
             return None
         with self._lock:
+            if self.pending or self._speed_probe_running:
+                self.toast = "another measurement is already running"
+                return None
             self.pending += 1
+            generation = self._comparison_generation
         loc_id = self.active_spot_id
         result_box: List[SnapshotResult] = []
 
         def _cb(res: SnapshotResult) -> None:
             result_box.append(res)
-            self.on_snapshot_done(res)
+            with self._lock:
+                self.pending = max(0, self.pending - 1)
+                if (generation != self._comparison_generation
+                        or loc_id != self.active_spot_id):
+                    return
+                self.toast = (res.message if res.message else (
+                    "saved #%s" % res.reading_id))
+                self.last_result = self.toast
             if res.ok:
+                with self._lock:
+                    if (generation == self._comparison_generation
+                            and loc_id == self.active_spot_id
+                            and any(value is not None for value in (
+                                res.ping_ms, res.down_mbps, res.up_mbps))):
+                        self._speed_probe = SpeedProbeResult(
+                            ok=True, spot_id=loc_id,
+                            generation=generation, ping_ms=res.ping_ms,
+                            down_mbps=res.down_mbps, up_mbps=res.up_mbps,
+                            message=res.message)
                 try:
                     cur = {"rssi": res.rssi,
                            "snr": res.snr,
@@ -782,10 +1115,12 @@ class WalkState:
                     delta = store_mod.format_benchmark_delta(cur, bench)
                     if delta:
                         with self._lock:
-                            self.toast = "%s vs bench (%s)" % (
-                                self.toast, delta)
-                            self.last_result = "%s vs bench (%s)" % (
-                                self.last_result, delta)
+                            if (generation == self._comparison_generation
+                                    and loc_id == self.active_spot_id):
+                                self.toast = "%s vs bench (%s)" % (
+                                    self.toast, delta)
+                                self.last_result = "%s vs bench (%s)" % (
+                                    self.last_result, delta)
                 except Exception:  # noqa: BLE001 - delta is best-effort
                     pass
 
@@ -796,7 +1131,10 @@ class WalkState:
             ssid_override=self.ssid_override,
             on_done=_cb,
             run_speedtest_fn=run_speedtest_fn,
+            walk_id=self.current_walk_id,
         )
+        with self._lock:
+            self._workers.append(t)
         return t
 
     def set_floor(self, conn: sqlite3.Connection, floor: int) -> str:
@@ -828,6 +1166,121 @@ def _active_room_id(conn: sqlite3.Connection,
     except (sqlite3.Error, OSError):
         return None
     return spot.room_id if spot is not None else None
+
+
+_COMPARE_ROWS = (
+    ("RSSI", "rssi", "dBm", 0),
+    ("noise", "noise", "dBm", 0),
+    ("SNR", "snr", "dB", 0),
+    ("TX rate", "tx_rate", "Mbps", 0),
+    ("ping", "ping_ms", "ms", 1),
+    ("down", "down_mbps", "Mbps", 1),
+    ("up", "up_mbps", "Mbps", 1),
+)
+
+
+def _compare_number(value: Optional[float], decimals: int,
+                    signed: bool = False) -> str:
+    if value is None:
+        return "-"
+    if decimals == 0:
+        return (("%+d" if signed else "%d") % int(round(value)))
+    return (("%+.*f" if signed else "%.*f") % (decimals, value))
+
+
+def comparison_lines(state: "WalkState") -> List[str]:
+    """Compact current/baseline/delta table for curses and fallback."""
+    if state.baseline_walk_id is None:
+        return []
+    label = state.baseline_walk_name or str(state.baseline_walk_id)
+    lines = [
+        "compare: current walk #%s vs #%s %s" % (
+            state.current_walk_id if state.current_walk_id is not None else "-",
+            state.baseline_walk_id, label),
+        "metric       current       before       change",
+    ]
+    comparison = state.active_comparison()
+    for metric_label, key, unit, decimals in _COMPARE_ROWS:
+        item = comparison[key]
+        current = _compare_number(item.current, decimals)
+        before = _compare_number(item.baseline, decimals)
+        delta = _compare_number(item.delta, decimals, signed=True)
+        lines.append("%-7s %9s %-5s %9s %-5s %9s" % (
+            metric_label, current, unit, before, unit, delta))
+    if state.active_spot_id is not None and state.baseline_for_active_spot() is None:
+        lines.append("baseline: this spot was not measured")
+    return lines
+
+
+def _nonempty_walk_ids(conn: sqlite3.Connection) -> set:
+    rows = conn.execute(
+        "SELECT DISTINCT walk_id FROM readings WHERE walk_id IS NOT NULL"
+    ).fetchall()
+    return {int(row[0]) for row in rows}
+
+
+def _baseline_walk_rows(
+    conn: sqlite3.Connection,
+    state: "WalkState",
+) -> List[Tuple[int, str]]:
+    """Prior-walk picker rows followed by an explicit Off choice."""
+    location_id = state.active_location_id
+    if location_id is None and state.current_walk_id is not None:
+        current = store_mod.get_walk(conn, state.current_walk_id)
+        location_id = current.location_id if current is not None else None
+    walks = (store_mod.list_walks(conn, location_id=location_id)
+             if location_id is not None else [])
+    nonempty = _nonempty_walk_ids(conn)
+    rows = [
+        (walk.id, "%s | %s | #%d" % (
+            walk.name, walk.started_at, walk.id))
+        for walk in walks
+        if walk.id != state.current_walk_id and walk.id in nonempty
+    ]
+    rows.append((0, "Off"))
+    return rows
+
+
+def _start_walk_session(
+    conn: sqlite3.Connection,
+    state: "WalkState",
+    walk_name: Optional[str],
+    compare_to: Optional[Union[int, str]],
+) -> None:
+    """Create this invocation's named walk and optionally cache a baseline."""
+    if state.active_location_id is None:
+        return
+    name = ((walk_name or "").strip()
+            or time.strftime("walk %Y-%m-%d %H:%M:%S"))
+    state.current_walk_id = store_mod.create_walk(
+        conn, state.active_location_id, name)
+    if compare_to is None:
+        return
+    target: Union[int, str] = compare_to
+    if str(compare_to).strip().lower() == "latest":
+        prior = [walk_id for walk_id, _label in _baseline_walk_rows(
+            conn, state) if walk_id != 0]
+        if not prior:
+            raise ValueError("no prior walk available for comparison")
+        target = prior[0]
+    state.select_baseline_walk(conn, target)
+
+
+def _finish_walk_session(conn: sqlite3.Connection,
+                         state: "WalkState",
+                         worker_timeout: float = WORKER_DRAIN_TIMEOUT) -> bool:
+    if state.current_walk_id is None:
+        return True
+    if not state.wait_for_workers(timeout=worker_timeout):
+        print("Warning: measurement workers still running; "
+              "walk left open", file=sys.stderr)
+        return False
+    try:
+        store_mod.finish_walk(conn, state.current_walk_id)
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        print("Warning: cannot finish walk: %s" % exc, file=sys.stderr)
+        return False
+    return True
 
 
 def _resolve_preset(conn: sqlite3.Connection, preset: Optional[str]) -> Optional[int]:
@@ -923,6 +1376,67 @@ def _list_picker_curses(stdscr: object, title: str,
         stdscr.timeout(poll_timeout_ms)  # type: ignore[attr-defined]
 
 
+def _baseline_picker_curses(
+    stdscr: object,
+    conn: sqlite3.Connection,
+    state: "WalkState",
+    poll_timeout_ms: int = PICKER_TIMEOUT_RESTORE_MS,
+) -> Optional[int]:
+    """Pick a prior walk or the explicit Off row; None means cancel."""
+    import curses
+
+    rows = _baseline_walk_rows(conn, state)
+    ids = [walk_id for walk_id, _label in rows]
+    active = (state.baseline_walk_id
+              if state.baseline_walk_id is not None else 0)
+    cursor = picker_start_cursor(ids, active)
+    stdscr.timeout(-1)  # type: ignore[attr-defined]
+    try:
+        while True:
+            h, w = stdscr.getmaxyx()  # type: ignore[attr-defined]
+            visible_count = max(1, h - 2)
+            start = max(0, min(
+                cursor - visible_count // 2,
+                max(0, len(rows) - visible_count)))
+            end = min(len(rows), start + visible_count)
+            lines = [
+                "Compare with prior walk (Enter select, q cancel) "
+                "[%d-%d/%d]:" % (start + 1, end, len(rows))
+            ]
+            for index in range(start, end):
+                walk_id, label = rows[index]
+                marker = ">" if index == cursor else " "
+                selected = "*" if walk_id == active else " "
+                lines.append("%s%s%d. %s" % (
+                    marker, selected, index + 1, label))
+            stdscr.clear()  # type: ignore[attr-defined]
+            for row, line in enumerate(lines[:h - 1]):
+                try:
+                    stdscr.addstr(
+                        row, 0, line[:w - 1])  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+            stdscr.refresh()  # type: ignore[attr-defined]
+            ch = stdscr.getch()  # type: ignore[attr-defined]
+            if ch == curses.KEY_UP:
+                cursor = (cursor - 1) % len(rows)
+            elif ch == curses.KEY_DOWN:
+                cursor = (cursor + 1) % len(rows)
+            elif ch in KEY_ENTER_CODES + (curses.KEY_ENTER,):
+                return rows[cursor][0]
+            elif ch in (KEY_ESC, ord("q"), ord("Q")):
+                return None
+            else:
+                try:
+                    digit = int(chr(ch))
+                except (ValueError, OverflowError):
+                    continue
+                if 1 <= digit <= len(rows):
+                    return rows[digit - 1][0]
+    finally:
+        stdscr.timeout(poll_timeout_ms)  # type: ignore[attr-defined]
+
+
 def _room_picker_curses(stdscr: object, conn: sqlite3.Connection,
                         location_id: int,
                         active_room: Optional[int],
@@ -988,7 +1502,7 @@ def _pick_room_spot_curses(
     if not isinstance(picked_spot, int):
         state.set_toast("spot pick cancelled")
         return False
-    state.active_spot_id = picked_spot
+    state.set_active_spot(picked_spot)
     return True
 
 
@@ -1095,7 +1609,9 @@ def _create_spot_curses(
 def _walk_curses(stdscr: object, db_path: str, interval: float,
                  location_preset: Optional[str],
                  no_speedtest: bool,
-                 ssid: Optional[str] = None) -> int:
+                 ssid: Optional[str] = None,
+                 walk_name: Optional[str] = None,
+                 compare_to: Optional[Union[int, str]] = None) -> int:
     import curses
 
     try:
@@ -1113,6 +1629,12 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                       ssid_override=ssid, history_max=cap)
     try:
         state.active_location_id = _resolve_preset(conn, location_preset)
+        if state.active_location_id is not None:
+            try:
+                _start_walk_session(
+                    conn, state, walk_name=walk_name, compare_to=compare_to)
+            except (sqlite3.Error, OSError, ValueError) as exc:
+                state.set_toast("walk comparison unavailable: %s" % exc)
         state.refresh_benchmark(conn)
         state.ensure_identity()
         state.ensure_addrs()
@@ -1204,8 +1726,8 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                         format_meter_left("RSSI", rssi_s, r_rate),
                         format_meter_left("SNR", snr_s, s_rate),
                         format_meter_left("noise", noise_s, None),
-                        format_meter_left("down", down_s, None),
-                        format_meter_left("up", up_s, None),
+                        "traffic down " + d_val_pad,
+                        "traffic up   " + u_val_pad,
                     ]
                     max_left, gw = meter_layout(w, lefts)
                     pads = [" " * (max_left - len(s)) for s in lefts]
@@ -1232,10 +1754,10 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                             state.sig.mcs, state.sig.band,
                             state.sig.security))
                         _emit("")
-                        _emit_segs([("down  ", 0), (d_val_pad, 0),
+                        _emit_segs([("traffic down ", 0), (d_val_pad, 0),
                                     (pads[3] + " | ", 0),
                                     (down_g, 0), (" [60s]", 0)])
-                        _emit_segs([("up    ", 0), (u_val_pad, 0),
+                        _emit_segs([("traffic up   ", 0), (u_val_pad, 0),
                                     (pads[4] + " | ", 0),
                                     (up_g, 0), (" [60s]", 0)])
                     else:
@@ -1253,9 +1775,9 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                             state.sig.mcs, state.sig.band,
                             state.sig.security))
                         _emit("")
-                        _emit_segs([("down  ", 0), (d_val_pad, 0),
+                        _emit_segs([("traffic down ", 0), (d_val_pad, 0),
                                     (pads[3], 0)])
-                        _emit_segs([("up    ", 0), (u_val_pad, 0),
+                        _emit_segs([("traffic up   ", 0), (u_val_pad, 0),
                                     (pads[4], 0)])
                 manual = " (manual)" if state.ssid_override else ""
                 _emit("")
@@ -1267,6 +1789,8 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                 _emit("")
                 _emit("loc: %s  pending: %d" % (
                     _location_label(conn, state.active_spot_id), pending))
+                for compare_line in comparison_lines(state):
+                    _emit(compare_line)
                 with state._lock:
                     _bench = state.benchmark
                     _last = state.last_result
@@ -1281,8 +1805,8 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                 if _last:
                     _emit("last: %s" % _last)
                 _emit("")
-                _emit("keys: s snapshot | b benchmark | l switch | n new | "
-                      "f floor | q quit")
+                _emit("keys: s snapshot | t throughput | c compare | "
+                      "b benchmark | l switch | n new | f floor | q quit")
                 if toast:
                     _emit("» %s" % toast)
                 stdscr.refresh()
@@ -1310,6 +1834,28 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                     state.set_toast("snapshot cancelled (no spot)")
                     continue
                 state.try_snapshot()
+            elif key == KEY_SPEED_PROBE:
+                state.try_speed_probe()
+            elif key == KEY_COMPARE:
+                try:
+                    target = _baseline_picker_curses(
+                        stdscr, conn, state, poll_timeout_ms)
+                except (sqlite3.Error, OSError, ValueError) as exc:
+                    state.set_toast("comparison unavailable: %s" % exc)
+                    continue
+                if target is None:
+                    continue
+                if target == 0:
+                    state.clear_baseline_walk()
+                    state.set_toast("walk comparison off")
+                else:
+                    try:
+                        state.select_baseline_walk(conn, target)
+                    except (sqlite3.Error, OSError, ValueError) as exc:
+                        state.set_toast("comparison unavailable: %s" % exc)
+                    else:
+                        state.set_toast("comparing with walk #%s" % (
+                            state.baseline_walk_id,))
             elif key == KEY_BENCHMARK:
                 if state.no_wifi:
                     state.set_toast(
@@ -1369,7 +1915,7 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                 spot_id = _create_spot_curses(
                     stdscr, conn, room_id, poll_timeout_ms)
                 if spot_id is not None:
-                    state.active_spot_id = spot_id
+                    state.set_active_spot(spot_id)
                     state.set_toast("active: %s" % _location_label(
                         conn, state.active_spot_id))
                 else:
@@ -1390,6 +1936,7 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
     except KeyboardInterrupt:
         return 0
     finally:
+        _finish_walk_session(conn, state)
         conn.close()
 
 
@@ -1397,10 +1944,39 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
 # Non-curses fallback (plain ANSI; blocking-input limit documented)
 # ---------------------------------------------------------------------------
 
+def _baseline_picker_fallback(
+    conn: sqlite3.Connection,
+    state: WalkState,
+) -> Optional[int]:
+    """Line-based prior-walk picker; None means cancel."""
+    rows = _baseline_walk_rows(conn, state)
+    active = (state.baseline_walk_id
+              if state.baseline_walk_id is not None else 0)
+    for index, (walk_id, label) in enumerate(rows):
+        marker = ">" if walk_id == active else " "
+        print("%s%d. %s" % (marker, index + 1, label))
+    try:
+        raw = input("compare walk [number, Enter=active, q cancel]: ").strip()
+    except (EOFError, OSError):
+        return None
+    if not raw:
+        return active
+    if raw.lower() in ("q", "quit"):
+        return None
+    try:
+        index = int(raw) - 1
+    except ValueError:
+        return None
+    if 0 <= index < len(rows):
+        return rows[index][0]
+    return None
+
 def _walk_fallback(db_path: str, interval: float,
                    location_preset: Optional[str],
                    no_speedtest: bool,
-                   ssid: Optional[str] = None) -> int:
+                   ssid: Optional[str] = None,
+                   walk_name: Optional[str] = None,
+                   compare_to: Optional[Union[int, str]] = None) -> int:
     """ANSI fallback when curses/tty unavailable.
 
     Limit: keys are line-buffered (type a key + Enter); no live refresh
@@ -1418,12 +1994,18 @@ def _walk_fallback(db_path: str, interval: float,
                       ssid_override=ssid, history_max=cap)
     try:
         state.active_location_id = _resolve_preset(conn, location_preset)
+        if state.active_location_id is not None:
+            try:
+                _start_walk_session(
+                    conn, state, walk_name=walk_name, compare_to=compare_to)
+            except (sqlite3.Error, OSError, ValueError) as exc:
+                state.set_toast("walk comparison unavailable: %s" % exc)
         state.refresh_benchmark(conn)
         state.ensure_identity()
         state.ensure_addrs()
         print("walk fallback (no curses): type a key + Enter", flush=True)
-        print("keys: s snapshot | b benchmark | l switch | n new | "
-              "f floor | q quit", flush=True)
+        print("keys: s snapshot | t throughput | c compare | b benchmark | "
+              "l switch | n new | f floor | q quit", flush=True)
         while True:
             state.poll()
             if state.no_wifi:
@@ -1507,9 +2089,9 @@ def _walk_fallback(db_path: str, interval: float,
                     state.sig.mcs, state.sig.band,
                     state.sig.security), flush=True)
                 print("", flush=True)
-                print("down  " + d_val_pad + " | " + down_g
+                print("traffic down " + d_val_pad + " | " + down_g
                       + " [60s]", flush=True)
-                print("up    " + u_val_pad + " | " + up_g
+                print("traffic up   " + u_val_pad + " | " + up_g
                       + " [60s]", flush=True)
             manual = " (manual)" if state.ssid_override else ""
             print("Net: %s%s" % (state.net_ssid or "unknown", manual), flush=True)
@@ -1520,6 +2102,8 @@ def _walk_fallback(db_path: str, interval: float,
             print("loc: %s pending: %d %s" % (
                 _location_label(conn, state.active_spot_id), pending,
                 ("» %s" % toast) if toast else ""))
+            for compare_line in comparison_lines(state):
+                print(compare_line, flush=True)
             with state._lock:
                 _bench = state.benchmark
                 _last = state.last_result
@@ -1554,6 +2138,28 @@ def _walk_fallback(db_path: str, interval: float,
                     continue  # picker toasted already ("cancelled", ...)
                 state.try_snapshot()
                 time.sleep(FALLBACK_SETTLE_SLEEP)  # fast mocks → toast order
+            elif key == KEY_SPEED_PROBE:
+                state.try_speed_probe()
+                time.sleep(FALLBACK_SETTLE_SLEEP)
+            elif key == KEY_COMPARE:
+                try:
+                    target = _baseline_picker_fallback(conn, state)
+                except (sqlite3.Error, OSError, ValueError) as exc:
+                    state.set_toast("comparison unavailable: %s" % exc)
+                    continue
+                if target is None:
+                    continue
+                if target == 0:
+                    state.clear_baseline_walk()
+                    state.set_toast("walk comparison off")
+                else:
+                    try:
+                        state.select_baseline_walk(conn, target)
+                    except (sqlite3.Error, OSError, ValueError) as exc:
+                        state.set_toast("comparison unavailable: %s" % exc)
+                    else:
+                        state.set_toast("comparing with walk #%s" % (
+                            state.baseline_walk_id,))
             elif key == KEY_BENCHMARK:
                 if state.no_wifi:
                     state.set_toast(
@@ -1600,6 +2206,7 @@ def _walk_fallback(db_path: str, interval: float,
     except KeyboardInterrupt:
         return 0
     finally:
+        _finish_walk_session(conn, state)
         conn.close()
 
 
@@ -1679,7 +2286,7 @@ def _fallback_pick(conn: sqlite3.Connection, state: WalkState) -> bool:
     if not isinstance(picked_spot, int):
         state.set_toast("cancelled")
         return False
-    state.active_spot_id = picked_spot
+    state.set_active_spot(picked_spot)
     return True
 
 
@@ -1745,7 +2352,7 @@ def _fallback_create(conn: sqlite3.Connection, state: WalkState) -> None:
         if not state.ui_snapshot()[0]:
             state.set_toast("cancelled/invalid")
         return
-    state.active_spot_id = spot_id
+    state.set_active_spot(spot_id)
 
 
 def _fallback_floor(conn: sqlite3.Connection, state: WalkState) -> None:
@@ -1765,7 +2372,9 @@ def _fallback_floor(conn: sqlite3.Connection, state: WalkState) -> None:
 def run_walk(db_path: str, interval: float = 1.0,
              location_preset: Optional[str] = None,
              no_speedtest: bool = False,
-             ssid: Optional[str] = None) -> int:
+             ssid: Optional[str] = None,
+             walk_name: Optional[str] = None,
+             compare_to: Optional[Union[int, str]] = None) -> int:
     """Run walk loop; curses when tty available else ANSI fallback."""
     if interval <= 0:
         print("Error: --interval must be > 0", file=sys.stderr)
@@ -1783,7 +2392,8 @@ def run_walk(db_path: str, interval: float = 1.0,
 
         def _main(stdscr: object) -> int:
             return _walk_curses(
-                stdscr, db_path, interval, location_preset, no_speedtest, ssid)
+                stdscr, db_path, interval, location_preset, no_speedtest,
+                ssid, walk_name, compare_to)
 
         try:
             return _c.wrapper(_main)
@@ -1792,12 +2402,17 @@ def run_walk(db_path: str, interval: float = 1.0,
         except Exception as exc:  # curses init failed → fallback
             print("curses unavailable (%s); using fallback" % (exc,),
                   file=sys.stderr)
-    return _walk_fallback(db_path, interval, location_preset, no_speedtest, ssid)
+    return _walk_fallback(
+        db_path, interval, location_preset, no_speedtest, ssid,
+        walk_name, compare_to)
 
 
 __all__ = [
     "WalkState",
     "SnapshotResult",
+    "SpotBaseline",
+    "MetricComparison",
+    "SpeedProbeResult",
     "PickerSelection",
     "QUIT_WORDS",
     "KEY_SNAPSHOT",
@@ -1805,10 +2420,13 @@ __all__ = [
     "KEY_SWITCH",
     "KEY_NEW",
     "KEY_FLOOR",
+    "KEY_COMPARE",
+    "KEY_SPEED_PROBE",
     "KEY_QUIT",
     "KEY_CREATE",
     "attempt_read",
     "ansi_wrap",
+    "comparison_lines",
     "finish_snapshot",
     "fmt_mbps",
     "fmt_rate_val",

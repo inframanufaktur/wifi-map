@@ -1083,3 +1083,614 @@ def test_finish_snapshot_message_no_speedtest(tmp_path, monkeypatch):
     assert res.ok
     assert "Mbps" not in res.message
     assert res.message.startswith("saved #")
+
+
+# ---------------------------------------------------------------------------
+# Live comparison against a prior walk (RED tests; production follows)
+# ---------------------------------------------------------------------------
+
+def _seed_comparison_walks(conn):
+    """Two physical spots plus before/current walk records."""
+    lid, _rid, (window, bed) = _seed_3level(
+        conn, loc="home", room="office", spots=("window", "bed"))
+    before = store_mod.create_walk(conn, lid, "before mesh")
+    current = store_mod.create_walk(conn, lid, "after mesh")
+    return lid, window, bed, before, current
+
+
+def test_walk_comparison_selects_and_caches_per_spot_medians(tmp_path):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        lid, window, _bed, before, current = _seed_comparison_walks(conn)
+        store_mod.add_reading(
+            conn, window, walk_id=before, rssi=-80, noise=-90, snr=10,
+            ping_ms=30.0, down_mbps=40.0, up_mbps=8.0)
+        store_mod.add_reading(
+            conn, window, walk_id=before, rssi=-70, noise=-94, snr=24,
+            ping_ms=20.0, down_mbps=80.0, up_mbps=12.0)
+
+        walks = store_mod.list_walks(conn, location_id=lid)
+        assert [walk.id for walk in walks] == [current, before]
+
+        state = tui_mod.WalkState(
+            db, current_walk_id=current, traffic_fn=lambda: None)
+        state.select_baseline_walk(conn, before)
+        state.set_active_spot(window)
+        baseline = state.baseline_for_active_spot()
+        assert baseline is not None
+        assert baseline.rssi == pytest.approx(-75.0)
+        assert baseline.noise == pytest.approx(-92.0)
+        assert baseline.snr == pytest.approx(17.0)
+        assert baseline.ping_ms == pytest.approx(25.0)
+        assert baseline.down_mbps == pytest.approx(60.0)
+        assert baseline.up_mbps == pytest.approx(10.0)
+
+        # Baselines are loaded once, not re-queried on every live poll.
+        conn.execute("DELETE FROM readings WHERE walk_id = ?", (before,))
+        conn.commit()
+        assert state.baseline_for_active_spot() == baseline
+    finally:
+        conn.close()
+
+
+def test_walk_comparison_uses_rolling_current_signal_at_active_spot(tmp_path):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        _lid, window, _bed, before, current = _seed_comparison_walks(conn)
+        store_mod.add_reading(
+            conn, window, walk_id=before, rssi=-75, noise=-90, snr=15)
+        state = tui_mod.WalkState(
+            db, current_walk_id=current, comparison_window=3,
+            traffic_fn=lambda: None)
+        state.select_baseline_walk(conn, before)
+        state.set_active_spot(window)
+    finally:
+        conn.close()
+
+    for rssi, noise, snr in ((-66, -92, 26), (-60, -96, 36),
+                             (-63, -94, 31)):
+        state.poll(read_fn=lambda r=rssi, n=noise, s=snr:
+                   signal_mod.Signal(rssi=r, noise=n, snr=s))
+
+    comparison = state.active_comparison()
+    assert comparison["rssi"].current == pytest.approx(-63.0)
+    assert comparison["rssi"].baseline == pytest.approx(-75.0)
+    assert comparison["rssi"].delta == pytest.approx(12.0)
+    assert comparison["noise"].current == pytest.approx(-94.0)
+    assert comparison["noise"].delta == pytest.approx(-4.0)
+    assert comparison["snr"].current == pytest.approx(31.0)
+    assert comparison["snr"].delta == pytest.approx(16.0)
+
+
+def test_walk_comparison_missing_baseline_spot_keeps_live_values(tmp_path):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        _lid, window, bed, before, current = _seed_comparison_walks(conn)
+        store_mod.add_reading(conn, window, walk_id=before, rssi=-75)
+        state = tui_mod.WalkState(
+            db, current_walk_id=current, traffic_fn=lambda: None)
+        state.select_baseline_walk(conn, before)
+        state.set_active_spot(bed)
+    finally:
+        conn.close()
+
+    state.poll(read_fn=lambda: signal_mod.Signal(
+        rssi=-58, noise=-93, snr=35))
+    assert state.baseline_for_active_spot() is None
+    comparison = state.active_comparison()
+    assert comparison["rssi"].current == pytest.approx(-58.0)
+    assert comparison["rssi"].baseline is None
+    assert comparison["rssi"].delta is None
+
+
+def test_walk_comparison_resets_rolling_values_on_spot_switch(tmp_path):
+    state = tui_mod.WalkState(
+        str(tmp_path / "walk.db"), comparison_window=3,
+        traffic_fn=lambda: None)
+    state.set_active_spot(10)
+    state.poll(read_fn=lambda: signal_mod.Signal(rssi=-55, snr=35))
+    assert state.active_comparison()["rssi"].current == pytest.approx(-55.0)
+
+    state.set_active_spot(20)
+    assert state.active_comparison()["rssi"].current is None
+    state.poll(read_fn=lambda: signal_mod.Signal(rssi=-80, snr=10))
+    assert state.active_comparison()["rssi"].current == pytest.approx(-80.0)
+
+    # Returning to a spot starts a fresh observation window too.
+    state.set_active_spot(10)
+    assert state.active_comparison()["rssi"].current is None
+
+
+def test_transient_speed_probe_updates_comparison_without_saving(tmp_path):
+    assert tui_mod.KEY_SPEED_PROBE == "t"
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        _lid, window, _bed, before, current = _seed_comparison_walks(conn)
+        store_mod.add_reading(
+            conn, window, walk_id=before, ping_ms=25.0,
+            down_mbps=50.0, up_mbps=10.0)
+        state = tui_mod.WalkState(db, current_walk_id=current)
+        state.select_baseline_walk(conn, before)
+        state.set_active_spot(window)
+        before_count = len(store_mod.list_readings(conn))
+    finally:
+        conn.close()
+
+    thread = state.try_speed_probe(run_speedtest_fn=lambda: speed_mod.Speed(
+        ping_ms=15.0, down_mbps=90.0, up_mbps=20.0,
+        server="test server"))
+    assert thread is not None
+    thread.join(timeout=10)
+    probe = state.speed_probe_for_active_spot()
+    assert probe is not None
+    assert probe.down_mbps == pytest.approx(90.0)
+    comparison = state.active_comparison()
+    assert comparison["down_mbps"].delta == pytest.approx(40.0)
+    assert comparison["up_mbps"].delta == pytest.approx(10.0)
+    assert comparison["ping_ms"].delta == pytest.approx(-10.0)
+
+    conn = store_mod.get_db(db)
+    try:
+        assert len(store_mod.list_readings(conn)) == before_count
+    finally:
+        conn.close()
+
+
+def test_saved_snapshot_carries_current_walk_id(tmp_path, monkeypatch):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        _lid, window, _bed, _before, current = _seed_comparison_walks(conn)
+    finally:
+        conn.close()
+    monkeypatch.setattr(
+        signal_mod, "sample_signal",
+        lambda *args, **kwargs: signal_mod.Signal(rssi=-60, snr=30))
+
+    state = tui_mod.WalkState(
+        db, current_walk_id=current, no_speedtest=True)
+    state.set_active_spot(window)
+    thread = state.try_snapshot()
+    assert thread is not None
+    thread.join(timeout=10)
+
+    conn = store_mod.get_db(db)
+    try:
+        saved = store_mod.list_readings(conn, walk_id=current)
+        assert len(saved) == 1
+        assert saved[0]["walk_id"] == current
+        assert saved[0]["spot_id"] == window
+    finally:
+        conn.close()
+
+
+def test_stale_speed_probe_result_does_not_appear_after_spot_switch(tmp_path):
+    started = threading.Event()
+    release = threading.Event()
+
+    def delayed_speedtest():
+        started.set()
+        assert release.wait(timeout=10)
+        return speed_mod.Speed(
+            ping_ms=12.0, down_mbps=100.0, up_mbps=20.0)
+
+    state = tui_mod.WalkState(str(tmp_path / "walk.db"))
+    state.set_active_spot(10)
+    thread = state.try_speed_probe(run_speedtest_fn=delayed_speedtest)
+    assert thread is not None
+    assert started.wait(timeout=10)
+    state.set_active_spot(20)
+    release.set()
+    thread.join(timeout=10)
+
+    assert state.speed_probe_for_active_spot() is None
+    comparison = state.active_comparison()
+    assert comparison["down_mbps"].current is None
+
+
+def test_walk_curses_labels_passive_rates_as_traffic(
+        tmp_path, monkeypatch):
+    class RecordingScreen:
+        def __init__(self):
+            self.rows = {}
+
+        def nodelay(self, _enabled):
+            pass
+
+        def timeout(self, _milliseconds):
+            pass
+
+        def clear(self):
+            self.rows = {}
+
+        def getmaxyx(self):
+            return (30, 120)
+
+        def addstr(self, row, col, text, *args):
+            self.rows.setdefault(row, []).append((col, text))
+
+        def refresh(self):
+            pass
+
+        def getch(self):
+            return ord("q")
+
+        def rendered_lines(self):
+            return ["".join(text for _col, text in sorted(parts))
+                    for _row, parts in sorted(self.rows.items())]
+
+    def poll_once(state):
+        state.sig = signal_mod.Signal(rssi=-60, noise=-90, snr=30)
+        state.last_rates = (12.0, 3.0)
+        state.hist_rssi.append(-60)
+        state.hist_noise.append(-90)
+        state.hist_snr.append(30)
+        state.hist_down.append(12.0)
+        state.hist_up.append(3.0)
+
+    monkeypatch.setattr(tui_mod.WalkState, "poll", poll_once)
+    monkeypatch.setattr(
+        tui_mod.WalkState, "ensure_identity", lambda self: None)
+    monkeypatch.setattr(
+        tui_mod.WalkState, "ensure_addrs", lambda self: None)
+    screen = RecordingScreen()
+
+    assert tui_mod._walk_curses(
+        screen, str(tmp_path / "walk.db"), interval=1.0,
+        location_preset=None, no_speedtest=False) == 0
+    rendered = "\n".join(screen.rendered_lines()).lower()
+    assert "traffic down" in rendered
+    assert "traffic up" in rendered
+
+
+def test_baseline_name_must_be_unambiguous_and_ids_still_work(tmp_path):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        lid, _rid, (spot, _other) = _seed_3level(conn)
+        older = store_mod.create_walk(
+            conn, lid, "before", started_at="2026-09-20T08:00:00+00:00")
+        newer = store_mod.create_walk(
+            conn, lid, "before", started_at="2026-09-21T08:00:00+00:00")
+        current = store_mod.create_walk(conn, lid, "after")
+        store_mod.add_reading(conn, spot, walk_id=older, rssi=-80)
+        store_mod.add_reading(conn, spot, walk_id=newer, rssi=-70)
+        state = tui_mod.WalkState(db, current_walk_id=current)
+
+        with pytest.raises(ValueError, match=r"ambiguous.*IDs.*%d.*%d" % (
+                newer, older)):
+            state.select_baseline_walk(conn, "before")
+
+        assert state.select_baseline_walk(conn, older) == older
+        state.set_active_spot(spot)
+        assert state.baseline_for_active_spot().rssi == -80
+    finally:
+        conn.close()
+
+
+def test_baseline_picker_rows_show_name_start_id_and_off(tmp_path):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        lid, _rid, (spot, _other) = _seed_3level(conn)
+        before = store_mod.create_walk(
+            conn, lid, "before mesh",
+            started_at="2026-09-20T08:15:00+00:00")
+        store_mod.add_reading(conn, spot, walk_id=before, rssi=-70)
+        current = store_mod.create_walk(conn, lid, "after mesh")
+        state = tui_mod.WalkState(db, current_walk_id=current)
+        state.active_location_id = lid
+
+        rows = tui_mod._baseline_walk_rows(conn, state)
+        assert rows[-1] == (0, "Off")
+        assert rows[0][0] == before
+        assert "before mesh" in rows[0][1]
+        assert "2026-09-20T08:15:00+00:00" in rows[0][1]
+        assert "#%d" % before in rows[0][1]
+    finally:
+        conn.close()
+
+
+def test_stale_snapshot_does_not_update_spot_specific_ui(
+        tmp_path, monkeypatch):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        _lid, _rid, (first, second) = _seed_3level(conn)
+    finally:
+        conn.close()
+    monkeypatch.setattr(
+        signal_mod, "sample_signal",
+        lambda *args, **kwargs: signal_mod.Signal(rssi=-60, snr=30))
+    started = threading.Event()
+    release = threading.Event()
+
+    def delayed_speedtest():
+        started.set()
+        assert release.wait(timeout=10)
+        return speed_mod.Speed(
+            ping_ms=10.0, down_mbps=100.0, up_mbps=20.0)
+
+    state = tui_mod.WalkState(db)
+    state.set_active_spot(first)
+    thread = state.try_snapshot(run_speedtest_fn=delayed_speedtest)
+    assert thread is not None
+    assert started.wait(timeout=10)
+    state.set_active_spot(second)
+    release.set()
+    thread.join(timeout=10)
+
+    with state._lock:
+        assert state.pending == 0
+        assert state.toast == ""
+        assert state.last_result == ""
+    assert state.speed_probe_for_active_spot() is None
+    assert state.active_comparison()["down_mbps"].current is None
+    conn = store_mod.get_db(db)
+    try:
+        saved = store_mod.list_readings(conn)
+        assert len(saved) == 1 and saved[0]["spot_id"] == first
+    finally:
+        conn.close()
+
+
+def test_pending_measurement_blocks_snapshots_and_probes(
+        tmp_path, monkeypatch):
+    state = tui_mod.WalkState(str(tmp_path / "walk.db"))
+    state.set_active_spot(1)
+
+    class PendingThread:
+        def join(self, timeout=None):
+            pass
+
+    monkeypatch.setattr(
+        tui_mod, "start_snapshot_thread",
+        lambda *args, **kwargs: PendingThread())
+    first = state.try_snapshot()
+    assert first is not None
+    assert state.ui_snapshot()[1] == 1
+    assert state.try_snapshot() is None
+    assert state.try_speed_probe(
+        run_speedtest_fn=lambda: speed_mod.Speed()) is None
+    assert "already running" in state.ui_snapshot()[0]
+
+
+def test_running_probe_blocks_snapshot(tmp_path):
+    started = threading.Event()
+    release = threading.Event()
+
+    def delayed_speedtest():
+        started.set()
+        assert release.wait(timeout=10)
+        return speed_mod.Speed(down_mbps=80.0, up_mbps=10.0)
+
+    state = tui_mod.WalkState(str(tmp_path / "walk.db"))
+    state.set_active_spot(1)
+    thread = state.try_speed_probe(run_speedtest_fn=delayed_speedtest)
+    assert thread is not None
+    assert started.wait(timeout=10)
+    assert state.try_snapshot() is None
+    assert "already running" in state.ui_snapshot()[0]
+    release.set()
+    thread.join(timeout=10)
+
+
+def test_finish_walk_waits_for_snapshot_before_marking_ended(
+        tmp_path, monkeypatch):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        lid, _rid, (spot, _other) = _seed_3level(conn)
+        walk = store_mod.create_walk(conn, lid, "after")
+    finally:
+        conn.close()
+    started = threading.Event()
+    release = threading.Event()
+
+    def delayed_signal():
+        started.set()
+        assert release.wait(timeout=10)
+        return signal_mod.Signal(rssi=-60, snr=30)
+
+    monkeypatch.setattr(signal_mod, "sample_signal", delayed_signal)
+    state = tui_mod.WalkState(
+        db, no_speedtest=True, current_walk_id=walk)
+    state.set_active_spot(spot)
+    worker = state.try_snapshot()
+    assert worker is not None and started.wait(timeout=10)
+    timer = threading.Timer(0.05, release.set)
+    timer.start()
+
+    conn = store_mod.get_db(db)
+    try:
+        assert tui_mod._finish_walk_session(
+            conn, state, worker_timeout=2.0) is True
+        saved = store_mod.list_readings(conn, walk_id=walk)
+        ended = store_mod.get_walk(conn, walk).ended_at
+        assert len(saved) == 1
+        assert ended is not None
+        assert saved[0]["ts"] <= ended
+    finally:
+        conn.close()
+        timer.join(timeout=10)
+
+
+def test_finish_walk_timeout_leaves_walk_open_and_reports_error(
+        tmp_path, capsys):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        lid = store_mod.create_location(conn, "home")
+        walk = store_mod.create_walk(conn, lid, "after")
+        state = tui_mod.WalkState(db, current_walk_id=walk)
+
+        class StuckWorker:
+            def join(self, timeout=None):
+                pass
+
+            def is_alive(self):
+                return True
+
+        state._workers.append(StuckWorker())
+        assert tui_mod._finish_walk_session(
+            conn, state, worker_timeout=0.0) is False
+        assert store_mod.get_walk(conn, walk).ended_at is None
+        assert "still running" in capsys.readouterr().err
+    finally:
+        conn.close()
+
+
+def test_live_comparison_table_includes_tx_rate(tmp_path):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        _lid, spot, _other, before, current = _seed_comparison_walks(conn)
+        store_mod.add_reading(conn, spot, walk_id=before, tx_rate="400")
+        state = tui_mod.WalkState(
+            db, current_walk_id=current, comparison_window=2,
+            traffic_fn=lambda: None)
+        state.select_baseline_walk(conn, before)
+        state.set_active_spot(spot)
+    finally:
+        conn.close()
+
+    state.poll(read_fn=lambda: signal_mod.Signal(tx_rate="600"))
+    state.poll(read_fn=lambda: signal_mod.Signal(tx_rate="800"))
+    rendered = "\n".join(tui_mod.comparison_lines(state))
+    assert "TX rate" in rendered
+    assert "700" in rendered
+    assert "400" in rendered
+    assert "+300" in rendered
+
+
+def test_empty_walks_are_not_selectable_and_latest_skips_them(tmp_path):
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        lid, _rid, (spot, _other) = _seed_3level(conn)
+        measured = store_mod.create_walk(conn, lid, "measured")
+        store_mod.add_reading(conn, spot, walk_id=measured, rssi=-70)
+        empty = store_mod.create_walk(conn, lid, "empty")
+        current = store_mod.create_walk(conn, lid, "current")
+        state = tui_mod.WalkState(db, current_walk_id=current)
+        state.active_location_id = lid
+
+        rows = tui_mod._baseline_walk_rows(conn, state)
+        assert [walk_id for walk_id, _label in rows] == [measured, 0]
+        with pytest.raises(ValueError, match="no readings"):
+            state.select_baseline_walk(conn, empty)
+
+        startup = tui_mod.WalkState(db)
+        startup.active_location_id = lid
+        tui_mod._start_walk_session(
+            conn, startup, walk_name="after", compare_to="latest")
+        assert startup.baseline_walk_id == measured
+    finally:
+        conn.close()
+
+
+def test_baseline_picker_keeps_cursor_visible_beyond_nine_rows(tmp_path):
+    import curses
+
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        lid, _rid, (spot, _other) = _seed_3level(conn)
+        walks = []
+        for index in range(12):
+            walk = store_mod.create_walk(conn, lid, "walk-%02d" % index)
+            store_mod.add_reading(conn, spot, walk_id=walk, rssi=-70)
+            walks.append(walk)
+        current = store_mod.create_walk(conn, lid, "current")
+        state = tui_mod.WalkState(db, current_walk_id=current)
+        state.active_location_id = lid
+        rows = tui_mod._baseline_walk_rows(conn, state)
+        state.baseline_walk_id = rows[0][0]
+
+        class SmallScreen:
+            def __init__(self):
+                self.keys = iter([curses.KEY_DOWN] * 10 + [10])
+                self.current = []
+                self.frames = []
+
+            def timeout(self, _milliseconds):
+                pass
+
+            def getmaxyx(self):
+                return (6, 80)
+
+            def clear(self):
+                self.current = []
+
+            def addstr(self, row, col, text, *args):
+                self.current.append(text)
+
+            def refresh(self):
+                self.frames.append(tuple(self.current))
+
+            def getch(self):
+                return next(self.keys)
+
+        screen = SmallScreen()
+        selected = tui_mod._baseline_picker_curses(
+            screen, conn, state, poll_timeout_ms=10)
+        assert selected == rows[10][0]
+        assert any("#%d" % selected in line for line in screen.frames[-1])
+        assert len(screen.frames[-1]) <= 5
+    finally:
+        conn.close()
+
+
+def test_walk_curses_creates_and_finishes_named_walk(tmp_path, monkeypatch):
+    class QuitScreen:
+        def nodelay(self, _enabled):
+            pass
+
+        def timeout(self, _milliseconds):
+            pass
+
+        def clear(self):
+            pass
+
+        def getmaxyx(self):
+            return (30, 120)
+
+        def addstr(self, *_args):
+            pass
+
+        def refresh(self):
+            pass
+
+        def getch(self):
+            return ord("q")
+
+    db = _db(tmp_path)
+    conn = store_mod.get_db(db)
+    try:
+        location_id = store_mod.create_location(conn, "home")
+    finally:
+        conn.close()
+    monkeypatch.setattr(tui_mod.WalkState, "poll", lambda self: None)
+    monkeypatch.setattr(
+        tui_mod.WalkState, "ensure_identity", lambda self: None)
+    monkeypatch.setattr(
+        tui_mod.WalkState, "ensure_addrs", lambda self: None)
+
+    result = tui_mod._walk_curses(
+        QuitScreen(), db, interval=1.0, location_preset="home",
+        no_speedtest=True, walk_name="before-install")
+
+    assert result == 0
+    conn = store_mod.get_db(db)
+    try:
+        walks = store_mod.list_walks(conn, location_id=location_id)
+        assert len(walks) == 1
+        assert walks[0].name == "before-install"
+        assert walks[0].started_at
+        assert walks[0].ended_at
+    finally:
+        conn.close()

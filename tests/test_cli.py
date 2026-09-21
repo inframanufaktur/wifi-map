@@ -417,6 +417,61 @@ def test_walk_ssid_flag_parses():
     assert args.ssid == "home-5g"
 
 
+def test_walk_name_and_comparison_flags_parse():
+    args = cli_mod._build_parser().parse_args([
+        "walk", "--location", "schwarze-witwe",
+        "--name", "after-mesh", "--compare-to", "before-install",
+    ])
+
+    assert args.name == "after-mesh"
+    assert args.compare_to == "before-install"
+
+
+def test_walk_forwards_session_options(monkeypatch, tmp_path):
+    from wifimap import tui as tui_mod
+
+    seen = {}
+
+    def _run_walk(db_path, interval=1.0, location_preset=None,
+                  no_speedtest=False, ssid=None, walk_name=None,
+                  compare_to=None):
+        seen.update({
+            "db_path": db_path,
+            "location": location_preset,
+            "walk_name": walk_name,
+            "compare_to": compare_to,
+        })
+        return 0
+
+    monkeypatch.setattr(tui_mod, "run_walk", _run_walk)
+    db = str(tmp_path / "wifi.db")
+
+    rc = cli_mod.main([
+        "--db", db, "walk", "--location", "schwarze-witwe",
+        "--name", "after-mesh", "--compare-to", "before-install",
+        "--no-speedtest",
+    ])
+
+    assert rc == 0
+    assert seen == {
+        "db_path": db,
+        "location": "schwarze-witwe",
+        "walk_name": "after-mesh",
+        "compare_to": "before-install",
+    }
+
+
+@pytest.mark.parametrize("flag", ["--name", "--compare-to"])
+def test_walk_rejects_blank_session_options(flag, capsys, tmp_path):
+    rc = cli_mod.main([
+        "--db", str(tmp_path / "w.db"), "walk", "--location", "home",
+        flag, "  ", "--no-speedtest",
+    ])
+
+    assert rc == cli_mod.EXIT_STORAGE
+    assert "%s must not be blank" % flag in capsys.readouterr().err
+
+
 def test_walk_blank_ssid_rejected(capsys, tmp_path):
     rc = cli_mod.main(["--db", str(tmp_path / "w.db"), "walk",
                        "--ssid", "  ", "--no-speedtest"])
