@@ -29,20 +29,19 @@ from wifimap.walk_session import (
     _resolve_preset,
     _start_walk_session,
     comparison_lines,
+    benchmark_lines,
 )
 from wifimap.walk_snapshot import _finish_benchmark
 from wifimap.walk_state import WalkState
 from wifimap.walk_ui import (
     METER_VAL_W,
     ansi_wrap,
-    fmt_mbps,
-    fmt_rate_val,
     format_addr_line,
     format_extra_line,
     format_meter_left,
     format_radio_line,
     history_cap,
-    meter_layout,
+    signal_panel_rows,
     rate_rssi,
     rate_snr,
     rating_style,
@@ -102,6 +101,7 @@ def _walk_fallback(db_path: str, interval: float,
                       ssid_id=ssid_id, ssid_name=ssid, history_max=cap)
     state.net_bssid = network_bssid
     try:
+        state.refresh_access_point_names(conn)
         state.active_location_id = _resolve_preset(conn, location_preset)
         if state.active_location_id is not None:
             try:
@@ -118,6 +118,7 @@ def _walk_fallback(db_path: str, interval: float,
               "l switch | n new | q quit", flush=True)
         while True:
             state.poll()
+            tw = shutil.get_terminal_size((80, 24)).columns
             if state.no_wifi:
                 print("NO-WIFI: %s (`s` blocked)" % state.no_wifi_msg)
                 rssi_s = "UNKNOWN" if state.sig.rssi is None else "%4d dBm" % state.sig.rssi
@@ -148,61 +149,10 @@ def _walk_fallback(db_path: str, interval: float,
                     state.sig.mcs, state.sig.band,
                     state.sig.security), flush=True)
             else:
-                rssi_s = "UNKNOWN" if state.sig.rssi is None else "%4d dBm" % state.sig.rssi
-                snr_s = "UNKNOWN" if state.sig.snr is None else "%3d dB" % state.sig.snr
-                noise_s = "UNKNOWN" if state.sig.noise is None else "%4d dBm" % state.sig.noise
-                r_rating = rate_rssi(state.sig.rssi)
-                s_rating = rate_snr(state.sig.snr)
-                _, r_code = rating_style(r_rating or "UNKNOWN")
-                _, s_code = rating_style(s_rating or "UNKNOWN")
-                ch_s = state.sig.channel or "-"
-                phy_s = state.sig.phy or "-"
-                tx_s = state.sig.tx_rate or "-"
-                lefts = [
-                    format_meter_left("RSSI", rssi_s, r_rating),
-                    format_meter_left("SNR", snr_s, s_rating),
-                    format_meter_left("noise", noise_s, None),
-                ]
-                tw = 80
-                try:
-                    tw = shutil.get_terminal_size((80, 24)).columns
-                except Exception:
-                    pass
-                max_left, gw = meter_layout(tw, lefts)
-                rssi_g = state.hist_rssi.sparkline(-90, -30, gw, align="right")
-                snr_g = state.hist_snr.sparkline(0, 40, gw, align="right")
-                noise_g = state.hist_noise.sparkline(-100, -60, gw, align="right")
-                down_g = state.hist_down.sparkline_auto(gw)
-                up_g = state.hist_up.sparkline_auto(gw)
-                down_s = fmt_rate_val(
-                    state.last_rates[0] if state.last_rates else None)
-                up_s = fmt_rate_val(
-                    state.last_rates[1] if state.last_rates else None)
-                d_val_pad = down_s.ljust(METER_VAL_W)
-                u_val_pad = up_s.ljust(METER_VAL_W)
-                pad1 = " " * (max_left - len(lefts[0]))
-                pad2 = " " * (max_left - len(lefts[1]))
-                pad3 = " " * (max_left - len(lefts[2]))
-                print("RSSI  " + ansi_wrap(
-                    rssi_s.ljust(METER_VAL_W) + "[%s]" % r_rating, r_code)
-                    + pad1 + " | " + ansi_wrap(rssi_g, r_code)
-                    + " [60s]", flush=True)
-                print("SNR   " + ansi_wrap(
-                    snr_s.ljust(METER_VAL_W) + "[%s]" % s_rating, s_code)
-                    + pad2 + " | " + ansi_wrap(snr_g, s_code)
-                    + " [60s]", flush=True)
-                print("noise " + noise_s.ljust(METER_VAL_W)
-                      + pad3 + " | " + noise_g
-                      + " [60s]", flush=True)
-                print(format_extra_line(ch_s, phy_s, tx_s), flush=True)
-                print(format_radio_line(
-                    state.sig.mcs, state.sig.band,
-                    state.sig.security), flush=True)
-                print("", flush=True)
-                print("traffic down " + d_val_pad + " | " + down_g
-                      + " [60s]", flush=True)
-                print("traffic up   " + u_val_pad + " | " + up_g
-                      + " [60s]", flush=True)
+                for segments in signal_panel_rows(state, tw - 1):
+                    codes = {1: "32", 2: "33", 3: "31", 4: "1;36"}
+                    print("".join(ansi_wrap(text, codes[pair]) if pair else text
+                                  for text, pair in segments), flush=True)
             print("Net: %s" % (state.net_ssid or "unknown"), flush=True)
             _addr = format_addr_line(state.ip, state.router, state.mac)
             if _addr:
@@ -211,19 +161,13 @@ def _walk_fallback(db_path: str, interval: float,
             print("loc: %s pending: %d %s" % (
                 _location_label(conn, state.active_spot_id), pending,
                 ("» %s" % toast) if toast else ""))
-            for compare_line in comparison_lines(state):
+            for compare_line in comparison_lines(state, tw - 1):
                 print(compare_line, flush=True)
             with state._lock:
                 _bench = state.benchmark
                 _last = state.last_result
-            if _bench is not None:
-                print("bench: rssi %s snr %s down %s up %s" % (
-                    "-" if _bench.get("rssi") is None
-                    else _bench.get("rssi"),
-                    "-" if _bench.get("snr") is None
-                    else _bench.get("snr"),
-                    fmt_mbps(_bench.get("down_mbps")),
-                    fmt_mbps(_bench.get("up_mbps"))), flush=True)
+            for line in benchmark_lines(_bench, tw - 1):
+                print(line, flush=True)
             if _last:
                 print("last: %s" % _last, flush=True)
             state.set_toast("")

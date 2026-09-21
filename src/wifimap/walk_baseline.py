@@ -97,6 +97,9 @@ def load_baseline(
     )
     for spot_id, spot_rows in grouped.items():
         newest = spot_rows[0]
+        speed_rows = [row for row in spot_rows if any(
+            row.get(key) is not None
+            for key in ("ping_ms", "down_mbps", "up_mbps"))]
         numeric = {
             key: median_values(row.get(key) for row in spot_rows)
             for key in numeric_keys
@@ -105,6 +108,10 @@ def load_baseline(
             spot_id=spot_id,
             ssid=newest.get("ssid"), bssid=newest.get("bssid"),
             channel=newest.get("channel"), server=newest.get("server"),
+            reading_count=len(spot_rows), speed_count=len(speed_rows),
+            latest_at=max(row["ts"] for row in spot_rows),
+            servers=tuple(sorted({row.get("server") or "unknown"
+                                  for row in speed_rows})),
             **numeric,
         )
     return BaselineSelection(selected.id, selected.name, spots)

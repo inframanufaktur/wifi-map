@@ -94,6 +94,7 @@ class WalkState:
         self.benchmark: Optional[dict] = None
         self.net_ssid: Optional[str] = None
         self.net_bssid: Optional[str] = None
+        self.access_point_names: Dict[str, str] = {}
         self.ip: Optional[str] = None
         self.router: Optional[str] = None
         self.mac: Optional[str] = None
@@ -289,13 +290,15 @@ class WalkState:
             self.net_ssid = None
             self.net_bssid = None
             self.set_toast(
-                "network name unavailable (sudo skipped); showing Net: unknown")
+                "network name unavailable; showing Net: unknown")
             return None
         self.net_ssid, self.net_bssid = ident[0], ident[1]
         self._backfill_identity()
         return ident
 
     def _backfill_identity(self) -> None:
+        if self.sig.bssid is not None:
+            self.net_bssid = self.sig.bssid
         if self.ssid_override is not None:
             self.sig.ssid = self.ssid_override
         elif self.net_ssid is not None and self.sig.ssid is None:
@@ -318,6 +321,17 @@ class WalkState:
             self.toast = (res.message if res.message else (
                 "saved #%s" % res.reading_id))
             self.last_result = self.toast
+
+    def refresh_access_point_names(self, conn: sqlite3.Connection) -> None:
+        """Cache local AP aliases for the render loop."""
+        try:
+            access_points = store_mod.list_access_points(conn)
+        except (sqlite3.Error, OSError):
+            return
+        self.access_point_names = {
+            access_point.bssid: access_point.name
+            for access_point in access_points
+        }
 
     def refresh_benchmark(self, conn: sqlite3.Connection) -> None:
         """Reload benchmark for the active location; keeps old on DB error."""
@@ -475,6 +489,7 @@ class WalkState:
                             ok=True, spot_id=loc_id,
                             generation=generation, ping_ms=res.ping_ms,
                             down_mbps=res.down_mbps, up_mbps=res.up_mbps,
+                            server=res.server,
                             message=res.message)
                 try:
                     cur = {"rssi": res.rssi,

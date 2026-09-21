@@ -8,9 +8,11 @@ import threading
 import pytest
 
 from wifimap import signal as signal_mod
+from wifimap.path_monitor import PathSample, PathTracker
 from wifimap import speed as speed_mod
 from wifimap import store as store_mod
 from wifimap import tui as tui_mod
+from wifimap.walk_ui import path_panel_rows
 
 
 def test_format_signal_line_full():
@@ -24,6 +26,142 @@ def test_format_signal_line_unknown():
     line = tui_mod.format_signal_line(signal_mod.Signal())
     assert "UNKNOWN" in line
     assert "None" not in line
+
+
+def test_walk_dashboard_header_keeps_network_location_and_queue_visible():
+    line = tui_mod.format_walk_header("Home Mesh", "Kitchen / window", 2)
+
+    assert line == "WIFI-MAP · Home Mesh · Kitchen / window · 2 queued"
+
+
+def test_walk_dashboard_header_has_meaningful_unknown_defaults():
+    line = tui_mod.format_walk_header(None, None, 0)
+
+    assert line == "WIFI-MAP · unknown network · no spot selected · ready"
+
+
+def test_walk_dashboard_footer_uses_compact_key_labels():
+    assert tui_mod.format_walk_footer() == (
+        "[s] save  [t] throughput  [c] compare  [b] benchmark  "
+        "[l] switch  [n] new  [q] quit")
+
+
+def test_walk_link_status_groups_radio_metadata_into_one_scan_line():
+    line = tui_mod.format_walk_link_status(
+        "36", "802.11ax", "1200", 11, "5 GHz", "WPA3")
+
+    assert line == (
+        "LINK  ch 36 · 802.11ax · tx 1200 · mcs 11 · 5 GHz · WPA3")
+
+
+def test_walk_link_status_marks_missing_radio_metadata():
+    line = tui_mod.format_walk_link_status(None, None, None, None, None, None)
+
+    assert line == "LINK  ch - · - · tx - · mcs - · - · -"
+
+
+def test_signal_panel_places_named_ap_directly_above_link(tmp_path):
+    state = tui_mod.WalkState(str(tmp_path / "walk.db"))
+    state.sig = signal_mod.Signal(
+        bssid="60:8d:26:8d:cf:3d", channel="36", phy="802.11ax")
+    state.access_point_names = {
+        "60:8d:26:8d:cf:3d": "Office mesh",
+    }
+
+    lines = ["".join(text for text, _style in row)
+             for row in tui_mod.signal_panel_rows(state, 80)]
+
+    assert lines[0] == "SIGNAL"
+    assert lines.index("AP    Office mesh · 60:8d:26:8d:cf:3d") + 1 == next(
+        index for index, line in enumerate(lines) if line.startswith("LINK"))
+
+
+def test_noise_history_leaves_vertical_space_at_its_peak(tmp_path):
+    state = tui_mod.WalkState(str(tmp_path / "walk.db"), history_max=1)
+    state.sig = signal_mod.Signal(noise=-60)
+    state.hist_noise.append(-60)
+
+    lines = ["".join(text for text, _style in row)
+             for row in tui_mod.signal_panel_rows(state, 80)]
+
+    noise = next(line for line in lines if line.startswith("noise"))
+    assert noise.endswith("▇")
+
+
+def test_signal_panel_shows_router_and_internet_path_quality(tmp_path):
+    state = tui_mod.WalkState(str(tmp_path / "walk.db"))
+    state.record_path_sample(PathSample(
+        gateway_target="192.0.2.1", gateway_ms=3.0,
+        internet_target="1.1.1.1", internet_ms=18.0))
+    state.record_path_sample(PathSample(
+        gateway_target="192.0.2.1", gateway_ms=None,
+        internet_target="1.1.1.1", internet_ms=None))
+
+    lines = ["".join(text for text, _style in row)
+             for row in tui_mod.signal_panel_rows(state, 80)]
+
+    router = next(line for line in lines if line.startswith("PATH  router"))
+    internet = next(line for line in lines if line.startswith("      internet"))
+    assert "loss 50%" in router and "×" in router
+    assert "loss 50%" in internet and "×" in internet
+
+
+@pytest.mark.parametrize("compact", [False, True])
+def test_path_panel_colors_status_tokens_instead_of_whole_rows(compact):
+    tracker = PathTracker(window_size=2)
+    tracker.record_values(None, 18.0)
+    tracker.record_values(3.0, None)
+
+    rows = path_panel_rows(tracker.snapshot(), 80, compact=compact)
+    segments = [segment for row in rows for segment in row]
+
+    assert any("PATH" in text and pair == 0 for text, pair in segments)
+    assert any(text.strip() == "timeout" and pair == 3
+               for text, pair in segments)
+    assert any(text.strip() in ("3 ms", "3ms") and pair == 1
+               for text, pair in segments)
+    assert any(text == "50%" and pair == 2 for text, pair in segments)
+    assert any("p95" in text and pair == 0 for text, pair in segments)
+    assert any("×" in text and pair == 3 for text, pair in segments)
+
+
+def test_switching_spots_resets_path_probe_window(tmp_path):
+    state = tui_mod.WalkState(str(tmp_path / "walk.db"))
+    state.set_active_spot(1)
+    state.record_path_sample(PathSample(
+        gateway_target="192.0.2.1", gateway_ms=None,
+        internet_target="1.1.1.1", internet_ms=None))
+
+    state.set_active_spot(2)
+    state.record_path_sample(PathSample(
+        gateway_target="192.0.2.1", gateway_ms=2.0,
+        internet_target="1.1.1.1", internet_ms=12.0))
+
+    snapshot = state.path_snapshot()
+    assert snapshot.gateway.count == 1
+    assert snapshot.gateway.loss_pct == 0.0
+
+
+def test_walk_compact_summary_prioritizes_current_signal_and_traffic():
+    signal = tui_mod.format_walk_signal_summary(
+        "-58 dBm", "GREAT", "28 dB", "GREAT", "-92 dBm")
+    traffic = tui_mod.format_walk_traffic_summary("350.0 Mbps", "28.4 Mbps")
+
+    assert signal == (
+        "NOW · RSSI -58 dBm [GREAT] · SNR 28 dB [GREAT] · noise -92 dBm")
+    assert traffic == "TRAFFIC · ↓ 350.0 Mbps · ↑ 28.4 Mbps"
+
+
+def test_walk_display_mode_keeps_full_detail_when_comparing():
+    assert tui_mod.walk_display_mode(24, comparing=False) == "detailed"
+    assert tui_mod.walk_display_mode(24, comparing=True) == "detailed"
+    assert tui_mod.walk_display_mode(9, comparing=False) == "compact"
+
+
+def test_walk_layout_uses_two_columns_for_wide_comparisons():
+    assert tui_mod.walk_layout_mode(160, comparing=True) == "side_by_side"
+    assert tui_mod.walk_layout_mode(139, comparing=True) == "stacked"
+    assert tui_mod.walk_layout_mode(160, comparing=False) == "stacked"
 
 
 def test_picker_press_digit_single_path():
@@ -223,9 +361,12 @@ def test_parse_floor_input_errors(bad):
 
 
 def test_snapshot_payload_freezes_signal():
-    sig = signal_mod.Signal(ssid="h", rssi=-60, noise=-90, snr=30)
+    sig = signal_mod.Signal(
+        ssid="h", bssid="aa:bb:cc:dd:ee:ff",
+        rssi=-60, noise=-90, snr=30)
     payload = tui_mod.snapshot_payload(sig)
     assert payload["rssi"] == -60 and payload["ssid"] == "h"
+    assert payload["bssid"] == "aa:bb:cc:dd:ee:ff"
     sig.rssi = -1  # mutate after freeze; payload unaffected
     assert payload["rssi"] == -60
 
@@ -276,22 +417,34 @@ def test_finish_snapshot_speed_ok(tmp_path, monkeypatch):
         conn.close()
     monkeypatch.setattr(
         signal_mod, "sample_signal",
-        lambda *a, **k: signal_mod.Signal(ssid="h", bssid=None, rssi=-60,
-                                          noise=-90, snr=30, channel="1",
-                                          phy="n", tx_rate="5"))
+        lambda *a, **k: signal_mod.Signal(
+            ssid="h", bssid="aa:bb:cc:dd:ee:ff", rssi=-60,
+            noise=-90, snr=30, channel="1", phy="n", tx_rate="5"))
 
     def _sp():
         return speed_mod.Speed(ping_ms=9.0, down_mbps=80.0, up_mbps=10.0,
                                server="S (1)")
 
-    res = tui_mod.finish_snapshot(db, sid, run_speedtest_fn=_sp)
+    paths = PathTracker(window_size=3, interval=1.0)
+    paths.record_values(3.0, 18.0)
+    paths.record_values(None, None)
+
+    res = tui_mod.finish_snapshot(
+        db, sid, run_speedtest_fn=_sp, path_snapshot=paths.snapshot())
     assert res.ok and res.reading_id is not None
+    assert res.bssid == "aa:bb:cc:dd:ee:ff"
     conn = store_mod.get_db(db)
     try:
         rows = store_mod.list_readings(conn)
         assert rows[0]["down_mbps"] == 80.0
         assert rows[0]["rssi"] == -60
         assert rows[0]["snr"] == 30
+        assert rows[0]["bssid"] == "aa:bb:cc:dd:ee:ff"
+        assert rows[0]["path_probe_count"] == 2
+        assert rows[0]["gateway_rtt_ms"] == 3.0
+        assert rows[0]["gateway_loss_pct"] == 50.0
+        assert rows[0]["internet_rtt_ms"] == 18.0
+        assert rows[0]["internet_max_outage_ms"] == 1000
     finally:
         conn.close()
 
@@ -535,6 +688,8 @@ def test_try_snapshot_success_path(tmp_path, monkeypatch):
                                           snr=30))
     st = tui_mod.WalkState(db, no_speedtest=True)
     st.active_spot_id = sid
+    st.record_path_sample(PathSample(
+        "192.0.2.1", 3.0, "1.1.1.1", 17.0))
     t = st.try_snapshot()
     assert t is not None
     t.join(timeout=10)
@@ -547,6 +702,9 @@ def test_try_snapshot_success_path(tmp_path, monkeypatch):
         assert len(rows) == 1
         assert rows[0]["rssi"] == -60
         assert rows[0]["spot_id"] == sid
+        assert rows[0]["path_probe_count"] == 1
+        assert rows[0]["gateway_rtt_ms"] == 3.0
+        assert rows[0]["internet_rtt_ms"] == 17.0
     finally:
         conn.close()
 
@@ -626,6 +784,20 @@ def test_ssid_override_skips_autodetect(tmp_path):
     st.ensure_identity(identity_fn=_boom)
     assert st.net_ssid == "home-5g"
     assert calls == []
+
+
+def test_poll_tracks_current_mesh_ap(tmp_path):
+    st = tui_mod.WalkState(
+        str(tmp_path / "w.db"), ssid_override="mesh-net",
+        traffic_fn=lambda: None,
+    )
+    st.net_bssid = "00:00:00:00:00:01"
+
+    st.poll(read_fn=lambda: signal_mod.Signal(
+        ssid="mesh-net", bssid="00:00:00:00:00:02", rssi=-63))
+
+    assert st.net_bssid == "00:00:00:00:00:02"
+    assert st.sig.bssid == "00:00:00:00:00:02"
 
 
 def test_ssid_override_backfills_and_tags_snapshot(tmp_path, monkeypatch):
@@ -742,12 +914,12 @@ def test_rate_rssi_snr_thresholds():
 
 
 def test_sparkline_vectors_gaps_and_window():
-    h = tui_mod.SparkHistory(maxlen=8)
+    h = tui_mod.SparkHistory(maxlen=4)
     for v in [-90, -70, -50, -30]:
         h.append(v)
     line = h.sparkline(-90, -30, 4)
-    assert line == "▁▃▅▇"
-    h2 = tui_mod.SparkHistory(maxlen=8)
+    assert line == "▁▃▆█"
+    h2 = tui_mod.SparkHistory(maxlen=3)
     h2.append(-50)
     h2.append(None)
     h2.append(-50)
@@ -755,7 +927,7 @@ def test_sparkline_vectors_gaps_and_window():
     h3 = tui_mod.SparkHistory(maxlen=3)
     for v in [1, 2, 3, 4]:
         h3.append(v)
-    assert h3.sparkline(1, 4, 10) == "       ▃▅▇"
+    assert h3.sparkline(1, 4, 10) == "▃▃▃▃▆▆▆███"
     assert tui_mod.SparkHistory(maxlen=4).sparkline(0, 1, 4) == ""
 
 
@@ -1004,13 +1176,13 @@ def test_fmt_rate_val():
 
 
 def test_sparkline_auto_scales_to_buffer_max():
-    h = tui_mod.SparkHistory(maxlen=10)
+    h = tui_mod.SparkHistory(maxlen=3)
     for v in (1.0, 2.0, 4.0):
         h.append(v)
-    s = h.sparkline_auto(4)
-    assert len(s) == 4
-    assert s[-1] == "▇"
-    assert s == " ▃▄▇"  # right-aligned; buffer max (4.0) → full block
+    s = h.sparkline_auto(3)
+    assert len(s) == 3
+    assert s[-1] == "█"
+    assert s == "▃▅█"  # buffer max (4.0) → full block
 
 
 def test_sparkline_auto_empty_uses_min_hi():
@@ -1567,10 +1739,13 @@ def test_live_comparison_table_includes_tx_rate(tmp_path):
     state.poll(read_fn=lambda: signal_mod.Signal(tx_rate="600"))
     state.poll(read_fn=lambda: signal_mod.Signal(tx_rate="800"))
     rendered = "\n".join(tui_mod.comparison_lines(state))
+    assert "COMPARE ·" in rendered
+    assert "╭" not in rendered
     assert "TX rate" in rendered
     assert "700" in rendered
     assert "400" in rendered
     assert "+300" in rendered
+    assert "+300 Mbps  higher link rate" in rendered
 
 
 def test_empty_walks_are_not_selectable_and_latest_skips_them(tmp_path):

@@ -35,25 +35,26 @@ from wifimap.walk_session import (
     _location_label,
     _resolve_preset,
     _start_walk_session,
-    comparison_lines,
+    benchmark_lines,
+    comparison_rows,
 )
 from wifimap.walk_snapshot import _finish_benchmark
 from wifimap.walk_state import WalkState
 from wifimap.walk_ui import (
-    METER_VAL_W,
-    fmt_mbps,
     fmt_rate_val,
     format_addr_line,
-    format_extra_line,
-    format_meter_left,
-    format_radio_line,
+    format_walk_footer,
+    format_walk_header,
+    format_walk_link_status,
+    format_walk_signal_summary,
+    format_walk_traffic_summary,
     history_cap,
-    meter_layout,
-    parse_floor_input,
     picker_start_cursor,
     rate_rssi,
     rate_snr,
-    rating_style,
+    signal_panel_rows,
+    walk_display_mode,
+    walk_layout_mode,
 )
 
 
@@ -147,6 +148,7 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                       ssid_id=ssid_id, ssid_name=ssid, history_max=cap)
     state.net_bssid = network_bssid
     try:
+        state.refresh_access_point_names(conn)
         state.active_location_id = _resolve_preset(conn, location_preset)
         if state.active_location_id is not None:
             try:
@@ -178,6 +180,7 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                 curses.init_pair(1, curses.COLOR_GREEN, -1)
                 curses.init_pair(2, curses.COLOR_YELLOW, -1)
                 curses.init_pair(3, curses.COLOR_RED, -1)
+                curses.init_pair(4, curses.COLOR_CYAN, -1)
                 has_col = True
         except Exception:
             has_col = False
@@ -188,10 +191,11 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                 stdscr.clear()
                 h, w = stdscr.getmaxyx()
                 row = 0
+                footer_row = max(0, h - 2)
 
                 def _emit(s: str, attr: int = 0) -> None:
                     nonlocal row
-                    if row < h - 1:
+                    if row < footer_row:
                         try:
                             stdscr.addstr(row, 0, s[: w - 1], attr)
                         except Exception:
@@ -200,7 +204,7 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
 
                 def _emit_segs(segs: list) -> None:
                     nonlocal row
-                    if row >= h - 1:
+                    if row >= footer_row:
                         return
                     col = 0
                     try:
@@ -214,120 +218,119 @@ def _walk_curses(stdscr: object, db_path: str, interval: float,
                         pass
                     row += 1
 
-                r_pair, _ = rating_style(rate_rssi(state.sig.rssi))
-                s_pair, _ = rating_style(rate_snr(state.sig.snr))
-                r_attr = curses.color_pair(r_pair) if (has_col and r_pair) else 0
-                s_attr = curses.color_pair(s_pair) if (has_col and s_pair) else 0
-                if state.no_wifi:
-                    _emit("NO-WIFI: %s" % (state.no_wifi_msg,))
-                    _emit("`s` blocked; fix WiFi or quit with `q`.")
-                else:
-                    rssi_s = ("UNKNOWN" if state.sig.rssi is None
-                              else "%4d dBm" % state.sig.rssi)
-                    snr_s = ("UNKNOWN" if state.sig.snr is None
-                             else "%3d dB" % state.sig.snr)
-                    noise_s = ("UNKNOWN" if state.sig.noise is None
-                               else "%4d dBm" % state.sig.noise)
-                    r_rate = rate_rssi(state.sig.rssi)
-                    s_rate = rate_snr(state.sig.snr)
-                    ch_s = state.sig.channel or "-"
-                    phy_s = state.sig.phy or "-"
-                    tx_s = state.sig.tx_rate or "-"
-                    down_s = fmt_rate_val(
-                        state.last_rates[0] if state.last_rates else None)
-                    up_s = fmt_rate_val(
-                        state.last_rates[1] if state.last_rates else None)
-                    r_val_pad = rssi_s.ljust(METER_VAL_W)
-                    s_val_pad = snr_s.ljust(METER_VAL_W)
-                    n_val_pad = noise_s.ljust(METER_VAL_W)
-                    d_val_pad = down_s.ljust(METER_VAL_W)
-                    u_val_pad = up_s.ljust(METER_VAL_W)
-                    lefts = [
-                        format_meter_left("RSSI", rssi_s, r_rate),
-                        format_meter_left("SNR", snr_s, s_rate),
-                        format_meter_left("noise", noise_s, None),
-                        "traffic down " + d_val_pad,
-                        "traffic up   " + u_val_pad,
-                    ]
-                    max_left, gw = meter_layout(w, lefts)
-                    pads = [" " * (max_left - len(s)) for s in lefts]
-                    if h >= 10:
-                        rssi_g = state.hist_rssi.sparkline(-90, -30, gw)
-                        snr_g = state.hist_snr.sparkline(0, 40, gw)
-                        noise_g = state.hist_noise.sparkline(-100, -60, gw)
-                        down_g = state.hist_down.sparkline_auto(gw)
-                        up_g = state.hist_up.sparkline_auto(gw)
-                        _emit_segs([("RSSI  ", 0),
-                                    (r_val_pad + "[%s]" % r_rate, r_attr),
-                                    (pads[0] + " | ", 0),
-                                    (rssi_g, r_attr), (" [60s]", 0)])
-                        _emit_segs([("SNR   ", 0),
-                                    (s_val_pad + "[%s]" % s_rate, s_attr),
-                                    (pads[1] + " | ", 0),
-                                    (snr_g, s_attr), (" [60s]", 0)])
-                        _emit_segs([("noise ", 0), (n_val_pad, 0),
-                                    (pads[2] + " | ", 0),
-                                    (noise_g, 0), (" [60s]", 0)])
-                        _emit("")
-                        _emit(format_extra_line(ch_s, phy_s, tx_s))
-                        _emit(format_radio_line(
-                            state.sig.mcs, state.sig.band,
-                            state.sig.security))
-                        _emit("")
-                        _emit_segs([("traffic down ", 0), (d_val_pad, 0),
-                                    (pads[3] + " | ", 0),
-                                    (down_g, 0), (" [60s]", 0)])
-                        _emit_segs([("traffic up   ", 0), (u_val_pad, 0),
-                                    (pads[4] + " | ", 0),
-                                    (up_g, 0), (" [60s]", 0)])
-                    else:
-                        _emit_segs([("RSSI  ", 0),
-                                    (r_val_pad + "[%s]" % r_rate, r_attr),
-                                    (pads[0], 0)])
-                        _emit_segs([("SNR   ", 0),
-                                    (s_val_pad + "[%s]" % s_rate, s_attr),
-                                    (pads[1], 0)])
-                        _emit_segs([("noise ", 0), (n_val_pad, 0),
-                                    (pads[2], 0)])
-                        _emit("")
-                        _emit(format_extra_line(ch_s, phy_s, tx_s))
-                        _emit(format_radio_line(
-                            state.sig.mcs, state.sig.band,
-                            state.sig.security))
-                        _emit("")
-                        _emit_segs([("traffic down ", 0), (d_val_pad, 0),
-                                    (pads[3], 0)])
-                        _emit_segs([("traffic up   ", 0), (u_val_pad, 0),
-                                    (pads[4], 0)])
-                _emit("")
-                _emit("Net: %s" % (state.net_ssid or "unknown"))
-                _addr = format_addr_line(state.ip, state.router, state.mac)
-                if _addr:
-                    _emit(_addr)
+                def _draw(at_row: int, col: int, text: str,
+                          attr: int = 0) -> None:
+                    if at_row >= footer_row or col >= w - 1:
+                        return
+                    try:
+                        stdscr.addstr(at_row, col, text[:w - 1 - col], attr)
+                    except Exception:
+                        pass
+
+                def _draw_segs(at_row: int, col: int, segs: list) -> None:
+                    if at_row >= footer_row or col >= w - 1:
+                        return
+                    cursor = col
+                    try:
+                        for text, attr in segs:
+                            if cursor >= w - 1 or not text:
+                                continue
+                            chunk = text[:w - 1 - cursor]
+                            stdscr.addstr(at_row, cursor, chunk, attr)
+                            cursor += len(chunk)
+                    except Exception:
+                        pass
+
+                accent_attr = ((curses.color_pair(4) if has_col else 0)
+                               | curses.A_BOLD)
+
+                def _styled(segments: list) -> list:
+                    return [(text, accent_attr if pair == 4 else
+                             curses.color_pair(pair) if has_col and pair else 0)
+                            for text, pair in segments]
+
+                def _bounded(segments: list, width: int) -> list:
+                    result = []
+                    for text, pair in segments:
+                        chunk = text[:max(0, width)]
+                        result.append((chunk, pair))
+                        width -= len(chunk)
+                    return result
+
                 toast, pending = state.ui_snapshot()
+                location = _location_label(conn, state.active_spot_id)
+                header = format_walk_header(
+                    state.net_ssid, location, pending)[:w - 1]
+                _emit(header.ljust(max(0, w - 1)),
+                      accent_attr | curses.A_REVERSE)
                 _emit("")
-                _emit("loc: %s  pending: %d" % (
-                    _location_label(conn, state.active_spot_id), pending))
-                for compare_line in comparison_lines(state):
-                    _emit(compare_line)
+                wide_compare = (
+                    not state.no_wifi and
+                    walk_layout_mode(w, state.baseline_walk_id is not None)
+                    == "side_by_side")
+                compare_width = 78 if wide_compare else w - 1
+                compare_col = w - compare_width - 1 if wide_compare else 0
+                live_width = compare_col - 3 if wide_compare else w - 1
+                details = comparison_rows(state, compare_width)
                 with state._lock:
-                    _bench = state.benchmark
-                    _last = state.last_result
-                if _bench is not None:
-                    _emit("bench: rssi %s snr %s down %s up %s" % (
-                        "-" if _bench.get("rssi") is None
-                        else _bench.get("rssi"),
-                        "-" if _bench.get("snr") is None
-                        else _bench.get("snr"),
-                        fmt_mbps(_bench.get("down_mbps")),
-                        fmt_mbps(_bench.get("up_mbps"))))
-                if _last:
-                    _emit("last: %s" % _last)
-                _emit("")
-                _emit("keys: s snapshot | t throughput | c compare | "
-                      "b benchmark | l switch | n new | f floor | q quit")
-                if toast:
-                    _emit("» %s" % toast)
+                    bench = state.benchmark
+                    last = state.last_result
+                bench_rows = benchmark_lines(bench, compare_width)
+                if bench_rows:
+                    if details:
+                        details.append([])
+                    details.extend([[(line, 4 if index == 0 else 0)]
+                                    for index, line in enumerate(bench_rows)])
+                if last:
+                    details.append([("last: %s" % last, 0)])
+
+                addr = format_addr_line(state.ip, state.router, state.mac)
+                address_rows = [[], [(addr, 0)]] if addr else []
+                if state.no_wifi:
+                    live = [[("NO-WIFI: %s" % state.no_wifi_msg, 0)],
+                            [("`s` blocked; fix WiFi or quit with `q`.", 0)]]
+                elif walk_display_mode(h, bool(details)) == "compact":
+                    sig = state.sig
+                    rssi = "UNKNOWN" if sig.rssi is None else "%d dBm" % sig.rssi
+                    snr = "UNKNOWN" if sig.snr is None else "%d dB" % sig.snr
+                    noise = "UNKNOWN" if sig.noise is None else "%d dBm" % sig.noise
+                    live = [[(format_walk_signal_summary(
+                        rssi, rate_rssi(sig.rssi), snr,
+                        rate_snr(sig.snr), noise), 0)],
+                        [(format_walk_link_status(
+                            sig.channel, sig.phy, sig.tx_rate, sig.mcs,
+                            sig.band, sig.security), 0)],
+                        [(format_walk_traffic_summary(
+                            fmt_rate_val(state.last_rates[0] if state.last_rates else None),
+                            fmt_rate_val(state.last_rates[1] if state.last_rates else None)), 0)]]
+                else:
+                    live = signal_panel_rows(
+                        state, live_width,
+                        compact_path=not wide_compare and h < 40)
+                live.extend(address_rows)
+                if wide_compare:
+                    for index, segments in enumerate(live):
+                        _draw_segs(2 + index, 0,
+                                   _styled(_bounded(segments, live_width)))
+                    for index, segments in enumerate(details):
+                        _draw_segs(2 + index, compare_col,
+                                   _styled(_bounded(segments, compare_width)))
+                else:
+                    for segments in live:
+                        _emit_segs(_styled(segments))
+                    if details:
+                        _emit("")
+                    for segments in details:
+                        _emit_segs(_styled(segments))
+                try:
+                    footer = format_walk_footer()[:w].ljust(w)
+                    stdscr.addstr(footer_row, 0,
+                                  footer,
+                                  curses.A_REVERSE)
+                    if toast and h > 1:
+                        stdscr.addstr(h - 1, 0, ("» %s" % toast)[:w - 1])
+                except Exception:
+                    pass
                 stdscr.refresh()
             except Exception:
                 pass

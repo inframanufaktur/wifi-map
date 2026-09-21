@@ -23,6 +23,8 @@ class SnapshotResult:
     up_mbps: Optional[float] = None
     rssi: Optional[int] = None
     snr: Optional[int] = None
+    bssid: Optional[str] = None
+    server: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -41,6 +43,10 @@ class SpotBaseline:
     bssid: Optional[str] = None
     channel: Optional[str] = None
     server: Optional[str] = None
+    reading_count: int = 0
+    speed_count: int = 0
+    latest_at: Optional[str] = None
+    servers: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -150,6 +156,8 @@ def finish_snapshot(
         up_mbps=up,
         rssi=sig.rssi,
         snr=sig.snr,
+        bssid=sig.bssid,
+        server=server,
     )
 
 
@@ -257,4 +265,5 @@ def _finish_benchmark(
         up_mbps=up,
         rssi=sig.rssi,
         snr=sig.snr,
+        bssid=sig.bssid,
     )
