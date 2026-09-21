@@ -33,7 +33,7 @@ wifimap --db /tmp/demo.db list
 wifimap --db /tmp/demo.db export --csv readings.csv
 ```
 
-Real DB defaults to `~/wifi-map.db` — pass `--db PATH` (global flag,
+Real DB defaults to `db/wifi-map.db` inside this project (gitignored) — pass `--db PATH` (global flag,
 before the subcommand) to override. Unknown location/room/spot names
 auto-create on `scan`.
 

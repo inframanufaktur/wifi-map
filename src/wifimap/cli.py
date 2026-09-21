@@ -24,7 +24,8 @@ EXIT_NOWIFI = 2
 EXIT_STORAGE = 3
 # 4 reserved: speedtest binary missing when required.
 
-_DEFAULT_DB = str(Path.home() / "wifi-map.db")
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_DEFAULT_DB = str(_PROJECT_ROOT / "db" / "wifi-map.db")
 
 _EXPORT_FIELDS = [
     "id", "ts", "spot_id", "room_id", "location_id", "location_name",
@@ -68,7 +69,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "4 reserved (speedtest binary missing when required).",
     )
     p.add_argument("--db", default=_DEFAULT_DB,
-                   help="SQLite DB path (default ~/wifi-map.db)")
+                   help="SQLite DB path (default <project>/db/wifi-map.db)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("scan", help="Single snapshot row, print, exit.")

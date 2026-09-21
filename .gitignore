@@ -4,6 +4,10 @@ __pycache__/
 .venv/
 .worktrees/
 *.db
+*.db-journal
+*.db-wal
+*.db-shm
+db/
 *.egg-info/
 src/*.egg-info/
 export/
