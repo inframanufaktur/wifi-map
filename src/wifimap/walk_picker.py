@@ -9,6 +9,9 @@ from wifimap.walk_ui import parse_floor_input, picker_press, picker_start_cursor
 
 
 KEY_CREATE = "+"
+KEY_ENTER_CODES = (10, 13)
+KEY_ESC = 27
+PICKER_TIMEOUT_RESTORE_MS = 1000
 PickerSelection = Union[int, Literal["new"]]
 
 
@@ -38,6 +41,218 @@ def _find_room_by_name(
     if row is None:
         return None
     return row[0], row[1]
+
+
+def _list_picker_curses(
+    stdscr: object,
+    title: str,
+    rows: List[Tuple[int, str]],
+    active: Optional[int],
+    create_label: str,
+    poll_timeout_ms: int = PICKER_TIMEOUT_RESTORE_MS,
+) -> Optional[PickerSelection]:
+    """Show a blocking numbered curses picker prefilled with active."""
+    import curses
+
+    ids = [rid for rid, _ in rows]
+    cursor = picker_start_cursor(ids, active)
+    stdscr.timeout(-1)  # type: ignore[attr-defined]
+    try:
+        while True:
+            height, width = stdscr.getmaxyx()  # type: ignore[attr-defined]
+            lines = ["%s (Enter=active, 1-%d, + new, q cancel):"
+                     % (title, len(rows))]
+            for index, (row_id, label) in enumerate(rows):
+                current = ">" if index == cursor else " "
+                selected = "*" if row_id == active else " "
+                lines.append("%s%s%d. %s" % (
+                    current, selected, index + 1, label))
+            lines.append("%s  +. <%s>" % (
+                ">" if cursor == len(rows) else " ", create_label))
+            stdscr.clear()  # type: ignore[attr-defined]
+            for row_number, line in enumerate(lines[:height - 1]):
+                try:
+                    stdscr.addstr(  # type: ignore[attr-defined]
+                        row_number, 0, line[:width - 1])
+                except Exception:
+                    pass
+            stdscr.refresh()  # type: ignore[attr-defined]
+            ch = stdscr.getch()  # type: ignore[attr-defined]
+            if ch == curses.KEY_UP:
+                key = "up"
+            elif ch == curses.KEY_DOWN:
+                key = "down"
+            elif ch in KEY_ENTER_CODES + (curses.KEY_ENTER,):
+                key = "\n"
+            elif ch == KEY_ESC:
+                key = "\x1b"
+            else:
+                try:
+                    key = chr(ch)
+                except (ValueError, OverflowError):
+                    continue
+            cursor, action, index = picker_press(key, cursor, len(rows))
+            if action == "cancel":
+                return None
+            if action == "confirm" and index is not None:
+                if index == len(rows):
+                    return "new"
+                return rows[index][0]
+    finally:
+        stdscr.timeout(poll_timeout_ms)  # type: ignore[attr-defined]
+
+
+def _room_picker_curses(
+    stdscr: object,
+    conn: sqlite3.Connection,
+    location_id: int,
+    active_room: Optional[int],
+    poll_timeout_ms: int = PICKER_TIMEOUT_RESTORE_MS,
+) -> Optional[PickerSelection]:
+    """Pick or create a room within a location."""
+    rooms = store_mod.list_rooms(conn, location_id=location_id)
+    rows = [(room.id, "%s (floor %d%s)" % (
+        room.name, room.floor, ", outdoors" if room.outdoors else ""))
+        for room in rooms]
+    return _list_picker_curses(
+        stdscr, "Pick room", rows, active_room, "new room", poll_timeout_ms)
+
+
+def _spot_picker_curses(
+    stdscr: object,
+    conn: sqlite3.Connection,
+    room_id: int,
+    active_spot: Optional[int],
+    poll_timeout_ms: int = PICKER_TIMEOUT_RESTORE_MS,
+) -> Optional[PickerSelection]:
+    """Pick or create a spot within a room."""
+    spots = store_mod.list_spots(conn, room_id=room_id)
+    rows = [(spot.id, spot.name) for spot in spots]
+    return _list_picker_curses(
+        stdscr, "Pick spot", rows, active_spot, "new spot", poll_timeout_ms)
+
+
+def _pick_room_spot_curses(
+    stdscr: object,
+    conn: sqlite3.Connection,
+    state: "WalkState",
+    poll_timeout_ms: int = PICKER_TIMEOUT_RESTORE_MS,
+) -> bool:
+    """Pick a room and spot within the active location."""
+    if state.active_location_id is None:
+        state.set_toast("no preset location: rerun with --location")
+        return False
+    active_room = _active_room_id(conn, state)
+    try:
+        picked_room = _room_picker_curses(
+            stdscr, conn, state.active_location_id, active_room,
+            poll_timeout_ms)
+    except (sqlite3.Error, OSError) as exc:
+        state.set_toast("DB error: %s" % (exc,))
+        return False
+    if picked_room == "new":
+        picked_room, note = _create_room_curses(
+            stdscr, conn, state.active_location_id, poll_timeout_ms)
+        state.set_toast(note)
+    if not isinstance(picked_room, int):
+        return False
+    try:
+        picked_spot = _spot_picker_curses(
+            stdscr, conn, picked_room, state.active_spot_id,
+            poll_timeout_ms)
+    except (sqlite3.Error, OSError) as exc:
+        state.set_toast("DB error: %s" % (exc,))
+        return False
+    if picked_spot == "new":
+        picked_spot = _create_spot_curses(
+            stdscr, conn, picked_room, poll_timeout_ms)
+    if not isinstance(picked_spot, int):
+        state.set_toast("spot pick cancelled")
+        return False
+    state.set_active_spot(picked_spot)
+    return True
+
+
+def _prompt_curses(
+    stdscr: object,
+    prompt: str,
+    poll_timeout_ms: int = PICKER_TIMEOUT_RESTORE_MS,
+) -> str:
+    """Read one line in blocking curses mode and restore poll timing."""
+    import curses
+
+    height, width = stdscr.getmaxyx()  # type: ignore[attr-defined]
+    stdscr.timeout(-1)  # type: ignore[attr-defined]
+    try:
+        curses.echo()  # type: ignore[attr-defined]
+        stdscr.addstr(  # type: ignore[attr-defined]
+            height - 1, 0, prompt[:width - 1])
+        stdscr.clrtoeol()  # type: ignore[attr-defined]
+        stdscr.refresh()  # type: ignore[attr-defined]
+        raw = stdscr.getstr(  # type: ignore[attr-defined]
+            height - 1, min(len(prompt), width - 1))
+        return raw.decode("utf-8", "replace")
+    except Exception:
+        return ""
+    finally:
+        try:
+            curses.noecho()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        try:
+            stdscr.timeout(poll_timeout_ms)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+
+def _create_room_curses(
+    stdscr: object,
+    conn: sqlite3.Connection,
+    location_id: int,
+    poll_timeout_ms: int = PICKER_TIMEOUT_RESTORE_MS,
+) -> Tuple[Optional[int], str]:
+    """Prompt for and create or reuse a room."""
+    name = _prompt_curses(stdscr, "room name: ", poll_timeout_ms).strip()
+    if not name:
+        return None, "new room cancelled"
+    floor_input = _prompt_curses(
+        stdscr, "floor (int): ", poll_timeout_ms).strip()
+    try:
+        floor = parse_floor_input(floor_input or "0")
+    except ValueError as exc:
+        return None, "cancelled/invalid: %s" % (exc,)
+    outdoors_input = _prompt_curses(
+        stdscr, "outdoors? [y/N]: ", poll_timeout_ms).strip().lower()
+    outdoors = outdoors_input in ("y", "yes", "1")
+    try:
+        room_id = store_mod.create_room(
+            conn, location_id, name, floor=floor, outdoors=outdoors)
+    except sqlite3.IntegrityError:
+        existing = _find_room_by_name(conn, location_id, name)
+        if existing is None:
+            return None, "room create failed: duplicate room"
+        room_id, existing_floor = existing
+        return room_id, (
+            "room exists (floor %d); adding spot there" % existing_floor)
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        return None, "room create failed: %s" % (exc,)
+    return room_id, "room created"
+
+
+def _create_spot_curses(
+    stdscr: object,
+    conn: sqlite3.Connection,
+    room_id: int,
+    poll_timeout_ms: int = PICKER_TIMEOUT_RESTORE_MS,
+) -> Optional[int]:
+    """Prompt for and create a spot within a room."""
+    name = _prompt_curses(stdscr, "spot name: ", poll_timeout_ms).strip()
+    if not name:
+        return None
+    try:
+        return store_mod.create_spot(conn, room_id, name)
+    except (sqlite3.Error, OSError, ValueError):
+        return None
 
 
 def _fallback_pick_level(prompt: str, rows: List[Tuple[int, str]],
