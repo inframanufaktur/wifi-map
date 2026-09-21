@@ -221,13 +221,16 @@ def _render_comparison_dashboard(state: EvalState, width: int,
                                  height: int) -> List[RenderLine]:
     rows = state.comparison_rows
     metric = state.comparison_metric
-    summary = evaluation.comparison_summary(rows, metric.key)
+    summary = evaluation.comparison_summary(
+        state.all_comparison_rows, metric.key)
     scope = state.scope.label if state.scope is not None else "-"
     kind = KIND_OPTIONS[state.kind_index][1]
     before = state.before_walk.name if state.before_walk else "-"
     after = state.after_walk.name if state.after_walk else "-"
     order = "best change first" if state.comparison_reverse else (
         "worst change first")
+    spot_filter = "all spots" if state.comparison_show_all else (
+        "compared spots only")
     lines = [
         _line("WiFi comparison — %s: %s" % (kind, scope), width, "title"),
         _line("%sbefore: %s → after: %s" % (
@@ -240,6 +243,7 @@ def _render_comparison_dashboard(state: EvalState, width: int,
         _line("focus: %s (%s is better) | order: %s" % (
             metric.label, "higher" if metric.higher_is_better else "lower",
             order), width),
+        _line("filter: %s" % spot_filter, width, "muted"),
     ]
     lines.append(_line(
         "paired %d | median %s → %s %s | change %s" % (
@@ -260,7 +264,9 @@ def _render_comparison_dashboard(state: EvalState, width: int,
     lines.append(_line(header, width, "title"))
     help_lines = _key_help_lines((
         "↑/↓ j/k move", "Enter details", "Tab/Shift+Tab metric",
-        "r order", "x swap", "c reselect", "Esc evaluation", "q quit",
+        "r order", "f all spots" if not state.comparison_show_all
+        else "f compared only", "x swap", "c reselect", "Esc evaluation",
+        "q quit",
     ), width)
     row_height = 1 if tabular else 2
     reserved = len(lines) + len(help_lines)

@@ -472,6 +472,19 @@ def test_compare_flow_selects_baseline_then_candidate_from_current_scope():
     assert state.screen == "compare_dashboard"
     assert state.before_walk.name == "before mesh"
     assert state.after_walk.name == "after mesh"
+    assert {row.status for row in state.comparison_rows} == {"matched"}
+
+
+def test_comparison_defaults_to_matched_spots_and_can_show_all_spots():
+    state = _comparison_state()
+    _enter_comparison(state)
+
+    assert state.comparison_show_all is False
+    assert [row.status for row in state.comparison_rows] == ["matched"]
+
+    state.press("f")
+
+    assert state.comparison_show_all is True
     assert {row.status for row in state.comparison_rows} == {
         "matched", "before_only", "after_only"}
 
@@ -528,13 +541,16 @@ def test_render_comparison_dashboard_shows_coverage_changes_and_statuses():
     assert "1 matched" in output
     assert "1 not revisited" in output
     assert "1 new" in output
-    assert "NOT REVISITED" in output
-    assert "NEW" in output
     assert "BETTER" in output
     assert "-75" in output and "-55" in output and "+20" in output
-    assert any("Tab/Shift+Tab" in line and "x swap" in line for line in wide)
-    assert any("NOT REVISITED" in line for line in narrow)
-    assert any("NEW" in line for line in narrow)
+    assert "NOT REVISITED" not in output
+    assert "NEW" not in output
+    assert any("f all spots" in line and "x swap" in line for line in wide)
+    state.press("f")
+    all_spots = "\n".join(
+        line.text for line in eval_tui.render(state, 120, 28))
+    assert "NOT REVISITED" in all_spots
+    assert "NEW" in all_spots
     assert all(len(line) <= 120 for line in wide)
     assert all(len(line) <= 54 for line in narrow)
 
@@ -620,6 +636,7 @@ def test_comparison_detail_shows_all_metrics_both_histories_and_full_reading():
 def test_comparison_detail_labels_not_revisited_and_new_spots():
     state = _comparison_state()
     _enter_comparison(state)
+    state.press("f")
 
     old_index = next(
         index for index, row in enumerate(state.comparison_rows)

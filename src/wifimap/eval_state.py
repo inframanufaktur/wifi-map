@@ -37,7 +37,9 @@ class EvalState:
         self.after_walk: Optional[evaluation.WalkOption] = None
         self.comparison_metric_index = 0
         self.comparison_reverse = False
+        self.comparison_show_all = False
         self.comparison_cursor = 0
+        self._all_comparison_rows: List[evaluation.ComparisonRow] = []
         self._comparison_rows: List[evaluation.ComparisonRow] = []
         self.comparison_detail_row: Optional[evaluation.ComparisonRow] = None
         self.comparison_detail_side = "before"
@@ -62,6 +64,10 @@ class EvalState:
     @property
     def comparison_rows(self) -> List[evaluation.ComparisonRow]:
         return self._comparison_rows
+
+    @property
+    def all_comparison_rows(self) -> List[evaluation.ComparisonRow]:
+        return self._all_comparison_rows
 
     def _scoped_readings(self) -> List[evaluation.Reading]:
         if self.scope is None:
@@ -88,16 +94,21 @@ class EvalState:
 
     def _refresh_comparison_rows(self) -> None:
         if self.before_walk is None or self.after_walk is None:
+            self._all_comparison_rows = []
             self._comparison_rows = []
             return
         rows = evaluation.compare_walks(
             self._scoped_readings(), self.before_walk.walk_id,
             self.after_walk.walk_id,
         )
-        self._comparison_rows = evaluation.rank_comparison_rows(
+        self._all_comparison_rows = evaluation.rank_comparison_rows(
             rows, self.comparison_metric.key,
             reverse=self.comparison_reverse,
         )
+        self._comparison_rows = [
+            row for row in self._all_comparison_rows
+            if self.comparison_show_all or row.status == "matched"
+        ]
         self.comparison_cursor = min(
             self.comparison_cursor,
             max(0, len(self._comparison_rows) - 1),
@@ -233,6 +244,7 @@ class EvalState:
                 self.after_walk = self.walk_candidates[self.candidate_index]
                 self.comparison_metric_index = 0
                 self.comparison_reverse = False
+                self.comparison_show_all = False
                 self.comparison_cursor = 0
                 self._refresh_comparison_rows()
                 self.screen = "compare_dashboard"
@@ -282,6 +294,10 @@ class EvalState:
                 self._refresh_comparison_rows()
             elif key == "r":
                 self.comparison_reverse = not self.comparison_reverse
+                self.comparison_cursor = 0
+                self._refresh_comparison_rows()
+            elif key == "f":
+                self.comparison_show_all = not self.comparison_show_all
                 self.comparison_cursor = 0
                 self._refresh_comparison_rows()
             elif key == "x" and self.before_walk and self.after_walk:
