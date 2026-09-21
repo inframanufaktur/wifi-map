@@ -262,11 +262,6 @@ src/wifimap/  cli.py    argparse, live commands + dispatch facade
               walk_state.py mutable session state + worker coordination
               walk_ui.py pure walk formatting, meters, sparklines + picker input
 tests/        fixtures/mocks only, no live network
-docs/         plans/ (build history) + superpowers/ (specs)
 scripts/      explicit one-off local database migrations
 spikes/       M0 signal-backend probes (pyobjc vs swift vs wdutil vs system_profiler)
 ```
-
-Design specs: `docs/superpowers/specs/` (location/spot model, walk UI,
-location-owned SSIDs).
-Build plan with decision log: `docs/plans/wifimap-v1.md`.
