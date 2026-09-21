@@ -9,6 +9,8 @@ import pytest
 from wifimap import signal as signal_mod
 from wifimap import speed as speed_mod
 from wifimap import store as store_mod
+from wifimap import evaluation as evaluation_mod
+from wifimap import eval_tui as eval_tui_mod
 from wifimap import cli as cli_mod
 from wifimap.cli import main
 
@@ -37,6 +39,61 @@ def _seed_3level(conn, loc="home", room="kitchen", spot="window",
     sid = store_mod.create_spot(conn, rid, spot)
     store_mod.add_reading(conn, sid, **reading_kw)
     return sid
+
+
+def test_eval_uses_selected_database(monkeypatch, tmp_path):
+    db = str(tmp_path / "readings.db")
+    report = evaluation_mod.Report(source=db, readings=())
+    seen = []
+    monkeypatch.setattr(evaluation_mod, "load_db", lambda path: (
+        seen.append(("db", str(path))) or report))
+    monkeypatch.setattr(eval_tui_mod, "run_eval", lambda value: (
+        seen.append(("tui", value.source)) or 0))
+
+    rc = main(["--db", db, "eval"])
+
+    assert rc == 0
+    assert seen == [("db", db), ("tui", db)]
+
+
+def test_eval_csv_overrides_database_source(monkeypatch, tmp_path):
+    csv_path = str(tmp_path / "report.csv")
+    report = evaluation_mod.Report(source=csv_path, readings=())
+    seen = []
+    monkeypatch.setattr(evaluation_mod, "load_csv", lambda path: (
+        seen.append(("csv", str(path))) or report))
+    monkeypatch.setattr(evaluation_mod, "load_db", lambda path: (
+        pytest.fail("database loader must not run with --csv")))
+    monkeypatch.setattr(eval_tui_mod, "run_eval", lambda value: 0)
+
+    rc = main(["eval", "--csv", csv_path])
+
+    assert rc == 0
+    assert seen == [("csv", csv_path)]
+
+
+def test_eval_defaults_to_project_database():
+    args = cli_mod._build_parser().parse_args(["eval"])
+
+    assert args.db == str(cli_mod._PROJECT_ROOT / "db" / "wifi-map.db")
+
+
+def test_eval_source_error_exits_3(monkeypatch, tmp_path, capsys):
+    db = str(tmp_path / "missing.db")
+    monkeypatch.setattr(
+        evaluation_mod, "load_db",
+        lambda path: (_ for _ in ()).throw(
+            evaluation_mod.ReportError("database does not exist")),
+    )
+    monkeypatch.setattr(
+        eval_tui_mod, "run_eval",
+        lambda report: pytest.fail("TUI must not run for invalid source"),
+    )
+
+    rc = main(["--db", db, "eval"])
+
+    assert rc == 3
+    assert "database does not exist" in capsys.readouterr().err
 
 
 def test_scan_insert_path(monkeypatch, tmp_path, capsys):

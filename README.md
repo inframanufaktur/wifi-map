@@ -31,6 +31,10 @@ wifimap --db /tmp/demo.db walk --no-speedtest --location HOME
 # 3. Review + export:
 wifimap --db /tmp/demo.db list
 wifimap --db /tmp/demo.db export --csv readings.csv
+
+# 4. Evaluate in the terminal (live DB or portable export):
+wifimap --db /tmp/demo.db eval
+wifimap eval --csv readings.csv
 ```
 
 Real DB defaults to `db/wifi-map.db` inside this project (gitignored) — pass `--db PATH` (global flag,
@@ -43,6 +47,7 @@ auto-create on `scan`.
 |---------|--------------|
 | `wifimap scan --location L --room R --spot S [--room-floor N] [--room-outdoors 0\|1] [--no-speedtest] [--note TEXT]` | Single snapshot row, print, exit |
 | `wifimap walk [--interval 1.0] [--no-speedtest] [--location L] [--ssid NAME]` | Live RSSI/noise/SNR/down/up graph meters, BSSID/channel table + snapshot keys above |
+| `wifimap eval [--csv REPORT.csv]` | Terminal evaluation dashboard; defaults to the project DB, or reads a current-schema CSV export |
 | `wifimap locations list` / `add --name X` | List sites / create one (prints id) |
 | `wifimap rooms list --location L` / `add --location L --name X --floor N [--outdoors]` | List / create rooms in a site |
 | `wifimap spots list --location L --room R` / `add --location L --room R --name X` | List / create spots in a room |
@@ -67,6 +72,25 @@ Walk shows the benchmark in its header and keeps a persistent `last:`
 line with the last speedtest result + delta. While the Ookla binary runs
 (both `scan` capture and `benchmark set`), `speedtest running...` prints
 to stderr so the wait is visible.
+
+## Evaluation TUI
+
+`wifimap eval` opens `db/wifi-map.db` read-only. Use the global database
+override before the command (`wifimap --db PATH eval`), or evaluate an
+immutable export with `wifimap eval --csv export/report.csv`.
+
+Startup first asks whether to evaluate by Location or SSID, then asks for the
+specific value. `Unknown` includes readings without an SSID. The dashboard
+starts with per-spot medians ranked worst-first; `v` toggles individual
+readings, `Tab`/`Shift+Tab` cycles forward/backward through RSSI/SNR/ping/down/up
+and benchmark-delta metrics, `r`
+reverses the ranking, arrows or `j`/`k` move, and Escape returns to selection.
+Rows identify each result as `room / floor / spot`; RSSI/SNR ratings use the
+same GREAT/OK/WEAK thresholds as walk mode.
+
+CSV evaluation requires all current export columns, including the four delta
+columns. Blank values are valid; missing required columns and malformed
+numeric cells are reported with a nonzero exit.
 
 Floor convention (on room): 0 ground, -1 first basement, +1 first upper.
 `outdoors`: 1 = garden/balcony/etc. Note the flag shapes differ:

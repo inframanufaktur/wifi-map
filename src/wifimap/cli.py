@@ -1,4 +1,4 @@
-"""CLI: scan/walk/locations/list/export.
+"""CLI: scan/walk/eval/locations/list/export.
 
 Exit codes: 0 ok, 2 no-wifi/signal-unavailable, 3 storage, 4 reserved.
 Note: signal-tool missing currently maps to 2 with an install hint;
@@ -18,6 +18,8 @@ from typing import Optional, Sequence
 from wifimap import signal as signal_mod
 from wifimap import speed as speed_mod
 from wifimap import store as store_mod
+from wifimap import evaluation as evaluation_mod
+from wifimap import eval_tui as eval_tui_mod
 
 EXIT_OK = 0
 EXIT_NOWIFI = 2
@@ -27,13 +29,7 @@ EXIT_STORAGE = 3
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_DB = str(_PROJECT_ROOT / "db" / "wifi-map.db")
 
-_EXPORT_FIELDS = [
-    "id", "ts", "spot_id", "room_id", "location_id", "location_name",
-    "room_name", "spot_name", "floor", "outdoors",
-    "ssid", "bssid", "rssi", "noise", "snr", "channel", "phy",
-    "tx_rate", "ping_ms", "down_mbps", "up_mbps", "server", "note",
-    "delta_rssi", "delta_snr", "delta_down_mbps", "delta_up_mbps",
-]
+_EXPORT_FIELDS = list(evaluation_mod.REQUIRED_FIELDS)
 
 _DELTA_SPECS = (
     ("rssi", "delta_rssi", round),
@@ -63,7 +59,7 @@ def _sample_countdown(seconds: float = 5.0, tick: float = 1.0,
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="wifimap",
-        description="Map home WiFi (scan/locations/list/export).",
+        description="Map and evaluate home WiFi.",
         epilog="Exit codes: 0 ok, 2 no-wifi/signal-unavailable "
         "(signal-tool missing maps to 2 with hint), 3 storage, "
         "4 reserved (speedtest binary missing when required).",
@@ -88,6 +84,12 @@ def _build_parser() -> argparse.ArgumentParser:
     w.add_argument("--location", default=None, help="Preset ID|NAME")
     w.add_argument("--ssid", default=None,
                    help="Session SSID override (manual)")
+
+    ev = sub.add_parser(
+        "eval", help="Evaluate saved readings in a terminal UI.")
+    ev.add_argument(
+        "--csv", default=None,
+        help="Read a current-schema CSV export instead of the database")
 
     loc = sub.add_parser("locations", help="Locations CRUD.")
     loc_sub = loc.add_subparsers(dest="locations_cmd", required=False)
@@ -256,6 +258,17 @@ def _cmd_walk(db_path: str, args: argparse.Namespace) -> int:
         no_speedtest=args.no_speedtest,
         ssid=ssid,
     )
+
+
+def _cmd_eval(db_path: str, args: argparse.Namespace) -> int:
+    try:
+        report = (evaluation_mod.load_csv(args.csv) if args.csv
+                  else evaluation_mod.load_db(db_path))
+    except evaluation_mod.ReportError as exc:
+        print("Error: cannot load evaluation source: %s" % exc,
+              file=sys.stderr)
+        return EXIT_STORAGE
+    return eval_tui_mod.run_eval(report)
 
 
 def _cmd_locations_list(db_path: str) -> int:
@@ -637,6 +650,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _cmd_scan(db_path, args)
     if args.cmd == "walk":
         return _cmd_walk(db_path, args)
+    if args.cmd == "eval":
+        return _cmd_eval(db_path, args)
     if args.cmd == "locations":
         if getattr(args, "locations_cmd", None) == "add":
             return _cmd_locations_add(db_path, args)
