@@ -15,31 +15,10 @@ import re
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
 from typing import Optional, Tuple
 
-
-class NoWiFiError(Exception):
-    """Raised when WiFi is off or not associated (scan exits 2, walk shows NO-WIFI)."""
-
-
-class SignalUnavailableError(Exception):
-    """Raised when no signal backend works (PyObjC missing, profiler failed)."""
-
-
-@dataclass
-class Signal:
-    ssid: Optional[str] = None
-    bssid: Optional[str] = None
-    rssi: Optional[int] = None
-    noise: Optional[int] = None
-    snr: Optional[int] = None
-    channel: Optional[str] = None
-    phy: Optional[str] = None
-    tx_rate: Optional[str] = None
-    mcs: Optional[int] = None
-    band: Optional[str] = None
-    security: Optional[str] = None
+from wifimap.signal_models import NoWiFiError, Signal, SignalUnavailableError
+from wifimap.signal_profiler import read_signal_profiler
 
 
 # CWPHYMode enum (Apple docs): 0 none, 1 a, 2 b, 3 g, 4 n, 5 ac, 6 ax.
@@ -232,11 +211,6 @@ def sample_signal(seconds: float = 5.0, read_fn=None,
     )
 
 
-_SIGNAL_RE = re.compile(
-    r"Signal\s*/\s*Noise:\s*(-?\d+)\s*dBm\s*/\s*(-?\d+)\s*dBm")
-_RATE_RE = re.compile(r"Transmit Rate:\s*(\S+)")
-_PHY_RE = re.compile(r"PHY Mode:\s*(.+)")
-_CHANNEL_RE = re.compile(r"Channel:\s*(\S[^\n]*)")
 
 #: Timeouts (s) for the one-shot session identity lookup. Every
 #: subprocess call has a timeout so walk/scan can never hang.
@@ -476,41 +450,3 @@ def read_local_addrs():
     if not ip and not router and not mac:
         return None
     return (ip, router, mac)
-
-
-def read_signal_profiler(timeout: float = 30.0) -> Signal:
-    """Slow fallback via ``system_profiler SPAirPortDataType`` (~4.5s).
-
-    SSID/BSSID are redacted by the OS here, so always ``None``.
-    """
-    try:
-        proc = subprocess.run(
-            ["system_profiler", "SPAirPortDataType"],
-            capture_output=True, text=True, timeout=timeout,
-        )
-    except FileNotFoundError as exc:
-        raise SignalUnavailableError("system_profiler not found") from exc
-    except subprocess.TimeoutExpired as exc:
-        raise SignalUnavailableError(
-            "system_profiler timed out after %ss" % (timeout,)) from exc
-    if proc.returncode != 0:
-        raise SignalUnavailableError(
-            "system_profiler failed (rc=%s)" % (proc.returncode,))
-    out = proc.stdout or ""
-    m = _SIGNAL_RE.search(out)
-    if not m:
-        raise NoWiFiError("no associated network in system_profiler output")
-    rssi, noise = int(m.group(1)), int(m.group(2))
-    rate = _RATE_RE.search(out)
-    phy = _PHY_RE.search(out)
-    channel = _CHANNEL_RE.search(out)
-    return Signal(
-        ssid=None,
-        bssid=None,
-        rssi=rssi,
-        noise=noise,
-        snr=rssi - noise,
-        channel=channel.group(1).strip() if channel else None,
-        phy=phy.group(1).strip() if phy else None,
-        tx_rate=rate.group(1).strip() if rate else None,
-    )
