@@ -241,8 +241,9 @@ src/wifimap/  cli.py    argparse + exit codes, CSV export
               signal.py CoreWLAN backend + slow fallback + wdutil identity
               speed.py  Ookla subprocess wrapper (graceful missing-binary path)
               traffic.py default-iface byte counters (netstat/route) for live traffic
-              tui.py    curses walk loop + ANSI fallback, snapshot worker thread
+              tui.py    walk state + curses/ANSI runtime loops
               walk_picker.py curses + line-based room/spot workflows
+              walk_snapshot.py signal/speed capture + benchmark workers
               walk_ui.py pure walk formatting, meters, sparklines + picker input
 tests/        fixtures/mocks only, no live network
 docs/         plans/ (build history) + superpowers/ (specs)
