@@ -1,0 +1,18 @@
+{
+  "title": "wifimap",
+  "description": "Map, compare, and evaluate home WiFi from the terminal.",
+  "repository": "https://github.com/inframanufaktur/wifi-map",
+  "organization": {
+    "name": "Cyber Design Inframanufaktur",
+    "claim": "Geheimorganisation zur Verknotung von Netzwerkkabeln",
+    "url": "https://www.inframanufaktur.org/"
+  },
+  "navigation": [
+    { "key": "overview", "label": "Overview", "href": "/" },
+    { "key": "quick-start", "label": "Quick start", "href": "/quick-start/" },
+    { "key": "walk-tui", "label": "Walk TUI", "href": "/walk-tui/" },
+    { "key": "evaluate", "label": "Evaluate", "href": "/evaluate/" },
+    { "key": "cli-reference", "label": "CLI reference", "href": "/cli-reference/" },
+    { "key": "data-troubleshooting", "label": "Data + troubleshooting", "href": "/data-troubleshooting/" }
+  ]
+}

@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <meta name="description" content="{{ description }}">
+    <title>{{ title }} · {{ site.title }}</title>
+    <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/assets/site.css">
+    <script src="/assets/site.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    <header class="site-header">
+      <div class="header-rail page-shell">
+        <a class="wordmark" href="/" aria-label="wifimap documentation home">WIFI-MAP</a>
+        <span class="version">v{{ capabilities.package.version }}</span>
+        <span class="header-status"><span aria-hidden="true">●</span> docs online</span>
+      </div>
+      <nav class="site-nav" aria-label="Documentation">
+        <ul class="page-shell">
+          {% for item in site.navigation %}
+            <li>
+              <a href="{{ item.href }}"{% if navKey == item.key %} aria-current="page"{% endif %}>{{ item.label }}</a>
+            </li>
+          {% endfor %}
+        </ul>
+      </nav>
+    </header>
+    <main id="main-content" class="page-shell">
+      {{ content | safe }}
+    </main>
+    <footer class="site-footer">
+      <div class="page-shell footer-rail">
+        <a class="footer-brand" href="{{ site.organization.url }}">
+          <img class="footer-brand__logo" src="/assets/inframanufaktur-logo.svg" width="72" height="72" alt="">
+          <span class="footer-brand__copy">
+            <strong class="footer-brand__name">{{ site.organization.name }}</strong>
+            <span class="footer-brand__claim">{{ site.organization.claim }}</span>
+          </span>
+        </a>
+        <div class="footer-meta">
+          <p><a href="{{ site.repository }}">Repository</a> · <a href="{{ site.repository }}/tree/main/docs/src">Docs source</a></p>
+        </div>
+      </div>
+    </footer>
+  </body>
+</html>

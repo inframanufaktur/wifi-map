@@ -1,0 +1,16 @@
+{
+  "name": "wifimap-docs",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=26 <27"
+  },
+  "scripts": {
+    "docs:build": "eleventy",
+    "docs:serve": "eleventy --serve",
+    "docs:test": "pytest tests/test_docs.py"
+  },
+  "devDependencies": {
+    "@11ty/eleventy": "3.1.6"
+  }
+}
