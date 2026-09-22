@@ -47,5 +47,4 @@ application and documentation suite runs with `pytest`.
 
 - [Documentation source](docs/src)
 - [Repository](https://github.com/inframanufaktur/wifi-map)
-- **Production site:** hostname pending; add the deployed URL here after the
-  first verified Uberspace deployment.
+- [Production site](https://wifimap.inframanufaktur.org/)

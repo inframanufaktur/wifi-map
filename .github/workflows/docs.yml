@@ -88,20 +88,7 @@ jobs:
           mkdir -p ~/.ssh
           printf '%s\n' "$UBERSPACE_SSH_KEY" > ~/.ssh/deploy_key
           printf '%s\n' "$UBERSPACE_SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
-          ssh-keygen -y -P '' -f ~/.ssh/deploy_key > ~/.ssh/deploy_key.pub
-          ssh-keygen -lf ~/.ssh/deploy_key.pub
-
-      - name: Verify deployment SSH access
-        env:
-          UBERSPACE_HOST: ${{ secrets.UBERSPACE_HOST }}
-          UBERSPACE_SSH_USER: ${{ secrets.UBERSPACE_SSH_USER }}
-        run: |
-          ssh -vv \
-            -o BatchMode=yes \
-            -o PreferredAuthentications=publickey \
-            -o IdentitiesOnly=yes \
-            -i ~/.ssh/deploy_key \
-            "$UBERSPACE_SSH_USER@$UBERSPACE_HOST" true
+          ssh-keygen -y -P '' -f ~/.ssh/deploy_key > /dev/null
 
       - name: Mirror site to Uberspace DocumentRoot
         env:

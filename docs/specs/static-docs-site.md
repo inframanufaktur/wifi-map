@@ -342,12 +342,11 @@ or a broken internal link fails before deployment.
 
 These do not block implementation:
 
-1. Add the deployed URL to the README after the first successful deployment.
-2. A maintainer must dedicate the `wifimap.inframanufaktur.org` DocumentRoot to
+1. A maintainer must dedicate the `wifimap.inframanufaktur.org` DocumentRoot to
    the docs; add `UBERSPACE_SSH_KEY`, `UBERSPACE_HOST`, `UBERSPACE_SSH_USER`,
    and `UBERSPACE_SSH_KNOWN_HOSTS` as secrets; and add `UBERSPACE_WEB_ROOT` as
    a variable in the GitHub `prod` environment before deployment.
-3. Repository branch protection and required status checks are configured in
+2. Repository branch protection and required status checks are configured in
    GitHub, not in this change; the workflow will provide the check to require.
 
 ## Verified implementation sources
