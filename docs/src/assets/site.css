@@ -355,6 +355,10 @@ pre,
   border-bottom: 1px solid var(--border);
 }
 
+.key-reference__item {
+  align-items: start;
+}
+
 .key-reference__item:last-child,
 .reference-list > div:last-child,
 .option-metadata > div:last-child {

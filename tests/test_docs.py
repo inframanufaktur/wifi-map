@@ -250,6 +250,15 @@ def test_generated_site_has_all_pages_assets_and_stable_toolchain(
     assert (PROJECT_ROOT / ".nvmrc").read_text().strip() == "26"
 
 
+def test_keyboard_reference_rows_align_both_columns(
+        generated_site: dict[str, bytes]) -> None:
+    css = generated_site["assets/site.css"].decode()
+    walk_html = generated_site["walk-tui/index.html"].decode()
+
+    assert ".key-reference__item {\n  align-items: start;\n}" in css
+    assert "<dd></p>" not in walk_html
+
+
 def test_generated_pages_have_accessible_structure_and_live_references(
         generated_site: dict[str, bytes]) -> None:
     _raw, capabilities = _extract()

@@ -24,25 +24,23 @@ The line-buffered fallback uses the same controls followed by Enter.
   {% for control in capabilities.walk.controls %}
     <div class="key-reference__item">
       <dt><kbd>{{ control.key }}</kbd> <span>{{ control.name | replace("_", " ") }}</span></dt>
-      <dd>
-      {% if control.name == "snapshot" %}
+      <dd>{%- if control.name == "snapshot" -%}
         Measure and save a snapshot for the active spot.
-      {% elif control.name == "speed_probe" %}
+      {%- elif control.name == "speed_probe" -%}
         Run an unsaved throughput probe for the active spot.
-      {% elif control.name == "compare" %}
+      {%- elif control.name == "compare" -%}
         Choose a previous named walk as the live comparison, or turn comparison off.
-      {% elif control.name == "benchmark" %}
+      {%- elif control.name == "benchmark" -%}
         Capture the location's ideal-conditions benchmark.
-      {% elif control.name == "switch" %}
+      {%- elif control.name == "switch" -%}
         Switch to an existing location, room, and spot.
-      {% elif control.name == "new" %}
+      {%- elif control.name == "new" -%}
         Create and select a room and spot without leaving the walk.
-      {% elif control.name == "quit" %}
+      {%- elif control.name == "quit" -%}
         Finish the named walk and leave the TUI.
-      {% else %}
+      {%- else -%}
         Perform this walk action.
-      {% endif %}
-      </dd>
+      {%- endif -%}</dd>
     </div>
   {% endfor %}
   </dl>
