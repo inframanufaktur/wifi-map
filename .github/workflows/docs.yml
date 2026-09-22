@@ -53,7 +53,7 @@ jobs:
       github.ref == 'refs/heads/main'
     needs: verify
     runs-on: ubuntu-latest
-    environment: production
+    environment: prod
     concurrency:
       group: docs-production
       cancel-in-progress: true

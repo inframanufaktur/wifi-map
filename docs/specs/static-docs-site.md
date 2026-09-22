@@ -130,7 +130,7 @@ toolchains, uses `npm ci`, and invokes the same npm build command used locally:
   superseded pending/running deployment.
 
 Following the supplied production example, deployment uses the runner's
-OpenSSH and rsync clients with these GitHub `production` environment secrets:
+OpenSSH and rsync clients with these GitHub `prod` environment secrets:
 
 - `UBERSPACE_SSH_KEY` — a dedicated private deploy key;
 - `UBERSPACE_HOST` — the account host, such as `stardust.uberspace.de`;
@@ -147,7 +147,7 @@ rsync -avz --delete --chmod=D755,F644 -e "ssh -i ~/.ssh/deploy_key" \
   "$UBERSPACE_SSH_USER@$UBERSPACE_HOST:/var/www/virtual/$UBERSPACE_SSH_USER/html/"
 ```
 
-The workflow declares the GitHub `production` environment. It does not create
+The workflow declares the GitHub `prod` environment. It does not create
 the Uberspace account, domain, DocumentRoot, or SSH key. Because `--delete`
 makes the remote site an exact mirror, that `html` directory must be dedicated
 to these docs. A maintainer should restrict the deploy key server-side to this
@@ -342,7 +342,7 @@ These do not block implementation:
    deployed-site link easy to update after the first successful deployment.
 2. A maintainer must dedicate the account's default DocumentRoot to the docs
    and add `UBERSPACE_SSH_KEY`, `UBERSPACE_HOST`, `UBERSPACE_SSH_USER`, and
-   `UBERSPACE_SSH_KNOWN_HOSTS` to the GitHub `production` environment before
+   `UBERSPACE_SSH_KNOWN_HOSTS` to the GitHub `prod` environment before
    the deploy job can succeed.
 3. Repository branch protection and required status checks are configured in
    GitHub, not in this change; the workflow will provide the check to require.

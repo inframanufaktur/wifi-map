@@ -442,7 +442,7 @@ def test_docs_workflow_verifies_before_secret_isolated_deployment() -> None:
     assert "secrets." not in verify
 
     assert "needs: verify" in deploy
-    assert "environment: production" in deploy
+    assert "\n    environment: prod\n" in deploy
     assert "group: docs-production" in deploy
     assert "cancel-in-progress: true" in deploy
     assert "github.event_name != 'pull_request'" in deploy
