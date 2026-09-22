@@ -259,6 +259,28 @@ def test_keyboard_reference_rows_align_both_columns(
     assert "<dd></p>" not in walk_html
 
 
+def test_visual_system_uses_sparse_lines_and_high_contrast_nav_focus(
+        generated_site: dict[str, bytes]) -> None:
+    css = generated_site["assets/site.css"].decode()
+
+    def rule(selector: str) -> str:
+        return css.split(f"{selector} {{", 1)[1].split("}", 1)[0]
+
+    assert "background-image" not in rule("body")
+    assert "border-bottom" not in rule("h2")
+    assert "border-bottom" not in rule(
+        ".key-reference__item,\n.reference-list > div,\n.option-metadata > div"
+    )
+    assert "border-top" not in rule(".generated-reference__sample")
+    assert "border-top" not in rule(".option-reference")
+    assert "border" not in rule("th,\ntd")
+
+    nav_focus = rule(".site-nav a:focus-visible")
+    assert "outline: 0.2rem solid var(--surface-inset);" in nav_focus
+    assert "background: var(--focus);" in nav_focus
+    assert "color: var(--surface-inset);" in nav_focus
+
+
 def test_generated_pages_have_accessible_structure_and_live_references(
         generated_site: dict[str, bytes]) -> None:
     _raw, capabilities = _extract()

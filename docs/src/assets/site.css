@@ -40,10 +40,6 @@ html {
 body {
   margin: 0;
   background-color: var(--surface);
-  background-image:
-    linear-gradient(rgb(103 232 249 / 0.025) 1px, transparent 1px),
-    linear-gradient(90deg, rgb(103 232 249 / 0.02) 1px, transparent 1px);
-  background-size: 2rem 2rem;
   color: var(--text);
   font-size: var(--step-0);
 }
@@ -164,6 +160,13 @@ a:hover {
   color: var(--accent);
 }
 
+.site-nav a:focus-visible {
+  outline: 0.2rem solid var(--surface-inset);
+  outline-offset: -0.2rem;
+  background: var(--focus);
+  color: var(--surface-inset);
+}
+
 main {
   padding-block: var(--space-4);
 }
@@ -198,8 +201,6 @@ h1 {
 
 h2 {
   margin-top: var(--space-4);
-  padding-bottom: 0.35rem;
-  border-bottom: 1px solid var(--border);
   color: var(--accent);
   font-size: var(--step-2);
 }
@@ -352,17 +353,10 @@ pre,
   grid-template-columns: minmax(9rem, 0.35fr) minmax(0, 1fr);
   gap: var(--space-2);
   padding-block: 0.65rem;
-  border-bottom: 1px solid var(--border);
 }
 
 .key-reference__item {
   align-items: start;
-}
-
-.key-reference__item:last-child,
-.reference-list > div:last-child,
-.option-metadata > div:last-child {
-  border-bottom: 0;
 }
 
 dt {
@@ -377,7 +371,6 @@ dd {
 
 .generated-reference__sample {
   padding-block: var(--space-2);
-  border-top: 1px solid var(--border);
 }
 
 .generated-reference__sample pre {
@@ -401,7 +394,6 @@ dd {
 
 .option-reference {
   padding: var(--space-2);
-  border-top: 1px solid var(--border);
   background: var(--surface-inset);
 }
 
@@ -433,7 +425,6 @@ table {
 th,
 td {
   padding: 0.6rem 0.75rem;
-  border: 1px solid var(--border);
   text-align: left;
   vertical-align: top;
 }
