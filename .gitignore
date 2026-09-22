@@ -3,6 +3,8 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .venv/
+node_modules/
+docs/_site/
 .worktrees/
 *.db
 *.db-journal
