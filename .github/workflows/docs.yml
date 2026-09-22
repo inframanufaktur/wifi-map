@@ -93,7 +93,9 @@ jobs:
         env:
           UBERSPACE_HOST: ${{ secrets.UBERSPACE_HOST }}
           UBERSPACE_SSH_USER: ${{ secrets.UBERSPACE_SSH_USER }}
+          UBERSPACE_WEB_ROOT: ${{ vars.UBERSPACE_WEB_ROOT }}
         run: |
-          rsync -avz --delete --chmod=D755,F644 -e "ssh -i ~/.ssh/deploy_key" \
+          rsync -avz --delete --chmod=D755,F644 \
+            -e "ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key" \
             docs/_site/ \
-            "$UBERSPACE_SSH_USER@$UBERSPACE_HOST:/var/www/virtual/$UBERSPACE_SSH_USER/html/"
+            "$UBERSPACE_SSH_USER@$UBERSPACE_HOST:/var/www/virtual/$UBERSPACE_SSH_USER/$UBERSPACE_WEB_ROOT/"

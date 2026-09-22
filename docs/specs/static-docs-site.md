@@ -130,26 +130,29 @@ toolchains, uses `npm ci`, and invokes the same npm build command used locally:
   superseded pending/running deployment.
 
 Following the supplied production example, deployment uses the runner's
-OpenSSH and rsync clients with these GitHub `prod` environment secrets:
+OpenSSH and rsync clients with these GitHub `prod` environment values:
 
 - `UBERSPACE_SSH_KEY` — a dedicated private deploy key;
 - `UBERSPACE_HOST` — the account host, such as `stardust.uberspace.de`;
-- `UBERSPACE_SSH_USER` — the Uberspace account name; and
+- `UBERSPACE_SSH_USER` — the Uberspace account name;
 - `UBERSPACE_SSH_KNOWN_HOSTS` — the host's independently verified SSH host-key
-  line.
+  line; and
+- `UBERSPACE_WEB_ROOT` — the non-secret DocumentRoot directory name, such as
+  `wifimap.inframanufaktur.org`.
 
-The deploy command mirrors the generated directory into the Uberspace default
+The deploy command mirrors the generated directory into the domain's Uberspace
 DocumentRoot and enforces the permissions Uberspace requires:
 
 ```sh
-rsync -avz --delete --chmod=D755,F644 -e "ssh -i ~/.ssh/deploy_key" \
+rsync -avz --delete --chmod=D755,F644 \
+  -e "ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key" \
   docs/_site/ \
-  "$UBERSPACE_SSH_USER@$UBERSPACE_HOST:/var/www/virtual/$UBERSPACE_SSH_USER/html/"
+  "$UBERSPACE_SSH_USER@$UBERSPACE_HOST:/var/www/virtual/$UBERSPACE_SSH_USER/$UBERSPACE_WEB_ROOT/"
 ```
 
 The workflow declares the GitHub `prod` environment. It does not create
 the Uberspace account, domain, DocumentRoot, or SSH key. Because `--delete`
-makes the remote site an exact mirror, that `html` directory must be dedicated
+makes the remote site an exact mirror, that domain directory must be dedicated
 to these docs. A maintainer should restrict the deploy key server-side to this
 one directory with Uberspace's documented `rrsync` setup.
 
@@ -191,9 +194,10 @@ pytest
 pytest tests/test_docs.py
 
 # Production deploy (CI only by default)
-rsync -avz --delete --chmod=D755,F644 -e "ssh -i ~/.ssh/deploy_key" \
+rsync -avz --delete --chmod=D755,F644 \
+  -e "ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key" \
   docs/_site/ \
-  "$UBERSPACE_SSH_USER@$UBERSPACE_HOST:/var/www/virtual/$UBERSPACE_SSH_USER/html/"
+  "$UBERSPACE_SSH_USER@$UBERSPACE_HOST:/var/www/virtual/$UBERSPACE_SSH_USER/$UBERSPACE_WEB_ROOT/"
 ```
 
 ## Project structure
@@ -338,12 +342,11 @@ or a broken internal link fails before deployment.
 
 These do not block implementation:
 
-1. The final Uberspace hostname/custom domain is not known. Keep the README's
-   deployed-site link easy to update after the first successful deployment.
-2. A maintainer must dedicate the account's default DocumentRoot to the docs
-   and add `UBERSPACE_SSH_KEY`, `UBERSPACE_HOST`, `UBERSPACE_SSH_USER`, and
-   `UBERSPACE_SSH_KNOWN_HOSTS` to the GitHub `prod` environment before
-   the deploy job can succeed.
+1. Add the deployed URL to the README after the first successful deployment.
+2. A maintainer must dedicate the `wifimap.inframanufaktur.org` DocumentRoot to
+   the docs; add `UBERSPACE_SSH_KEY`, `UBERSPACE_HOST`, `UBERSPACE_SSH_USER`,
+   and `UBERSPACE_SSH_KNOWN_HOSTS` as secrets; and add `UBERSPACE_WEB_ROOT` as
+   a variable in the GitHub `prod` environment before deployment.
 3. Repository branch protection and required status checks are configured in
    GitHub, not in this change; the workflow will provide the check to require.
 

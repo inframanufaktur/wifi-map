@@ -454,5 +454,10 @@ def test_docs_workflow_verifies_before_secret_isolated_deployment() -> None:
         "UBERSPACE_SSH_KNOWN_HOSTS",
     ):
         assert "secrets.%s" % secret in deploy
+    assert "UBERSPACE_WEB_ROOT: ${{ vars.UBERSPACE_WEB_ROOT }}" in deploy
     assert "rsync -avz --delete --chmod=D755,F644" in deploy
-    assert "/var/www/virtual/$UBERSPACE_SSH_USER/html/" in deploy
+    assert 'ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key' in deploy
+    assert (
+        "$UBERSPACE_SSH_USER@$UBERSPACE_HOST:/var/www/virtual/"
+        "$UBERSPACE_SSH_USER/$UBERSPACE_WEB_ROOT/"
+    ) in deploy
