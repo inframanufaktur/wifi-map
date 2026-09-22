@@ -1,0 +1,97 @@
+name: Documentation
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify documentation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.9"
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install Python project
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]"
+
+      - name: Install documentation toolchain
+        run: npm ci
+
+      - name: Run complete test suite
+        run: pytest
+
+      - name: Build production documentation
+        run: npm run docs:build
+
+      - name: Run documentation contracts
+        run: pytest tests/test_docs.py
+
+  deploy:
+    name: Deploy production documentation
+    if: github.event_name != 'pull_request'
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: docs-production
+      cancel-in-progress: true
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.9"
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Rebuild verified documentation
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          npm ci
+          npm run docs:build
+
+      - name: Configure deployment SSH identity
+        env:
+          UBERSPACE_SSH_KEY: ${{ secrets.UBERSPACE_SSH_KEY }}
+          UBERSPACE_SSH_KNOWN_HOSTS: ${{ secrets.UBERSPACE_SSH_KNOWN_HOSTS }}
+        run: |
+          umask 077
+          mkdir -p ~/.ssh
+          printf '%s\n' "$UBERSPACE_SSH_KEY" > ~/.ssh/deploy_key
+          printf '%s\n' "$UBERSPACE_SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      - name: Mirror site to Uberspace DocumentRoot
+        env:
+          UBERSPACE_HOST: ${{ secrets.UBERSPACE_HOST }}
+          UBERSPACE_SSH_USER: ${{ secrets.UBERSPACE_SSH_USER }}
+        run: |
+          rsync -avz --delete --chmod=D755,F644 -e "ssh -i ~/.ssh/deploy_key" \
+            docs/_site/ \
+            "$UBERSPACE_SSH_USER@$UBERSPACE_HOST:/var/www/virtual/$UBERSPACE_SSH_USER/html/"

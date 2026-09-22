@@ -319,3 +319,58 @@ def test_templates_escape_capability_values_and_site_output_is_ignored() -> None
         text=True,
     )
     assert ignored.returncode == 0
+
+
+def test_readme_is_a_compact_project_entry_point() -> None:
+    readme = (PROJECT_ROOT / "README.md").read_text()
+
+    assert len(readme.splitlines()) <= 80
+    for required in (
+        "macOS",
+        "Python 3.9+",
+        "wifimap scan",
+        "wifimap walk",
+        "wifimap eval",
+        "npm ci",
+        "npm run docs:build",
+        "npm run docs:serve",
+        "docs/src",
+        "https://github.com/inframanufaktur/wifi-map",
+        "Production site",
+    ):
+        assert required in readme
+
+
+def test_docs_workflow_verifies_before_secret_isolated_deployment() -> None:
+    workflow = (PROJECT_ROOT / ".github" / "workflows" / "docs.yml")
+    source = workflow.read_text()
+    verify, deploy = source.split("\n  deploy:\n", 1)
+
+    assert "pull_request:" in verify and "branches: [main]" in verify
+    assert "push:" in verify and "workflow_dispatch:" in verify
+    assert "actions/checkout@v7" in source
+    assert "actions/setup-python@v7" in source
+    assert "python-version: \"3.9\"" in source
+    assert "actions/setup-node@v7" in source
+    assert "node-version-file: .nvmrc" in source
+    assert "npm ci" in verify
+    assert "python -m pip install -e \".[test]\"" in verify
+    assert "pytest" in verify
+    assert "npm run docs:build" in verify
+    assert "pytest tests/test_docs.py" in verify
+    assert "secrets." not in verify
+
+    assert "needs: verify" in deploy
+    assert "environment: production" in deploy
+    assert "group: docs-production" in deploy
+    assert "cancel-in-progress: true" in deploy
+    assert "github.event_name != 'pull_request'" in deploy
+    for secret in (
+        "UBERSPACE_SSH_KEY",
+        "UBERSPACE_HOST",
+        "UBERSPACE_SSH_USER",
+        "UBERSPACE_SSH_KNOWN_HOSTS",
+    ):
+        assert "secrets.%s" % secret in deploy
+    assert "rsync -avz --delete --chmod=D755,F644" in deploy
+    assert "/var/www/virtual/$UBERSPACE_SSH_USER/html/" in deploy
