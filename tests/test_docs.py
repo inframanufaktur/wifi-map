@@ -1,0 +1,321 @@
+"""Contracts for the generated documentation capability adapter."""
+from __future__ import annotations
+
+import argparse
+from html.parser import HTMLParser
+import importlib.util
+import json
+from dataclasses import asdict
+from importlib import metadata
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+from typing import Optional
+from urllib.parse import unquote, urlsplit
+
+import pytest
+
+from wifimap import cli, eval_state, evaluation, walk_keys, walk_ui
+from wifimap.cli_common import _EXPORT_FIELDS
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+EXTRACTOR = PROJECT_ROOT / "docs" / "extract_capabilities.py"
+SITE_ROOT = PROJECT_ROOT / "docs" / "_site"
+EXPECTED_PAGES = (
+    "index.html",
+    "quick-start/index.html",
+    "walk-tui/index.html",
+    "evaluate/index.html",
+    "cli-reference/index.html",
+    "data-troubleshooting/index.html",
+)
+
+
+def _extract() -> tuple[bytes, dict]:
+    raw = subprocess.check_output([sys.executable, str(EXTRACTOR)])
+    return raw, json.loads(raw)
+
+
+def _command(document: dict, *path: str) -> dict:
+    return next(
+        command for command in document["cli"]["commands"]
+        if command["path"] == list(path)
+    )
+
+
+def _option(command: dict, flag: str) -> dict:
+    return next(option for option in command["options"]
+                if flag in option["flags"])
+
+
+def test_extractor_writes_deterministic_json_only() -> None:
+    first_raw, first = _extract()
+    second_raw, second = _extract()
+
+    assert first_raw == second_raw
+    assert first_raw.endswith(b"\n")
+    assert first == second
+    assert list(first) == ["package", "cli", "walk", "evaluation"]
+    assert str(PROJECT_ROOT).encode() not in first_raw
+    assert "generated_at" not in first
+    assert "extracted_at" not in first
+
+
+def test_cli_contract_includes_nested_commands_and_option_semantics() -> None:
+    _raw, document = _extract()
+
+    def parser_paths(parser: argparse.ArgumentParser,
+                     path: tuple[str, ...] = ()) -> list[list[str]]:
+        paths = [list(path)]
+        for action in parser._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                for name, child in action.choices.items():
+                    paths.extend(parser_paths(child, path + (name,)))
+        return paths
+
+    assert [command["path"] for command in document["cli"]["commands"]] == (
+        parser_paths(cli._build_parser()))
+
+    assert _command(document)["summary"] == "Map and evaluate home WiFi."
+    assert _command(document, "rooms")["summary"] == "Rooms CRUD."
+    room_add = _command(document, "rooms", "add")
+    assert room_add["summary"] == "Create a room."
+
+    location = _option(room_add, "--location")
+    assert location == {
+        "flags": ["--location"],
+        "destination": "location",
+        "required": True,
+        "kind": "value",
+        "choices": None,
+        "default": None,
+        "metavar": None,
+        "help": "Location ID|NAME",
+    }
+
+    outdoors = _option(room_add, "--outdoors")
+    assert outdoors["kind"] == "flag"
+    assert outdoors["required"] is False
+    assert outdoors["default"] is False
+
+    scan = _command(document, "scan")
+    room_outdoors = _option(scan, "--room-outdoors")
+    assert room_outdoors["choices"] == [0, 1]
+    assert room_outdoors["default"] == 0
+
+    database = _option(_command(document), "--db")
+    assert database["default"] == "<project>/db/wifi-map.db"
+    assert database["help"] == (
+        "SQLite DB path (default <project>/db/wifi-map.db)")
+
+
+def test_walk_contract_comes_from_live_keys_footer_ratings_and_glyphs() -> None:
+    _raw, document = _extract()
+    walk = document["walk"]
+
+    assert walk["footer"] == walk_ui.format_walk_footer()
+    assert walk["controls"] == [
+        {"name": "snapshot", "key": walk_keys.KEY_SNAPSHOT},
+        {"name": "speed_probe", "key": walk_keys.KEY_SPEED_PROBE},
+        {"name": "compare", "key": walk_keys.KEY_COMPARE},
+        {"name": "benchmark", "key": walk_keys.KEY_BENCHMARK},
+        {"name": "switch", "key": walk_keys.KEY_SWITCH},
+        {"name": "new", "key": walk_keys.KEY_NEW},
+        {"name": "quit", "key": walk_keys.KEY_QUIT},
+    ]
+    assert walk["statuses"] == ["GREAT", "OK", "WEAK", "UNKNOWN"]
+    assert walk["status_thresholds"] == [
+        {"metric": "rssi", "unit": "dBm", "great_min": -60,
+         "ok_min": -70},
+        {"metric": "snr", "unit": "dB", "great_min": 25,
+         "ok_min": 15},
+    ]
+    assert walk["chart_glyphs"] == list(walk_ui._SPARK_CHARS)
+
+
+def test_evaluation_contract_comes_from_live_kinds_and_metrics() -> None:
+    _raw, document = _extract()
+    extracted = document["evaluation"]
+
+    assert extracted["kinds"] == [
+        {"key": key, "label": label}
+        for key, label in eval_state.KIND_OPTIONS
+    ]
+    assert extracted["metrics"] == [asdict(metric)
+                                    for metric in evaluation.METRICS]
+    assert extracted["comparison_metrics"] == [
+        asdict(metric) for metric in evaluation.COMPARISON_METRICS
+    ]
+
+
+def test_package_contract_comes_from_installed_distribution_metadata() -> None:
+    _raw, document = _extract()
+    package = document["package"]
+    installed = metadata.metadata("wifimap")
+
+    assert package == {
+        "name": installed["Name"],
+        "version": installed["Version"],
+        "python_requires": installed["Requires-Python"],
+        "optional_dependencies": {"test": ["pytest"]},
+    }
+
+
+def test_command_docs_omit_hidden_parser_actions() -> None:
+    spec = importlib.util.spec_from_file_location(
+        "docs_extract_capabilities", EXTRACTOR)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--visible", help="Shown")
+    parser.add_argument("--internal", help=argparse.SUPPRESS)
+
+    [command] = module.command_docs(parser)
+
+    assert [option.flags for option in command.options] == [("--visible",)]
+
+
+class _DocumentParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.ids: set[str] = set()
+        self.links: list[str] = []
+        self.headings: list[int] = []
+        self.landmarks: set[str] = set()
+
+    def handle_starttag(self, tag: str,
+                        attrs: list[tuple[str, Optional[str]]]) -> None:
+        values = dict(attrs)
+        if values.get("id"):
+            self.ids.add(values["id"] or "")
+        if tag == "a" and values.get("href"):
+            self.links.append(values["href"] or "")
+        if tag in {"main", "nav", "header", "footer"}:
+            self.landmarks.add(tag)
+        if len(tag) == 2 and tag[0] == "h" and tag[1].isdigit():
+            self.headings.append(int(tag[1]))
+
+
+def _build_site() -> dict[str, bytes]:
+    shutil.rmtree(SITE_ROOT, ignore_errors=True)
+    subprocess.run(
+        ["npm", "run", "docs:build"],
+        cwd=PROJECT_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return {
+        str(path.relative_to(SITE_ROOT)): path.read_bytes()
+        for path in sorted(SITE_ROOT.rglob("*"))
+        if path.is_file()
+    }
+
+
+@pytest.fixture(scope="module")
+def generated_site() -> dict[str, bytes]:
+    first = _build_site()
+    second = _build_site()
+    assert first == second
+    return second
+
+
+def test_generated_site_has_all_pages_assets_and_stable_toolchain(
+        generated_site: dict[str, bytes]) -> None:
+    assert set(EXPECTED_PAGES).issubset(generated_site)
+    assert {"assets/site.css", "assets/site.js"}.issubset(generated_site)
+
+    package = json.loads((PROJECT_ROOT / "package.json").read_text())
+    lock = json.loads((PROJECT_ROOT / "package-lock.json").read_text())
+    assert package["devDependencies"]["@11ty/eleventy"] == "3.1.6"
+    assert lock["packages"][""]["devDependencies"]["@11ty/eleventy"] == (
+        "3.1.6")
+    assert (PROJECT_ROOT / ".nvmrc").read_text().strip() == "26"
+
+
+def test_generated_pages_have_accessible_structure_and_live_references(
+        generated_site: dict[str, bytes]) -> None:
+    _raw, capabilities = _extract()
+
+    for relative in EXPECTED_PAGES:
+        document = generated_site[relative].decode()
+        parsed = _DocumentParser()
+        parsed.feed(document)
+        assert parsed.headings.count(1) == 1, relative
+        assert all(
+            current <= previous + 1
+            for previous, current in zip(parsed.headings, parsed.headings[1:])
+        ), relative
+        assert {"header", "nav", "main", "footer"} <= parsed.landmarks
+        assert str(PROJECT_ROOT) not in document
+
+    cli_html = generated_site["cli-reference/index.html"].decode()
+    for command in capabilities["cli"]["commands"]:
+        command_name = "wifimap " + " ".join(command["path"])
+        assert command_name.strip() in cli_html
+
+    walk_html = generated_site["walk-tui/index.html"].decode()
+    for control in capabilities["walk"]["controls"]:
+        assert control["key"] in walk_html
+
+    evaluate_html = generated_site["evaluate/index.html"].decode()
+    for metric in capabilities["evaluation"]["metrics"]:
+        assert metric["label"] in evaluate_html
+
+    data_html = generated_site["data-troubleshooting/index.html"].decode()
+    assert ",".join(_EXPORT_FIELDS) in data_html
+
+
+def test_generated_site_internal_links_and_fragments_resolve(
+        generated_site: dict[str, bytes]) -> None:
+    parsed_documents: dict[str, _DocumentParser] = {}
+    for relative in EXPECTED_PAGES:
+        parsed = _DocumentParser()
+        parsed.feed(generated_site[relative].decode())
+        parsed_documents[relative] = parsed
+
+    for source, parsed in parsed_documents.items():
+        for href in parsed.links:
+            url = urlsplit(href)
+            if url.scheme or url.netloc or href.startswith(("mailto:", "#")):
+                if href.startswith("#"):
+                    assert href[1:] in parsed.ids, (source, href)
+                continue
+            target = unquote(url.path)
+            if target.startswith("/"):
+                target = target.lstrip("/")
+            else:
+                target = str((Path(source).parent / target))
+            if not target or target.endswith("/"):
+                target += "index.html"
+            target = str(Path(target))
+            assert target in generated_site, (source, href, target)
+            if url.fragment and target in parsed_documents:
+                assert url.fragment in parsed_documents[target].ids, (
+                    source, href)
+
+
+def test_templates_escape_capability_values_and_site_output_is_ignored() -> None:
+    config = (PROJECT_ROOT / "eleventy.config.js").read_text()
+    assert "autoescape: true" in config
+
+    templates = list((PROJECT_ROOT / "docs" / "src").rglob("*.njk"))
+    templates.extend((PROJECT_ROOT / "docs" / "src").glob("*.md"))
+    for template in templates:
+        source = template.read_text()
+        assert "capabilities | safe" not in source
+        assert "capabilities|safe" not in source
+
+    ignored = subprocess.run(
+        ["git", "check-ignore", "docs/_site/index.html"],
+        cwd=PROJECT_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert ignored.returncode == 0
