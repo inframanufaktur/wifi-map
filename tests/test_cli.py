@@ -529,7 +529,7 @@ def test_list_nulls_show_dash(tmp_path, capsys):
     rc, out, err = _run(capsys, "--db", db, "list")
     assert rc == 0
     assert "None" not in out
-    assert "-" in out
+    assert out.splitlines()[-1].split()[6:] == ["-", "-", "-"]
 
 
 def test_walk_ssid_flag_parses():

@@ -5,30 +5,10 @@ import math
 import os
 import textwrap
 from collections import deque
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from wifimap import signal as signal_mod
 from wifimap.path_monitor import PathSnapshot, ProbeSummary
-
-
-def format_signal_line(sig: signal_mod.Signal) -> str:
-    """One-line live readout; None fields render as UNKNOWN/-."""
-
-    def _value(value: object) -> str:
-        return "-" if value is None else str(value)
-
-    rssi = "UNKNOWN" if sig.rssi is None else "%d dBm" % sig.rssi
-    noise = "UNKNOWN" if sig.noise is None else "%d dBm" % sig.noise
-    snr = "UNKNOWN" if sig.snr is None else "%d dB" % sig.snr
-    return "rssi=%s noise=%s snr=%s ssid=%s bssid=%s ch=%s phy=%s tx=%s" % (
-        rssi, noise, snr, _value(sig.ssid), _value(sig.bssid),
-        _value(sig.channel), _value(sig.phy), _value(sig.tx_rate),
-    )
-
-
-def format_net_line(ssid: Optional[str]) -> str:
-    """Session header: ``Net: <ssid>`` or ``Net: unknown``."""
-    return "Net: %s" % (ssid if ssid else "unknown")
 
 
 def format_walk_header(ssid: Optional[str], location: Optional[str],
@@ -201,7 +181,6 @@ _RATING_STYLE = {
     "UNKNOWN": (0, "37"),
 }
 
-WIDE_MIN_WIDTH = 100
 METER_VAL_W = 10
 METER_LABEL_W = 6
 _SPARK_CHARS = "▁▂▃▄▅▆▇█"
@@ -210,35 +189,6 @@ _SPARK_CHARS = "▁▂▃▄▅▆▇█"
 def rating_style(rating: str) -> Tuple[int, str]:
     """Map GREAT/OK/WEAK/UNKNOWN to (curses_pair, ansi_code)."""
     return _RATING_STYLE.get(rating, (0, "37"))
-
-
-def layout_mode(width: int) -> str:
-    """Wide side-by-side at >=100 cols, else stacked narrow."""
-    return "wide" if width >= WIDE_MIN_WIDTH else "narrow"
-
-
-def graph_width(total_w: int, label_len: int = 6, suffix_len: int = 6) -> int:
-    """Width for narrow stacked graph line so label+bar+suffix fits w-1."""
-    return max(10, total_w - label_len - suffix_len - 1)
-
-
-def wide_graph_width(total_w: int, left_len: int, label_len: int = 6,
-                     sep_len: int = 3, suffix_len: int = 0) -> int:
-    """Width for wide side-by-side graph so full line fits w-1."""
-    return max(10, total_w - 1 - left_len - sep_len - label_len - suffix_len)
-
-
-def grouped_graph_width(total_w: int, prefixes) -> int:
-    """Shared bar width so grouped metric+graph rows right-align."""
-    lengths = []
-    for prefix in prefixes:
-        try:
-            lengths.append(
-                len(prefix) if isinstance(prefix, str) else int(prefix))
-        except Exception:
-            continue
-    max_prefix = max(lengths) if lengths else 0
-    return max(10, total_w - max_prefix - len(" [60s]") - 1)
 
 
 def format_meter_left(label: str, value: str, rating: Optional[str]) -> str:
@@ -250,20 +200,6 @@ def format_meter_left(label: str, value: str, rating: Optional[str]) -> str:
     if rating:
         return "%s%s[%s]" % (label_cell, value_cell, rating)
     return "%s%s" % (label_cell, value_cell)
-
-
-def format_meter_row(label: str, value: str, rating: Optional[str],
-                     bar: str, max_left: int) -> str:
-    """Full meter row with ``|`` separator and ``[60s]`` suffix."""
-    left = format_meter_left(label, value, rating).ljust(max_left)
-    return "%s | %s [60s]" % (left, bar)
-
-
-def meter_layout(total_w: int, lefts: List[str]) -> Tuple[int, int]:
-    """Return ``(maxLeft, graph_width)`` for aligned grouped rows."""
-    max_left = max((len(value) for value in lefts), default=0)
-    width = max(10, total_w - max_left - len(" | ") - len(" [60s]") - 1)
-    return (max_left, width)
 
 
 def format_extra_line(ch: str, phy: str, tx: str) -> str:
@@ -344,18 +280,6 @@ class SparkHistory:
                     glyph = "▇"
                 row.append((glyph, pair))
         return rows
-
-    def sparkline(self, lo: float, hi: float, width: int,
-                  align: str = "right") -> str:
-        if not self._buf:
-            return ""
-        return "".join(text for text, _pair in self.chart(
-            lo, hi, width, height=1, align=align)[0])
-
-    def sparkline_auto(self, width: int, min_hi: float = 1.0) -> str:
-        """Render values scaled from zero to their maximum."""
-        return self.sparkline(0.0, self.maximum(min_hi), width)
-
 
 def history_cap(interval: float) -> int:
     """Return the number of samples covering about sixty seconds."""
@@ -462,20 +386,6 @@ def parse_floor_input(s: str) -> int:
         return int(stripped, 10)
     except ValueError as exc:
         raise ValueError("floor must be an integer, got %r" % (s,)) from exc
-
-
-def snapshot_payload(sig: signal_mod.Signal) -> Dict[str, object]:
-    """Freeze signal data into ``store.add_reading`` keyword arguments."""
-    return {
-        "ssid": sig.ssid,
-        "bssid": sig.bssid,
-        "rssi": sig.rssi,
-        "noise": sig.noise,
-        "snr": sig.snr,
-        "channel": sig.channel,
-        "phy": sig.phy,
-        "tx_rate": sig.tx_rate,
-    }
 
 
 def attempt_read(read_fn: Callable[[], signal_mod.Signal],

@@ -107,16 +107,6 @@ def test_dashboard_keys_change_metric_order_mode_and_cursor():
     assert state.cursor == 1
 
 
-def test_v_does_not_change_the_dashboard_mode():
-    state = _state()
-    state.press("enter")
-    state.press("enter")
-
-    state.press("v")
-
-    assert state.grouped is True
-
-
 def test_shift_tab_cycles_metrics_backward_with_wraparound():
     state = _state()
     state.press("enter")

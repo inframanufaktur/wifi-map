@@ -39,7 +39,6 @@ from wifimap.store_places import (
     resolve_location,
     resolve_room,
     resolve_spot,
-    update_room_floor,
 )
 from wifimap.store_readings import add_reading, list_readings
 from wifimap.store_schema import (

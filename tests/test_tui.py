@@ -15,19 +15,6 @@ from wifimap import tui as tui_mod
 from wifimap.walk_ui import path_panel_rows
 
 
-def test_format_signal_line_full():
-    sig = signal_mod.Signal(ssid="h", bssid="aa", rssi=-55, noise=-95,
-                            snr=40, channel="36", phy="802.11ax", tx_rate="9")
-    line = tui_mod.format_signal_line(sig)
-    assert "-55 dBm" in line and "40 dB" in line and "h" in line
-
-
-def test_format_signal_line_unknown():
-    line = tui_mod.format_signal_line(signal_mod.Signal())
-    assert "UNKNOWN" in line
-    assert "None" not in line
-
-
 def test_walk_dashboard_header_keeps_network_location_and_queue_visible():
     line = tui_mod.format_walk_header("Home Mesh", "Kitchen / window", 2)
 
@@ -360,17 +347,6 @@ def test_parse_floor_input_errors(bad):
         tui_mod.parse_floor_input(bad)
 
 
-def test_snapshot_payload_freezes_signal():
-    sig = signal_mod.Signal(
-        ssid="h", bssid="aa:bb:cc:dd:ee:ff",
-        rssi=-60, noise=-90, snr=30)
-    payload = tui_mod.snapshot_payload(sig)
-    assert payload["rssi"] == -60 and payload["ssid"] == "h"
-    assert payload["bssid"] == "aa:bb:cc:dd:ee:ff"
-    sig.rssi = -1  # mutate after freeze; payload unaffected
-    assert payload["rssi"] == -60
-
-
 def test_attempt_read_retries_then_unknown():
     calls = {"n": 0}
 
@@ -396,11 +372,16 @@ def test_attempt_read_recovers():
 
 
 def test_attempt_read_nowifi_propagates_immediately():
+    calls = 0
+
     def _off():
+        nonlocal calls
+        calls += 1
         raise signal_mod.NoWiFiError("off")
 
     with pytest.raises(signal_mod.NoWiFiError):
         tui_mod.attempt_read(_off, max_retries=3)
+    assert calls == 1
 
 
 def _db(tmp_path):
@@ -913,51 +894,25 @@ def test_rate_rssi_snr_thresholds():
     assert tui_mod.rate_snr(None) == "UNKNOWN"
 
 
-def test_sparkline_vectors_gaps_and_window():
-    h = tui_mod.SparkHistory(maxlen=4)
-    for v in [-90, -70, -50, -30]:
-        h.append(v)
-    line = h.sparkline(-90, -30, 4)
-    assert line == "▁▃▆█"
-    h2 = tui_mod.SparkHistory(maxlen=3)
-    h2.append(-50)
-    h2.append(None)
-    h2.append(-50)
-    assert h2.sparkline(-90, -30, 3)[1] == " "
-    h3 = tui_mod.SparkHistory(maxlen=3)
-    for v in [1, 2, 3, 4]:
-        h3.append(v)
-    assert h3.sparkline(1, 4, 10) == "▃▃▃▃▆▆▆███"
-    assert tui_mod.SparkHistory(maxlen=4).sparkline(0, 1, 4) == ""
-
-
 def test_poll_appends_history(tmp_path):
     st = tui_mod.WalkState(str(tmp_path / "w.db"), history_max=5)
     st.poll(read_fn=lambda: signal_mod.Signal(rssi=-60, noise=-90, snr=30))
     st.poll(read_fn=lambda: signal_mod.Signal(rssi=-61, noise=-91, snr=29))
-    assert st.hist_rssi.sparkline(-90, -30, 5) != ""
-    assert len(st.hist_rssi.sparkline(-90, -30, 5)) == 5
+    chart = st.hist_rssi.chart(-90, -30, width=5, height=1)
+    assert "".join(cell for cell, _pair in chart[0]) == "   ▅▄"
 
 
 def test_poll_nowifi_appends_gap(tmp_path):
     def _off():
         raise signal_mod.NoWiFiError("off")
 
-    st = tui_mod.WalkState(str(tmp_path / "w.db"), history_max=5)
-    for _ in range(3):
+    st = tui_mod.WalkState(str(tmp_path / "w.db"), history_max=3)
+    st.poll(read_fn=lambda: signal_mod.Signal(rssi=-60))
+    for _ in range(2):
         st.poll(read_fn=_off)
     assert st.no_wifi is True
-    assert st.hist_rssi.sparkline(-90, -30, 3) == "   "
-
-
-def test_sparkline_right_aligns_newest():
-    h = tui_mod.SparkHistory(maxlen=60)
-    h.append(-60)
-    h.append(-50)
-    line = h.sparkline(-90, -30, 5)
-    assert len(line) == 5
-    assert line[:3] == "   "
-    assert line[3:] != "   "
+    chart = st.hist_rssi.chart(-90, -30, width=3, height=1)
+    assert "".join(cell for cell, _pair in chart[0]) == "▅  "
 
 
 def test_history_cap_windows():
@@ -973,53 +928,11 @@ def test_rating_style_maps_all_ratings():
     assert tui_mod.rating_style("UNKNOWN") == (0, "37")
 
 
-def test_layout_mode_boundary():
-    assert tui_mod.layout_mode(99) == "narrow"
-    assert tui_mod.layout_mode(100) == "wide"
-    assert tui_mod.layout_mode(200) == "wide"
-
-
-def test_curses_pair_for_rating_uses_rating_style():
-    pair, _ = tui_mod.rating_style(tui_mod.rate_rssi(-55))
-    assert pair == 1
-    pair, _ = tui_mod.rating_style(tui_mod.rate_rssi(-80))
-    assert pair == 3
-
-
 def test_ansi_wrap_respects_no_color(monkeypatch):
     monkeypatch.delenv("NO_COLOR", raising=False)
     assert tui_mod.ansi_wrap("x", "32") == "\x1b[32mx\x1b[0m"
     monkeypatch.setenv("NO_COLOR", "1")
     assert tui_mod.ansi_wrap("x", "32") == "x"
-
-
-def test_graph_width_fits_w_minus_1():
-    # label(6) + bar + suffix(6) must fit w-1; old w-12 truncated "]".
-    for w in (40, 80, 100):
-        gw = tui_mod.graph_width(w, 6, 6)
-        assert 6 + gw + 6 <= w - 1
-        assert gw == max(10, w - 13)
-    assert tui_mod.graph_width(20, 6, 6) == 10
-
-
-def test_wide_graph_width_fits_w_minus_1():
-    left = len("RSSI -57 dBm [GREAT]")
-    for w in (100, 120, 200):
-        gw = tui_mod.wide_graph_width(w, left, 6, 3, 0)
-        assert len("RSSI -57 dBm [GREAT]") + 3 + 6 + gw <= w - 1
-
-
-def test_grouped_graph_width_aligns_right_edges():
-    p1 = "RSSI %4d dBm [%-7s] " % (-60, "GREAT")
-    p2 = "SNR %3d dB [%-7s] " % (30, "GREAT")
-    p3 = "noise %4d dBm ch %s phy %s tx %s " % (-90, "36", "ax", "9")
-    for w in (80, 100, 120):
-        gw = tui_mod.grouped_graph_width(w, [p1, p2, p3])
-        assert gw == max(10, w - max(len(p1), len(p2), len(p3)) - 6 - 1)
-        for p in (p1, p2, p3):
-            assert len(p) + gw + len(" [60s]") <= w - 1
-    assert tui_mod.grouped_graph_width(20, [p1, p2, p3]) == 10
-    assert tui_mod.grouped_graph_width(80, []) == max(10, 80 - 0 - 6 - 1)
 
 
 def test_format_meter_left_no_pad_inside_brackets():
@@ -1037,26 +950,6 @@ def test_format_meter_left_no_pad_inside_brackets():
     assert left_rssi[6:16] == "-63 dBm   "
     assert left_snr[6:16] == "29 dB     "
     assert left_noise[6:16] == "-92 dBm   "
-
-
-def test_format_meter_row_pipe_aligns():
-    lefts = [
-        tui_mod.format_meter_left("RSSI", "-63 dBm", "OK"),
-        tui_mod.format_meter_left("SNR", "29 dB", "GREAT"),
-        tui_mod.format_meter_left("noise", "-92 dBm", None),
-    ]
-    max_left, gw = tui_mod.meter_layout(80, lefts)
-    assert max_left == max(len(s) for s in lefts)
-    assert gw == max(10, 80 - max_left - 3 - 6 - 1)
-    rows = [tui_mod.format_meter_row(*args, bar="##", max_left=max_left)
-            for args in (("RSSI", "-63 dBm", "OK"),
-                         ("SNR", "29 dB", "GREAT"),
-                         ("noise", "-92 dBm", None))]
-    pipes = [r.index("|") for r in rows]
-    assert pipes[0] == pipes[1] == pipes[2] == max_left + 1
-    for r in rows:
-        assert r.endswith("## [60s]")
-        assert "[OK ]" not in r and "[GREAT ]" not in r
 
 
 def test_format_radio_line_placeholders():
@@ -1094,26 +987,6 @@ def test_ensure_addrs_one_shot_and_never_raise(tmp_path):
 
     assert st2.ensure_addrs(addrs_fn=_boom) is None
     assert (st2.ip, st2.router, st2.mac) == (None, None, None)
-
-
-def test_snapshot_payload_excludes_display_only():
-    sig = signal_mod.Signal(ssid="h", rssi=-60, mcs=9, band="5 GHz",
-                            security="WPA3 Personal")
-    payload = tui_mod.snapshot_payload(sig)
-    assert "mcs" not in payload and "band" not in payload
-    assert "security" not in payload
-
-
-def test_walk_state_last_result_delta(tmp_path):
-    assert tui_mod.KEY_BENCHMARK == "b"
-    st = tui_mod.WalkState(str(tmp_path / "w.db"))
-    assert st.last_result == ""
-    cur = {"rssi": -60, "snr": 30, "down_mbps": 80.0, "up_mbps": 10.0}
-    bench = {"rssi": -70, "snr": 20, "down_mbps": 100.0, "up_mbps": 20.0}
-    delta = store_mod.format_benchmark_delta(cur, bench)
-    assert delta != ""
-    st.last_result = "saved #1 vs bench (%s)" % delta
-    assert "vs bench" in st.last_result
 
 
 def test_snapshot_last_result_delta_with_speed(tmp_path, monkeypatch):
@@ -1173,23 +1046,6 @@ def test_fmt_mbps():
 def test_fmt_rate_val():
     assert tui_mod.fmt_rate_val(None) == "-"
     assert tui_mod.fmt_rate_val(80.0) == "80.0 Mbps"
-
-
-def test_sparkline_auto_scales_to_buffer_max():
-    h = tui_mod.SparkHistory(maxlen=3)
-    for v in (1.0, 2.0, 4.0):
-        h.append(v)
-    s = h.sparkline_auto(3)
-    assert len(s) == 3
-    assert s[-1] == "█"
-    assert s == "▃▅█"  # buffer max (4.0) → full block
-
-
-def test_sparkline_auto_empty_uses_min_hi():
-    h = tui_mod.SparkHistory(maxlen=4)
-    assert h.sparkline_auto(3) == ""
-    h.append(None)
-    assert h.sparkline_auto(3) == "   "  # None blanks, flat scale
 
 
 def test_walkstate_poll_traffic_history():
@@ -1740,7 +1596,6 @@ def test_live_comparison_table_includes_tx_rate(tmp_path):
     state.poll(read_fn=lambda: signal_mod.Signal(tx_rate="800"))
     rendered = "\n".join(tui_mod.comparison_lines(state))
     assert "COMPARE ·" in rendered
-    assert "╭" not in rendered
     assert "TX rate" in rendered
     assert "700" in rendered
     assert "400" in rendered

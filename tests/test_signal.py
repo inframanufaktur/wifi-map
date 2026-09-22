@@ -387,8 +387,7 @@ def test_walk_backfills_poll_with_session_identity(tmp_path):
     # poll values win when present
     st.poll(read_fn=lambda: sig_mod.Signal(ssid="Real", bssid="ff", rssi=-50))
     assert st.sig.ssid == "Real"
-    assert tui_mod.format_net_line(st.net_ssid) == "Net: SessNet"
-    assert tui_mod.format_net_line(None) == "Net: unknown"
+    assert st.net_ssid == "SessNet"
 
 
 def test_walk_identity_abort_toasts_and_continues(tmp_path):
@@ -396,7 +395,7 @@ def test_walk_identity_abort_toasts_and_continues(tmp_path):
     st = tui_mod.WalkState(str(tmp_path / "w.db"))
     assert st.ensure_identity(identity_fn=lambda: None) is None
     assert "unknown" in st.toast.lower() or "skipped" in st.toast.lower()
-    assert tui_mod.format_net_line(st.net_ssid) == "Net: unknown"
+    assert st.net_ssid is None
 
 
 def test_scan_uses_selected_ssid_and_backfills_bssid(monkeypatch, tmp_path, capsys):

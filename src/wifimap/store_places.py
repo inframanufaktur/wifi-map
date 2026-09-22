@@ -240,23 +240,6 @@ def lookup_room(
     raise ValueError("unknown room: %r" % (name,))
 
 
-def update_room_floor(
-    conn: sqlite3.Connection,
-    room_id: int,
-    floor: int,
-) -> None:
-    """Set a room's floor; raises ValueError if the id is unknown."""
-    if isinstance(room_id, bool):
-        raise ValueError("invalid room id: %r" % (room_id,))
-    cur = conn.execute(
-        "UPDATE rooms SET floor = ? WHERE id = ?",
-        (floor, room_id),
-    )
-    conn.commit()
-    if cur.rowcount == 0:
-        raise ValueError("unknown room id: %r" % (room_id,))
-
-
 def create_spot(
     conn: sqlite3.Connection,
     room_id: int,

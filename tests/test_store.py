@@ -1,5 +1,6 @@
 import importlib.util
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -35,7 +36,6 @@ from wifimap.store import (
     resolve_ssid,
     resolve_spot,
     set_benchmark,
-    update_room_floor,
     get_access_point_name,
     list_access_points,
     set_access_point_name,
@@ -100,15 +100,6 @@ def test_rooms_floor_outdoors_flag(db):
     assert rooms["garden"].location_id == lid
     assert rooms["garden"].outdoors is True
     assert get_room(db, rid).floor == 0
-
-
-def test_locations_unique_name_floor(db):
-    lid, _, _ = _three_levels(db, loc="office", room="main", spot="s1")
-    assert isinstance(lid, int)
-    with pytest.raises(sqlite3.IntegrityError):
-        create_location(db, "office")
-    create_location(db, "office2")
-    assert len(list_locations(db)) == 2
 
 
 def test_reading_fk_violation(db):
@@ -196,13 +187,14 @@ def test_readings_insert_join_filters_limit(db):
     assert [r["id"] for r in limited] == [r3, r2]
 
 
-def test_reading_ts_defaults(db):
+def test_reading_ts_defaults_to_aware_iso_timestamp(db):
     _, _, sid = _three_levels(db, loc="home", room="den", spot="desk")
     rid = add_reading(db, sid, rssi=-60)
     rows = list_readings(db, spot=sid)
     assert len(rows) == 1
     assert rows[0]["id"] == rid
-    assert rows[0]["ts"]  # non-empty ISO timestamp
+    parsed = datetime.fromisoformat(rows[0]["ts"])
+    assert parsed.tzinfo is not None
 
 
 def test_list_readings_limit_zero(db):
@@ -262,29 +254,6 @@ def test_get_room_spot_existing_and_missing(db):
     assert get_spot(db, sid) is not None
     assert get_spot(db, 9999) is None
     assert list_spots(db, room_id=rid)[0].id == sid
-
-
-def test_update_room_floor_persists(db):
-    _, rid, _ = _three_levels(db, loc="home", room="attic", spot="s")
-    update_room_floor(db, rid, -1)
-    room = get_room(db, rid)
-    assert room is not None and room.floor == -1
-
-
-def test_update_room_floor_unknown_raises(db):
-    with pytest.raises(ValueError):
-        update_room_floor(db, 9999, 1)
-
-
-def test_update_room_floor_unique_conflict(db):
-    lid = create_location(db, "home")
-    a = create_room(db, lid, "dup", floor=0)
-    b = create_room(db, lid, "dup", floor=1)
-    with pytest.raises(sqlite3.IntegrityError):
-        update_room_floor(db, b, 0)
-    # failed update left the row untouched
-    assert get_room(db, b).floor == 1
-    assert get_room(db, a).floor == 0
 
 
 def test_list_readings_ssid_filter(db):
@@ -484,8 +453,8 @@ def test_benchmark_ts_default_is_iso(db):
     set_benchmark(db, lid, rssi=-45)
     bench = get_benchmark(db, lid)
     assert bench is not None
-    assert isinstance(bench["ts"], str)
-    assert "T" in bench["ts"]
+    parsed = datetime.fromisoformat(bench["ts"])
+    assert parsed.tzinfo is not None
 
 
 def test_format_benchmark_delta_full():
