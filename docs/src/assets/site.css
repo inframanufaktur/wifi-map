@@ -9,9 +9,6 @@
   --accent-strong: #22d3ee;
   --border: #36515a;
   --status-great: #86efac;
-  --status-ok: #fde68a;
-  --status-weak: #fca5a5;
-  --status-unknown: #cbd5e1;
   --focus: #fef08a;
   --step--1: clamp(0.82rem, 0.8rem + 0.08vw, 0.94rem);
   --step-0: clamp(1rem, 0.96rem + 0.16vw, 1.2rem);
@@ -296,31 +293,6 @@ pre,
   color: var(--surface-inset);
 }
 
-.action-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-2);
-  margin-block: var(--space-3);
-}
-
-.button-link {
-  display: inline-block;
-  padding: 0.55rem 0.8rem;
-  border: 1px solid var(--accent);
-  background: var(--accent);
-  color: var(--surface-inset);
-  font-weight: 900;
-  text-decoration: none;
-  text-transform: uppercase;
-}
-
-.button-link:hover {
-  background: var(--text);
-  color: var(--surface-inset);
-}
-
-.terminal-panel,
 .generated-reference,
 .reference-block {
   margin-block: var(--space-3);
@@ -328,7 +300,6 @@ pre,
   background: var(--surface-raised);
 }
 
-.terminal-panel__bar,
 .generated-reference__header {
   display: flex;
   justify-content: space-between;
@@ -349,7 +320,6 @@ pre,
   font-size: inherit;
 }
 
-.terminal-panel__title,
 .generated-reference > h3,
 .reference-block > h2,
 .reference-block > h3,
@@ -367,43 +337,12 @@ pre,
   margin-inline: var(--space-2);
 }
 
-.workflow-steps,
 .key-reference,
 .reference-list,
 .option-list {
   margin: 0;
   padding: var(--space-2);
   list-style: none;
-}
-
-.workflow-step {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: var(--space-2);
-  padding-block: var(--space-2);
-  border-bottom: 1px solid var(--border);
-}
-
-.workflow-step:last-child {
-  border-bottom: 0;
-}
-
-.workflow-step__number {
-  color: var(--accent);
-  font-size: var(--step-2);
-  font-weight: 900;
-}
-
-.workflow-step h4,
-.workflow-step p {
-  margin-block: 0 0.35rem;
-}
-
-figcaption {
-  padding: var(--space-2);
-  border-top: 1px solid var(--border);
-  color: var(--text-muted);
-  font-size: var(--step--1);
 }
 
 .key-reference__item,
@@ -475,54 +414,6 @@ dd {
   margin-bottom: 0;
 }
 
-.status-reference {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-1);
-  padding: var(--space-2);
-  list-style: none;
-}
-
-.status-reference__item {
-  display: flex;
-  align-items: center;
-  gap: 0.45rem;
-  padding: 0.35rem 0.55rem;
-  border: 1px solid currentColor;
-  font-weight: 900;
-}
-
-.status-reference__marker {
-  width: 0.7rem;
-  height: 0.7rem;
-  background: currentColor;
-}
-
-.status-great {
-  color: var(--status-great);
-}
-
-.status-ok {
-  color: var(--status-ok);
-}
-
-.status-weak {
-  color: var(--status-weak);
-}
-
-.status-unknown {
-  color: var(--status-unknown);
-}
-
-.sparkline-reference {
-  display: flex;
-  gap: 0.15rem;
-  align-items: end;
-  color: var(--accent);
-  font-size: var(--step-2);
-  letter-spacing: -0.1em;
-}
-
 .table-scroll {
   max-width: 100%;
   overflow-x: auto;
@@ -561,7 +452,7 @@ tbody tr:nth-child(even) {
 
 .footer-rail {
   justify-content: space-between;
-  align-items: baseline;
+  align-items: center;
   padding-block: var(--space-2);
 }
 
@@ -569,21 +460,46 @@ tbody tr:nth-child(even) {
   margin: 0;
 }
 
-@media (min-width: 64rem) {
-  .workflow-steps {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
+.footer-brand {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text);
+  text-decoration: none;
+}
 
-  .workflow-step {
-    grid-template-columns: 1fr;
-    border-right: 1px solid var(--border);
-    border-bottom: 0;
-  }
+.footer-brand:hover {
+  color: var(--accent);
+}
 
-  .workflow-step:last-child {
-    border-right: 0;
-  }
+.footer-brand__logo {
+  width: 4.5rem;
+  height: 4.5rem;
+  flex: 0 0 auto;
+}
+
+.footer-brand__copy {
+  display: grid;
+  min-width: 0;
+  gap: 0.15rem;
+}
+
+.footer-brand__name {
+  line-height: 1.25;
+}
+
+.footer-brand__claim {
+  max-width: 48ch;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.footer-meta {
+  display: grid;
+  gap: 0.25rem;
+  justify-items: end;
+  text-align: right;
 }
 
 @media (max-width: 47.99rem) {
@@ -600,6 +516,11 @@ tbody tr:nth-child(even) {
 
   .footer-rail {
     display: grid;
+  }
+
+  .footer-meta {
+    justify-items: start;
+    text-align: left;
   }
 }
 

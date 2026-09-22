@@ -2,6 +2,11 @@
   "title": "wifimap",
   "description": "Map, compare, and evaluate home WiFi from the terminal.",
   "repository": "https://github.com/inframanufaktur/wifi-map",
+  "organization": {
+    "name": "Cyber Design Inframanufaktur",
+    "claim": "Geheimorganisation zur Verknotung von Netzwerkkabeln",
+    "url": "https://www.inframanufaktur.org/"
+  },
   "navigation": [
     { "key": "overview", "label": "Overview", "href": "/" },
     { "key": "quick-start", "label": "Quick start", "href": "/quick-start/" },

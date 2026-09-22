@@ -1,7 +1,7 @@
 ---
 layout: layouts/base.njk
 title: CLI reference
-description: Complete generated wifimap command and option reference, including defaults, required values, choices, and parser help.
+description: Complete wifimap command and option reference, including defaults, required values, choices, and descriptions.
 navKey: cli-reference
 permalink: /cli-reference/index.html
 ---
@@ -13,12 +13,7 @@ Global options come before the subcommand. For example, use
 room, and spot arguments accept an ID or a name unless an option says
 otherwise.
 
-The reference below is extracted from the live `argparse` parser during every
-documentation build. Parser changes therefore appear here without a second
-hand-maintained command list.
-
 <section class="reference-block generated-reference" aria-labelledby="command-index">
-  <p class="reference-label">Generated from <code>wifimap.cli._build_parser()</code></p>
   <h2 id="command-index">Command index</h2>
   <ul class="command-index">
   {% for command in capabilities.cli.commands %}
@@ -32,7 +27,6 @@ hand-maintained command list.
 
 {% for command in capabilities.cli.commands %}
 <section class="reference-block generated-reference command-reference" aria-labelledby="command-{{ loop.index }}">
-  <p class="reference-label">Generated command reference</p>
   <h2 id="command-{{ loop.index }}"><code>{{ capabilities.cli.program }}{% if command.path | length %} {{ command.path | join(" ") }}{% endif %}</code></h2>
   {% if command.summary %}<p>{{ command.summary }}</p>{% endif %}
 
@@ -44,8 +38,8 @@ hand-maintained command list.
       <h4><code>{% if option.flags | length %}{{ option.flags | join(", ") }}{% else %}{{ option.destination }}{% endif %}</code></h4>
       <dl class="option-metadata">
         <div>
-          <dt>Help</dt>
-          <dd>{% if option.help %}{{ option.help }}{% else %}No parser help text is defined.{% endif %}</dd>
+          <dt>Description</dt>
+          <dd>{% if option.help %}{{ option.help }}{% else %}No description available.{% endif %}</dd>
         </div>
         <div>
           <dt>Required</dt>
@@ -83,12 +77,10 @@ hand-maintained command list.
 
 ## Exit behavior
 
-The parser's current exit-code summary is also source-derived:
+Commands use the following exit codes:
 
 <div class="reference-block generated-reference">
-  <p class="reference-label">Generated parser epilog</p>
   <p>{{ capabilities.cli.epilog }}</p>
 </div>
 
-Operational detail and recovery steps are collected in
-[Data and troubleshooting](/data-troubleshooting/).
+[Exit-code recovery](/data-troubleshooting/)

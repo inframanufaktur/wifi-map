@@ -185,8 +185,10 @@ class _DocumentParser(HTMLParser):
         super().__init__()
         self.ids: set[str] = set()
         self.links: list[str] = []
+        self.images: list[tuple[str, Optional[str]]] = []
         self.headings: list[int] = []
         self.landmarks: set[str] = set()
+        self.text: list[str] = []
 
     def handle_starttag(self, tag: str,
                         attrs: list[tuple[str, Optional[str]]]) -> None:
@@ -195,10 +197,15 @@ class _DocumentParser(HTMLParser):
             self.ids.add(values["id"] or "")
         if tag == "a" and values.get("href"):
             self.links.append(values["href"] or "")
+        if tag == "img" and values.get("src"):
+            self.images.append((values["src"] or "", values.get("alt")))
         if tag in {"main", "nav", "header", "footer"}:
             self.landmarks.add(tag)
         if len(tag) == 2 and tag[0] == "h" and tag[1].isdigit():
             self.headings.append(int(tag[1]))
+
+    def handle_data(self, data: str) -> None:
+        self.text.append(data)
 
 
 def _build_site() -> dict[str, bytes]:
@@ -229,7 +236,10 @@ def test_generated_site_has_all_pages_assets_and_stable_toolchain(
         generated_site: dict[str, bytes]) -> None:
     assert set(EXPECTED_PAGES).issubset(generated_site)
     assert {
-        "assets/favicon.svg", "assets/site.css", "assets/site.js",
+        "assets/favicon.svg",
+        "assets/inframanufaktur-logo.svg",
+        "assets/site.css",
+        "assets/site.js",
     }.issubset(generated_site)
 
     package = json.loads((PROJECT_ROOT / "package.json").read_text())
@@ -255,6 +265,15 @@ def test_generated_pages_have_accessible_structure_and_live_references(
         ), relative
         assert {"header", "nav", "main", "footer"} <= parsed.landmarks
         assert str(PROJECT_ROOT) not in document
+        assert "https://www.inframanufaktur.org/" in parsed.links
+        assert (
+            "/assets/inframanufaktur-logo.svg", ""
+        ) in parsed.images
+        assert "Cyber Design Inframanufaktur" in document
+        assert (
+            "Geheimorganisation zur Verknotung von Netzwerkkabeln"
+            in document
+        )
         assert document.count("<table>") == document.count(
             'class="table-scroll"'
         ), relative
@@ -303,6 +322,32 @@ def test_generated_site_internal_links_and_fragments_resolve(
             if url.fragment and target in parsed_documents:
                 assert url.fragment in parsed_documents[target].ids, (
                     source, href)
+
+
+def test_reader_copy_avoids_documentation_implementation_details(
+        generated_site: dict[str, bytes]) -> None:
+    unwanted_phrases = (
+        "built for repeatable decisions",
+        "chart glyphs",
+        "color reinforces these labels",
+        "continue with the",
+        "extracted from the live",
+        "generated command reference",
+        "generated from",
+        "generated parser epilog",
+        "generated reference",
+        "live reference data",
+        "one route from question to answer",
+        "source-backed csv reference",
+        "source-derived",
+    )
+
+    for relative in EXPECTED_PAGES:
+        parsed = _DocumentParser()
+        parsed.feed(generated_site[relative].decode())
+        reader_copy = " ".join(parsed.text).lower()
+        for phrase in unwanted_phrases:
+            assert phrase not in reader_copy, (relative, phrase)
 
 
 def test_templates_escape_capability_values_and_site_output_is_ignored() -> None:

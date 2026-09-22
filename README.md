@@ -1,8 +1,7 @@
 # wifimap
 
-wifimap is a local-first home WiFi survey tool. Capture room- and spot-tagged
-signal, link, path, and optional throughput readings; compare named walks after
-an infrastructure change; then rank weak coverage in a terminal dashboard.
+wifimap records WiFi measurements at named spots on macOS. It stores signal,
+link, path, and optional throughput data in SQLite.
 
 Requirements: macOS and Python 3.9+. Live signal reads use CoreWLAN through
 PyObjC. Readings stay in a local SQLite database unless you export them to CSV.
@@ -20,19 +19,17 @@ wifimap --db /tmp/demo.db scan --no-speedtest \
   --location HOME --room KITCHEN --spot WINDOW --ssid DEMO-WIFI
 ```
 
-## Core workflows
+## Commands
 
-- **Capture:** `wifimap scan` saves one snapshot; `wifimap walk` surveys a
-  route with live signal, path, traffic, access-point, and benchmark context.
-- **Compare:** name walks and pass `--compare-to` to see current readings beside
-  a prior route, or compare two completed walks in evaluation.
-- **Evaluate:** `wifimap eval` ranks spot summaries or individual readings and
-  opens exact radio, throughput, path, and walk-comparison details.
+- `wifimap scan` saves one reading.
+- `wifimap walk` opens the survey TUI and saves a named walk.
+- `wifimap eval` ranks readings and compares walks.
+- `wifimap export --csv FILE` exports the database.
 
-Start with the [quick start](docs/src/quick-start.md), then use the
-[Walk TUI guide](docs/src/walk-tui.md), [evaluation guide](docs/src/evaluate.md),
-[generated CLI reference](docs/src/cli-reference.md), and
-[data and troubleshooting guide](docs/src/data-troubleshooting.md).
+Documentation: [quick start](docs/src/quick-start.md),
+[Walk TUI](docs/src/walk-tui.md), [evaluation](docs/src/evaluate.md),
+[CLI reference](docs/src/cli-reference.md), and
+[data and troubleshooting](docs/src/data-troubleshooting.md).
 
 ## Build and test the documentation
 
