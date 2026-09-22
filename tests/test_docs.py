@@ -228,7 +228,9 @@ def generated_site() -> dict[str, bytes]:
 def test_generated_site_has_all_pages_assets_and_stable_toolchain(
         generated_site: dict[str, bytes]) -> None:
     assert set(EXPECTED_PAGES).issubset(generated_site)
-    assert {"assets/site.css", "assets/site.js"}.issubset(generated_site)
+    assert {
+        "assets/favicon.svg", "assets/site.css", "assets/site.js",
+    }.issubset(generated_site)
 
     package = json.loads((PROJECT_ROOT / "package.json").read_text())
     lock = json.loads((PROJECT_ROOT / "package-lock.json").read_text())
@@ -365,6 +367,7 @@ def test_docs_workflow_verifies_before_secret_isolated_deployment() -> None:
     assert "group: docs-production" in deploy
     assert "cancel-in-progress: true" in deploy
     assert "github.event_name != 'pull_request'" in deploy
+    assert "github.ref == 'refs/heads/main'" in deploy
     for secret in (
         "UBERSPACE_SSH_KEY",
         "UBERSPACE_HOST",
