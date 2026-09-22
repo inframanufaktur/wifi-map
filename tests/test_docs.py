@@ -255,6 +255,9 @@ def test_generated_pages_have_accessible_structure_and_live_references(
         ), relative
         assert {"header", "nav", "main", "footer"} <= parsed.landmarks
         assert str(PROJECT_ROOT) not in document
+        assert document.count("<table>") == document.count(
+            'class="table-scroll"'
+        ), relative
 
     cli_html = generated_site["cli-reference/index.html"].decode()
     for command in capabilities["cli"]["commands"]:

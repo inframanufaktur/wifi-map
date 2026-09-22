@@ -170,17 +170,27 @@ checks.
 
 ## Troubleshooting
 
-| Symptom | Cause and recovery |
-| --- | --- |
-| `scan` exits 2 with an install hint | Upgrade pip, then install `pyobjc-framework-CoreWLAN`. |
-| `SSID selection requires a terminal` | For non-interactive `scan` or `walk`, pass both `--location NAME` and `--ssid NAME`. |
-| `legacy SSID schema` | Run `.venv/bin/python scripts/migrate_ssid_entities.py db/wifi-map.db`; it creates a backup first. |
-| SSID detection is blank or redacted | Run `wifiwand-macos-setup`, choose an existing SSID, or pass `--ssid NAME`. BSSID capture requires WifiWand or unredacted CoreWLAN. |
-| `Warning: … speedtest …; proceeding signal-only` | The Ookla binary is missing or failed. The row was kept with blank throughput; use `--no-speedtest` to silence the probe. |
-| `walk` falls back to line-buffered keys | Curses or a TTY is unavailable, as with piped output. Use the same `s`/`t`/`c`/`l`/`n`/`b`/`q` keys followed by Enter. `NO_COLOR=1` disables ANSI colors. |
-| `Error: cannot open DB` or `cannot store reading` (exit 3) | Check the `--db` path and permissions. The containing directory must exist. |
-| CSV evaluation reports missing columns | Re-export with the current wifimap version; older or edited CSV files may not match the required schema. |
-| CSV evaluation reports a malformed cell | Correct the named row and field, or re-export. Blank is valid; malformed and non-finite numbers are not. |
+<div class="table-scroll" tabindex="0" role="region" aria-label="Troubleshooting symptoms and recovery steps">
+  <table>
+    <thead>
+      <tr>
+        <th scope="col">Symptom</th>
+        <th scope="col">Cause and recovery</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><th scope="row"><code>scan</code> exits 2 with an install hint</th><td>Upgrade pip, then install <code>pyobjc-framework-CoreWLAN</code>.</td></tr>
+      <tr><th scope="row"><code>SSID selection requires a terminal</code></th><td>For non-interactive <code>scan</code> or <code>walk</code>, pass both <code>--location NAME</code> and <code>--ssid NAME</code>.</td></tr>
+      <tr><th scope="row"><code>legacy SSID schema</code></th><td>Run <code>.venv/bin/python scripts/migrate_ssid_entities.py db/wifi-map.db</code>; it creates a backup first.</td></tr>
+      <tr><th scope="row">SSID detection is blank or redacted</th><td>Run <code>wifiwand-macos-setup</code>, choose an existing SSID, or pass <code>--ssid NAME</code>. BSSID capture requires WifiWand or unredacted CoreWLAN.</td></tr>
+      <tr><th scope="row"><code>Warning: … speedtest …; proceeding signal-only</code></th><td>The Ookla binary is missing or failed. The row was kept with blank throughput; use <code>--no-speedtest</code> to silence the probe.</td></tr>
+      <tr><th scope="row"><code>walk</code> falls back to line-buffered keys</th><td>Curses or a TTY is unavailable, as with piped output. Use the same <code>s</code>/<code>t</code>/<code>c</code>/<code>l</code>/<code>n</code>/<code>b</code>/<code>q</code> keys followed by Enter. <code>NO_COLOR=1</code> disables ANSI colors.</td></tr>
+      <tr><th scope="row"><code>Error: cannot open DB</code> or <code>cannot store reading</code> (exit 3)</th><td>Check the <code>--db</code> path and permissions. The containing directory must exist.</td></tr>
+      <tr><th scope="row">CSV evaluation reports missing columns</th><td>Re-export with the current wifimap version; older or edited CSV files may not match the required schema.</td></tr>
+      <tr><th scope="row">CSV evaluation reports a malformed cell</th><td>Correct the named row and field, or re-export. Blank is valid; malformed and non-finite numbers are not.</td></tr>
+    </tbody>
+  </table>
+</div>
 
 ## Contributor checks
 
