@@ -12,7 +12,11 @@ from wifimap.path_monitor import PathSample, PathTracker
 from wifimap import speed as speed_mod
 from wifimap import store as store_mod
 from wifimap import tui as tui_mod
-from wifimap.walk_ui import path_panel_rows
+from wifimap.walk_ui import (
+    RSSI_RATING_THRESHOLDS,
+    SNR_RATING_THRESHOLDS,
+    path_panel_rows,
+)
 
 
 def test_walk_dashboard_header_keeps_network_location_and_queue_visible():
@@ -884,6 +888,8 @@ def test_ssid_override_blank_normalizes_to_none(tmp_path):
 
 
 def test_rate_rssi_snr_thresholds():
+    assert RSSI_RATING_THRESHOLDS == (-60, -70)
+    assert SNR_RATING_THRESHOLDS == (25, 15)
     assert tui_mod.rate_rssi(-55) == "GREAT"
     assert tui_mod.rate_rssi(-65) == "OK"
     assert tui_mod.rate_rssi(-80) == "WEAK"

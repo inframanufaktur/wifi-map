@@ -152,13 +152,18 @@ def fmt_rate_val(v: Optional[float]) -> str:
     return "-" if v is None else "%.1f Mbps" % v
 
 
+RSSI_RATING_THRESHOLDS = (-60, -70)
+SNR_RATING_THRESHOLDS = (25, 15)
+
+
 def rate_rssi(v: Optional[int]) -> str:
     """Rate RSSI: >=-60 GREAT, >=-70 OK, else WEAK, None UNKNOWN."""
     if v is None:
         return "UNKNOWN"
-    if v >= -60:
+    great_min, ok_min = RSSI_RATING_THRESHOLDS
+    if v >= great_min:
         return "GREAT"
-    if v >= -70:
+    if v >= ok_min:
         return "OK"
     return "WEAK"
 
@@ -167,9 +172,10 @@ def rate_snr(v: Optional[int]) -> str:
     """Rate SNR: >=25 GREAT, >=15 OK, else WEAK, None UNKNOWN."""
     if v is None:
         return "UNKNOWN"
-    if v >= 25:
+    great_min, ok_min = SNR_RATING_THRESHOLDS
+    if v >= great_min:
         return "GREAT"
-    if v >= 15:
+    if v >= ok_min:
         return "OK"
     return "WEAK"
 
