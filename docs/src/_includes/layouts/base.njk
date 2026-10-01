@@ -8,18 +8,24 @@
     <title>{{ title }} · {{ site.title }}</title>
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/assets/site.css">
+    <link rel="stylesheet" href="/assets/layout.css">
     <script src="/assets/site.js" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main-content">Skip to content</a>
-    <header class="site-header">
-      <div class="header-rail page-shell">
-        <a class="wordmark" href="/" aria-label="wifimap documentation home">WIFI-MAP</a>
+    <header class="site-header page-shell">
+      <div class="header-rail">
+        <a class="wordmark" href="/" aria-label="wifimap documentation home">WIFIMAP</a>
+        <span class="app-label">WiFi survey</span>
+        <span class="header-status">DOCUMENTATION</span>
         <span class="version">v{{ capabilities.package.version }}</span>
-        <span class="header-status"><span aria-hidden="true">●</span> docs online</span>
       </div>
-      <nav class="site-nav" aria-label="Documentation">
-        <ul class="page-shell">
+    </header>
+    <p class="page-context page-shell">Documentation <span aria-hidden="true">/</span> {{ title }}</p>
+    <div class="docs-layout page-shell">
+      <nav class="site-nav" aria-labelledby="navigation-title">
+        <p id="navigation-title" class="panel-label">Guides</p>
+        <ul>
           {% for item in site.navigation %}
             <li>
               <a href="{{ item.href }}"{% if navKey == item.key %} aria-current="page"{% endif %}>{{ item.label }}</a>
@@ -27,12 +33,12 @@
           {% endfor %}
         </ul>
       </nav>
-    </header>
-    <main id="main-content" class="page-shell">
-      {{ content | safe }}
-    </main>
-    <footer class="site-footer">
-      <div class="page-shell footer-rail">
+      <main id="main-content" class="document-panel" tabindex="-1">
+        {{ content | safe }}
+      </main>
+    </div>
+    <footer class="site-footer page-shell">
+      <div class="footer-rail">
         <a class="footer-brand" href="{{ site.organization.url }}">
           <img class="footer-brand__logo" src="/assets/inframanufaktur-logo.svg" width="72" height="72" alt="">
           <span class="footer-brand__copy">

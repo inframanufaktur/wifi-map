@@ -1,0 +1,247 @@
+/* The terminal dashboard's framed header, sidebar, content and footer. */
+.page-shell {
+  width: min(calc(100% - 2 * var(--space-2)), var(--page-width));
+  margin-inline: auto;
+}
+
+.site-header,
+.site-nav,
+.document-panel,
+.site-footer {
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.site-header {
+  margin-top: var(--space-2);
+}
+
+.header-rail {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  min-height: 3.5rem;
+  padding: var(--space-2) var(--space-3);
+}
+
+.wordmark {
+  color: var(--accent);
+  font-size: 1rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-decoration: none;
+}
+
+.app-label {
+  color: var(--text);
+}
+
+.header-status {
+  margin-left: auto;
+  color: var(--accent);
+}
+
+.version,
+.header-status,
+.panel-label {
+  font-size: var(--step--1);
+}
+
+.version,
+.page-context {
+  color: var(--text-muted);
+}
+
+.page-context {
+  padding-inline: var(--space-1);
+  margin-block: var(--space-2);
+  font-size: var(--step--1);
+}
+
+.page-context span {
+  margin-inline: var(--space-1);
+}
+
+.docs-layout {
+  display: grid;
+  grid-template-columns: 15rem minmax(0, 1fr);
+  align-items: start;
+  gap: var(--space-2);
+}
+
+.site-nav {
+  position: sticky;
+  top: var(--space-2);
+  padding: var(--space-2);
+}
+
+.panel-label {
+  width: fit-content;
+  margin: -1.5rem 0 var(--space-2);
+  padding-inline: var(--space-1);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.site-nav ul {
+  max-height: calc(100dvh - 4 * var(--space-2));
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.site-nav a {
+  display: grid;
+  grid-template-columns: 1rem minmax(0, 1fr);
+  align-items: start;
+  padding: var(--space-2) var(--space-1);
+  color: var(--text-muted);
+  font-size: var(--step--1);
+  line-height: 1.5;
+  text-decoration: none;
+}
+
+.site-nav a::before {
+  content: "";
+}
+
+.site-nav a:hover {
+  color: var(--text);
+  background: var(--surface-raised);
+}
+
+.site-nav a:focus-visible {
+  outline-offset: -0.2rem;
+}
+
+.site-nav a[aria-current="page"] {
+  background: var(--surface-raised);
+  color: var(--accent);
+}
+
+.site-nav a[aria-current="page"]::before {
+  content: "▸";
+}
+
+.document-panel {
+  min-width: 0;
+  padding: var(--space-3) var(--space-4) var(--space-4);
+}
+
+.document-panel h2 {
+  scroll-margin-top: var(--space-3);
+}
+
+.site-footer {
+  margin-block: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  color: var(--text-muted);
+  font-size: var(--step--1);
+}
+
+.footer-rail {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.footer-rail p {
+  margin: 0;
+}
+
+.footer-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.footer-brand__logo {
+  width: 3rem;
+  height: 3rem;
+  flex: 0 0 auto;
+}
+
+.footer-brand__copy {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.footer-brand__name {
+  line-height: 1.25;
+}
+
+.footer-brand__claim {
+  max-width: 48ch;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.footer-meta {
+  flex-shrink: 0;
+  text-align: right;
+}
+
+@media (max-width: 63.99rem) {
+  .docs-layout {
+    grid-template-columns: 12.5rem minmax(0, 1fr);
+  }
+
+  .document-panel {
+    padding-inline: var(--space-3);
+  }
+}
+
+@media (max-width: 47.99rem) {
+  .docs-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .site-nav {
+    position: static;
+  }
+
+  .site-nav ul {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    max-height: none;
+    overflow: visible;
+  }
+
+  .site-nav a {
+    grid-template-columns: 0.75rem minmax(0, 1fr);
+    padding: var(--space-1) 0.25rem;
+    font-size: 0.75rem;
+  }
+
+  .header-rail {
+    padding-inline: var(--space-2);
+    gap: var(--space-1);
+  }
+
+  .header-status {
+    display: none;
+  }
+
+  .version {
+    margin-left: auto;
+  }
+
+  .document-panel {
+    padding: var(--space-3) var(--space-2);
+  }
+
+  .footer-rail {
+    display: grid;
+  }
+
+  .footer-meta {
+    text-align: left;
+  }
+}
