@@ -1,108 +1,103 @@
-name: Documentation
+name: CI and documentation
 
 on:
-  pull_request:
-    branches: [main]
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  native-macos:
-    name: Verify native macOS application
-    runs-on: macos-latest
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v7
-
-      - name: Set up Rust
-        run: |
-          rustup toolchain install stable --profile minimal --component clippy
-          rustup default stable
-
-      - name: Check, test, and build
-        run: |
-          cargo clippy --locked --all-targets -- -D warnings
-          cargo test --locked
-          cargo build --locked --release
-          python3 scripts/smoke_tui.py
-          python3 -m unittest discover -s tests -p migration_test.py
-
   verify:
-    name: Verify Rust application and documentation
-    runs-on: ubuntu-latest
+    name: Rust / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v7
-
+      - uses: actions/checkout@v7
       - name: Set up Rust
-        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
-
-      - name: Select Rust toolchain
-        run: rustup default stable
-
-      - name: Set up Node
-        uses: actions/setup-node@v7
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-
-      - name: Verify formatting and static analysis
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting and static analysis
         run: |
           cargo fmt --check
           cargo clippy --locked --all-targets -- -D warnings
-
-      - name: Install documentation toolchain
-        run: npm ci
-
-      - name: Run Rust tests and build
+      - name: Test and build
         run: |
           cargo test --locked
           cargo build --locked --release
           python3 scripts/smoke_tui.py
           python3 -m unittest discover -s tests -p migration_test.py
 
-      - name: Build production documentation
-        run: npm run docs:build
-
-      - name: Run documentation contracts
-        run: npm run docs:test
-
-  deploy:
-    name: Deploy production documentation
-    if: >-
-      github.event_name != 'pull_request' &&
-      github.ref == 'refs/heads/main'
-    needs: [verify, native-macos]
+  msrv:
+    name: Rust / minimum version
     runs-on: ubuntu-latest
-    environment: prod
-    concurrency:
-      group: docs-production
-      cancel-in-progress: true
+    timeout-minutes: 15
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+      - name: Check Rust 1.88 compatibility
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          cargo +1.88.0 check --locked --all-targets
 
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
       - name: Set up Rust
-        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
-
-      - name: Select Rust toolchain
-        run: rustup default stable
-
-      - name: Set up Node
-        uses: actions/setup-node@v7
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           cache: npm
-
-      - name: Rebuild verified documentation
+      - run: npm ci
+      - run: npm audit --audit-level=high
+      - name: Build and verify documentation
         run: |
-          npm ci
           npm run docs:build
+          npm run docs:test
+      - name: Upload verified site
+        uses: actions/upload-artifact@v7
+        with:
+          name: documentation
+          path: docs/_site/
+          if-no-files-found: error
+          retention-days: 14
 
+  deploy:
+    name: Deploy documentation to Uberspace
+    if: >-
+      github.event_name != 'pull_request' &&
+      github.ref == 'refs/heads/main'
+    needs: [verify, msrv, docs]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: prod
+    concurrency:
+      group: docs-production
+      cancel-in-progress: false
+    steps:
+      - name: Download verified documentation
+        uses: actions/download-artifact@v8
+        with:
+          name: documentation
+          path: docs/_site/
       - name: Configure deployment SSH identity
         env:
           UBERSPACE_SSH_KEY: ${{ secrets.UBERSPACE_SSH_KEY }}
@@ -113,13 +108,15 @@ jobs:
           printf '%s\n' "$UBERSPACE_SSH_KEY" > ~/.ssh/deploy_key
           printf '%s\n' "$UBERSPACE_SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
           ssh-keygen -y -P '' -f ~/.ssh/deploy_key > /dev/null
-
       - name: Mirror site to Uberspace DocumentRoot
         env:
           UBERSPACE_HOST: ${{ secrets.UBERSPACE_HOST }}
           UBERSPACE_SSH_USER: ${{ secrets.UBERSPACE_SSH_USER }}
           UBERSPACE_WEB_ROOT: ${{ vars.UBERSPACE_WEB_ROOT }}
         run: |
+          : "${UBERSPACE_HOST:?Set UBERSPACE_HOST in the prod environment}"
+          : "${UBERSPACE_SSH_USER:?Set UBERSPACE_SSH_USER in the prod environment}"
+          : "${UBERSPACE_WEB_ROOT:?Set UBERSPACE_WEB_ROOT in the prod environment}"
           rsync -avz --delete --chmod=D755,F644 \
             -e "ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -o BatchMode=yes -o PreferredAuthentications=publickey" \
             docs/_site/ \

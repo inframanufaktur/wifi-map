@@ -100,6 +100,9 @@ to wifimap's rendering helpers, metadata, and deployment workflow.
 
 Use Node.js 26 for the documentation toolchain. `npm run docs:serve` watches
 documentation and Rust sources; command metadata refreshes on every rebuild.
+CI follows the template's cached Linux/macOS Rust matrix, Rust 1.88 compatibility
+check, dependency audit, and verified documentation artifact deployment.
+Dependabot checks Cargo, npm, and GitHub Actions dependencies weekly.
 
 [Repository](https://github.com/inframanufaktur/wifi-map) ·
 [Documentation](https://wifimap.inframanufaktur.org/)

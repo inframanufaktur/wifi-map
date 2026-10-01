@@ -82,10 +82,17 @@ local assets. Build the site before running them.
 
 ## Uberspace deployment
 
-The existing [documentation workflow]({{ site.repository }}/blob/main/.github/workflows/docs.yml)
-verifies the application on macOS and Ubuntu and builds and tests the site on
-Ubuntu. Production deployment runs from `main` after both verification jobs
-pass, using the GitHub environment named `prod`.
+The [CI and documentation workflow]({{ site.repository }}/blob/main/.github/workflows/docs.yml)
+follows the TUI toolkit template. A cached Rust matrix checks formatting,
+static analysis, tests, release builds, terminal smoke tests, and legacy
+migration checks on macOS and Ubuntu. A separate job checks all targets with
+Rust 1.88.0, the minimum supported version.
+
+The documentation job installs locked npm dependencies, audits them for high
+severity vulnerabilities, builds and tests the site, and uploads the verified
+output as the `documentation` artifact. Artifacts are retained for 14 days.
+Production deployment runs from `main` after the Rust matrix, minimum-version
+check, and documentation job pass, using the GitHub environment named `prod`.
 
 Configure these environment secrets:
 
@@ -100,7 +107,10 @@ Set the environment variable `UBERSPACE_WEB_ROOT` to the domain directory, such
 as `wifimap.inframanufaktur.org`, and authorize the public key on Uberspace.
 The destination is `/var/www/virtual/<user>/<web-root>/`.
 
-The deployment job rebuilds the site from the verified commit and mirrors
-`docs/_site/` with `rsync --delete`. Use a dedicated destination directory:
+The deployment job downloads the exact artifact that passed documentation
+checks and mirrors it with `rsync --delete`. Use a dedicated destination directory:
 files absent from the new build are removed. Deployment does not require a
 `DEPLOY_DOCS` toggle in this repository.
+
+To restore an earlier site, rerun all jobs of the successful workflow run for
+that commit. Dependabot checks Cargo, npm, and GitHub Actions dependencies weekly.
