@@ -52,6 +52,11 @@ reverses the order.
 RSSI and SNR use the walk TUI rating thresholds. Benchmark deltas require a
 location benchmark and a captured value on both sides.
 
+Green, amber, and red distinguish strong, fair, and weak signal. Comparison and
+benchmark deltas use green for improvements and red for regressions, following
+the metric's preferred direction. Missing values and changes displayed as zero
+stay muted. Amber sample counts indicate limited measurement support.
+
 <section class="reference-block generated-reference" aria-labelledby="evaluation-metrics">
   <h2 id="evaluation-metrics">Ranking metrics</h2>
   <div class="table-scroll" tabindex="0" role="region" aria-label="Evaluation ranking metrics">

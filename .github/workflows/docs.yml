@@ -11,17 +11,38 @@ permissions:
   contents: read
 
 jobs:
+  native-macos:
+    name: Verify native macOS application
+    runs-on: macos-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+
+      - name: Check, test, and build
+        run: |
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+          cargo build --locked --release
+          python3 scripts/smoke_tui.py
+          python3 -m unittest discover -s tests -p migration_test.py
+
   verify:
-    name: Verify documentation
+    name: Verify Rust application and documentation
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
 
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.9"
+      - name: Set up Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+
+      - name: Select Rust toolchain
+        run: rustup default stable
 
       - name: Set up Node
         uses: actions/setup-node@v7
@@ -29,29 +50,33 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
 
-      - name: Install Python project
+      - name: Verify formatting and static analysis
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e ".[test]"
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
 
       - name: Install documentation toolchain
         run: npm ci
 
-      - name: Run complete test suite
-        run: pytest
+      - name: Run Rust tests and build
+        run: |
+          cargo test --locked
+          cargo build --locked --release
+          python3 scripts/smoke_tui.py
+          python3 -m unittest discover -s tests -p migration_test.py
 
       - name: Build production documentation
         run: npm run docs:build
 
       - name: Run documentation contracts
-        run: pytest tests/test_docs.py
+        run: npm run docs:test
 
   deploy:
     name: Deploy production documentation
     if: >-
       github.event_name != 'pull_request' &&
       github.ref == 'refs/heads/main'
-    needs: verify
+    needs: [verify, native-macos]
     runs-on: ubuntu-latest
     environment: prod
     concurrency:
@@ -61,10 +86,11 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.9"
+      - name: Set up Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+
+      - name: Select Rust toolchain
+        run: rustup default stable
 
       - name: Set up Node
         uses: actions/setup-node@v7
@@ -74,8 +100,6 @@ jobs:
 
       - name: Rebuild verified documentation
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e .
           npm ci
           npm run docs:build
 

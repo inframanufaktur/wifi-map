@@ -8,8 +8,8 @@ permalink: /cli-reference/index.html
 
 # CLI reference
 
-Global options come before the subcommand. For example, use
-`wifimap --db other.db eval`, not `wifimap eval --db other.db`. Location,
+Global options work before or after the subcommand. For example, use
+`wifimap --db other.db eval` or `wifimap eval --db other.db`. Location,
 room, and spot arguments accept an ID or a name unless an option says
 otherwise.
 

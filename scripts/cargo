@@ -1,0 +1,11 @@
+#!/bin/sh
+# Use the project-local toolchain if present, otherwise the system Cargo.
+set -eu
+project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+if [ -x "$project_dir/.tools/cargo/bin/cargo" ]; then
+    export RUSTUP_HOME="$project_dir/.tools/rustup"
+    export CARGO_HOME="$project_dir/.tools/cargo"
+    export PATH="$CARGO_HOME/bin:$PATH"
+    exec "$CARGO_HOME/bin/cargo" "$@"
+fi
+exec cargo "$@"

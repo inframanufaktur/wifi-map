@@ -9,8 +9,8 @@ permalink: /index.html
 # wifimap
 
 wifimap records WiFi measurements at named spots on macOS. Data stays in a
-local SQLite database. CSV export is optional. Python
-{{ capabilities.package.python_requires }} is required.
+local SQLite database. CSV export is optional. The application is written in Rust;
+building requires Rust {{ capabilities.package.rust_requires }} or newer.
 
 ## Commands
 

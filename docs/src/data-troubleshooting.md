@@ -13,9 +13,8 @@ wifimap stores survey data in SQLite.
 ## Storage model
 
 The default database is `db/wifi-map.db` inside the project. Override it with
-the global option before a command, for example
-`wifimap --db /path/to/survey.db list`. The containing directory must already
-exist.
+the global option on a command, for example
+`wifimap --db /path/to/survey.db list`. New database parent directories are created automatically.
 
 Data is organized as follows:
 
@@ -50,8 +49,7 @@ throughput, path, benchmark, and walk data. Every export uses the following
 </div>
 
 `bssid` is the access point observed for that snapshot; `ap_name` is its
-optional alias. NULL values render as `-` in terminal tables and as an empty
-quoted cell in CSV. The four delta fields are reading minus location benchmark
+optional alias. NULL values render as `-` or `—` in terminal tables and as an empty cell in CSV. The four delta fields are reading minus location benchmark
 and stay blank when no benchmark exists or either input is missing.
 
 CSV evaluation requires the current core fields through
@@ -67,16 +65,11 @@ below access the network or macOS services.
 
 ### CoreWLAN signal reads
 
-Install `pyobjc-framework-CoreWLAN` for fast macOS signal polling:
-
-```sh
-python -m pip install --upgrade pip
-python -m pip install pyobjc-framework-CoreWLAN
-```
-
-CoreWLAN supplies RSSI, noise, channel, PHY, TX rate, and sometimes SSID and
-BSSID. A missing PyObjC installation normally exits 2. `system_profiler` is the
-slower fallback. Neither path requires administrator privileges.
+The Rust executable reads CoreWLAN directly through the macOS Objective-C runtime.
+No Python or PyObjC package is needed. CoreWLAN supplies RSSI, noise, channel, PHY,
+TX rate, and sometimes SSID and BSSID. `system_profiler` provides a slower fallback.
+Neither path requires administrator privileges. macOS can redact network identity;
+choose an SSID manually when automatic detection is unavailable.
 
 ### WifiWand network identity
 
@@ -129,7 +122,7 @@ capacity.
   <p class="reference-label">Exit-code reference</p>
   <dl class="reference-list">
     <div><dt><code>0</code></dt><dd>Command completed successfully.</dd></div>
-    <div><dt><code>2</code></dt><dd>WiFi or signal data is unavailable, including a missing signal backend with its installation hint.</dd></div>
+    <div><dt><code>2</code></dt><dd>WiFi or signal data is unavailable, including an unavailable signal backend.</dd></div>
     <div><dt><code>3</code></dt><dd>Storage, lookup, CSV, or persistence error.</dd></div>
     <div><dt><code>4</code></dt><dd>Reserved for a required missing speed-test binary. Current capture commands warn and save signal-only data instead.</dd></div>
   </dl>
@@ -146,12 +139,12 @@ capacity.
       </tr>
     </thead>
     <tbody>
-      <tr><th scope="row"><code>scan</code> exits 2 with an install hint</th><td>Upgrade pip, then install <code>pyobjc-framework-CoreWLAN</code>.</td></tr>
+      <tr><th scope="row"><code>scan</code> exits 2 with a signal error</th><td>Check that WiFi is enabled and associated. Live radio reads require macOS; use <code>--demo</code> to explore simulated data.</td></tr>
       <tr><th scope="row"><code>SSID selection requires a terminal</code></th><td>For non-interactive <code>scan</code> or <code>walk</code>, pass both <code>--location NAME</code> and <code>--ssid NAME</code>.</td></tr>
       <tr><th scope="row">SSID detection is blank or redacted</th><td>Run <code>wifiwand-macos-setup</code>, choose an existing SSID, or pass <code>--ssid NAME</code>. BSSID capture requires WifiWand or unredacted CoreWLAN.</td></tr>
       <tr><th scope="row"><code>Warning: … speedtest …; proceeding signal-only</code></th><td>The Ookla binary is missing or failed. The row was kept with blank throughput; use <code>--no-speedtest</code> to silence the probe.</td></tr>
-      <tr><th scope="row"><code>walk</code> falls back to line-buffered keys</th><td>Curses or a TTY is unavailable, as with piped output. Use the same <code>s</code>/<code>t</code>/<code>c</code>/<code>l</code>/<code>n</code>/<code>b</code>/<code>q</code> keys followed by Enter. <code>NO_COLOR=1</code> disables ANSI colors.</td></tr>
-      <tr><th scope="row"><code>Error: cannot open DB</code> or <code>cannot store reading</code> (exit 3)</th><td>Check the <code>--db</code> path and permissions. The containing directory must exist.</td></tr>
+      <tr><th scope="row"><code>walk</code> cannot open the terminal</th><td>Open the Ratatui dashboard in an interactive terminal at least 76 columns by 24 rows. Noninteractive evaluation prints a report.</td></tr>
+      <tr><th scope="row"><code>Error: cannot open DB</code> or <code>cannot store reading</code> (exit 3)</th><td>Check the <code>--db</code> path and permissions. Check that the parent directory is writable.</td></tr>
       <tr><th scope="row">CSV evaluation reports missing columns</th><td>Re-export with the current wifimap version; older or edited CSV files may not match the required schema.</td></tr>
       <tr><th scope="row">CSV evaluation reports a malformed cell</th><td>Correct the named row and field, or re-export. Blank is valid; malformed and non-finite numbers are not.</td></tr>
     </tbody>

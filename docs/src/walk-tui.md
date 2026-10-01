@@ -12,7 +12,9 @@ permalink: /walk-tui/index.html
 
 <pre class="command-block" data-copy><code>wifimap walk --location HOME --ssid MY-WIFI --name before-install</code></pre>
 
-The line-buffered fallback uses the same controls followed by Enter.
+The Rust dashboard uses Ratatui and Crossterm. It shares `usmaybe`'s dark palette,
+turquoise accents, place sidebar, charts, details, and keyboard help. Use a terminal
+at least 76 columns by 24 rows. `wifimap --demo` explores isolated simulated data.
 
 ## Walk controls
 
@@ -54,25 +56,31 @@ The line-buffered fallback uses the same controls followed by Enter.
 
 ### Room and spot picker controls
 
-Move with `↑`/`↓` or `j`/`k`. Select with `Enter`; return with `Escape` or `q`.
-Number keys select numbered rows. `+` creates a room or spot.
+Move with `↑`/`↓` or `j`/`k`. Select with `Enter`; return with `Escape`.
+`+` or `n` creates a room or spot. `q` finishes the survey.
 
 ## Live signal
 
 `SIGNAL` samples RSSI, noise, and SNR about once per second. RSSI and SNR use
-the rating thresholds below. Missing values display as `UNKNOWN`. `NO-WIFI`
-blocks saves while the Mac is disconnected.
+the rating thresholds below: green for strong signal, amber for fair, and red
+for weak. These colors also appear in the signal history. Missing readings stay
+muted and leave gaps in the chart. `WIFI UNAVAILABLE` blocks saves while the Mac
+is disconnected.
 
 ## Link details
 
-`LINK` shows channel, PHY, transmit rate, MCS, band, security, local IP,
-default router, and interface address. Link rate is not Internet throughput.
+Link details show channel, PHY, transmit rate, band, security, and available MCS.
+Native CoreWLAN does not expose MCS through its public API, so it remains blank
+for live readings. Link rate is not Internet throughput.
 
 ## Network path
 
 `PATH` probes the default router and `1.1.1.1` once per second. A missed
 Internet reply is retried against `8.8.8.8`; `×` means both targets missed.
 The display includes latency, p95, loss, and outages.
+
+Replies are green and nonzero loss is amber. Missing RTT is red only when the
+path window confirms 100% loss; an unknown target stays muted.
 
 Changing spots clears the live path window. Saved readings contain aggregate
 count, median, p95, loss, and longest outage. Internet targets see the public
@@ -81,14 +89,13 @@ IP and probe timing, but receive no survey data.
 ## Passive traffic
 
 `TRAFFIC` reads default-interface byte counters through `netstat` and `route`.
-A VPN may become the default interface. The graph is blank when counters are
-unavailable. Traffic is utilization, not capacity; it does not start a speed
-test.
+A VPN may become the default interface. Values are marked unavailable when counters cannot be read. Traffic is
+utilization, not capacity; it does not start a speed test.
 
 ## Access points
 
-`AP` shows the BSSID and its local alias. Identity refreshes every ten seconds
-above -70 dBm, every second near -75 dBm, and before each save. Manage aliases
+`AP` shows the BSSID and its local alias. When CoreWLAN redacts identity, the helper cache refreshes every ten seconds
+above -70 dBm, every second at weaker signal levels, and before each save. Manage aliases
 with the `aps` commands.
 
 ## Location benchmark
@@ -104,13 +111,14 @@ optional throughput result. `t` runs an unsaved throughput probe.
 
 `--no-speedtest` records signal without Ookla. A failed speed test produces a
 warning and preserves the signal reading. Snapshot, benchmark, and throughput
-jobs do not run concurrently.
+jobs do not run concurrently. Quitting cancels unfinished captures and probes;
+completed readings remain saved.
 
 ## Rooms and spots
 
 Each reading belongs to a spot, room, and location. Floor `0` is ground level;
-negative floors are basements. Switching spots clears comparison, unsaved
-throughput, and path data.
+negative floors are basements. Switching spots clears unsaved throughput and the live path window, and reloads
+the selected baseline for the new spot.
 
 SSIDs belong to locations. `--ssid NAME` selects or creates one without a
 prompt.
@@ -123,6 +131,9 @@ RSSI, noise, SNR, transmit rate, ping, download, and upload.
 
 Duplicate walk names require ID selection. Spots absent from the baseline show
 no baseline instead of zero.
+
+Comparison deltas are green for improvements and red for regressions. Unchanged
+and unavailable deltas stay muted.
 
 <pre class="command-block" data-copy><code>wifimap walk --location HOME --name after-install \
   --compare-to before-install</code></pre>

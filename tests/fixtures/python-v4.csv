@@ -1,0 +1,3 @@
+id,ts,spot_id,room_id,location_id,location_name,room_name,spot_name,floor,outdoors,ssid,bssid,rssi,noise,snr,channel,phy,tx_rate,ping_ms,down_mbps,up_mbps,server,note,delta_rssi,delta_snr,delta_down_mbps,delta_up_mbps,ap_name,path_probe_count,gateway_rtt_ms,gateway_p95_ms,gateway_loss_pct,gateway_max_outage_ms,internet_rtt_ms,internet_p95_ms,internet_loss_pct,internet_max_outage_ms,walk_id,walk_name,walk_started_at,walk_ended_at
+1,2026-01-01T00:01:00+00:00,1,1,1,HOME,KITCHEN,WINDOW,-1,0,HOME-WIFI,aa:bb:cc:dd:ee:ff,-67,-93,26,36,802.11ax,866.7,8.5,201.3,51.2,,"café, ""window""
+second line",-27,-14,-298.7,-48.8,Kitchen AP,10,1.2,3.5,0.0,0,8.1,11.5,10.0,1000,1,before,2026-10-01T17:36:04.333102+00:00,2026-10-01T17:36:04.333736+00:00

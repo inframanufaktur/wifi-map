@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+project_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+binary="$project_dir/target/release/wifimap"
+# Ask Cargo to check freshness, including the first build after a checkout.
+"$project_dir/scripts/cargo" build --quiet --locked --release --manifest-path "$project_dir/Cargo.toml"
+export WIFIMAP_PROJECT_DIR="$project_dir"
+exec "$binary" "$@"

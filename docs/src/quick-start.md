@@ -13,23 +13,21 @@ These commands use `/tmp/demo.db`. The default database is not modified.
 ## Requirements
 
 - macOS
-- Python {{ capabilities.package.python_requires }}
+- Rust {{ capabilities.package.rust_requires }} or newer and Xcode Command Line Tools
 - an active WiFi connection
-- PyObjC for CoreWLAN signal readings
+- native CoreWLAN (included in macOS)
 - optional: the official Ookla `speedtest` binary for throughput measurements
 
 The commands below assume you are in a checkout of the wifimap repository.
 
-## 1. Create the environment
+## 1. Build the executable
 
-Upgrade pip before installing PyObjC; older pip versions may fail while building
-`pyobjc-core`.
+The launcher builds the Rust application when needed. No Python environment is
+required. Run demo mode to explore without live WiFi or a saved database.
 
-<pre class="command-block" data-copy><code>python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e '.[test]'
-python -m pip install pyobjc-framework-CoreWLAN</code></pre>
+<pre class="command-block" data-copy><code>scripts/cargo build --release
+./wifimap --demo
+scripts/cargo install --locked --path .</code></pre>
 
 ## 2. Save a first snapshot
 
@@ -40,7 +38,7 @@ and SSID names.
   --location HOME --room KITCHEN --spot WINDOW --room-floor 0 \
   --ssid DEMO-WIFI</code></pre>
 
-Global options such as `--db` go before the subcommand. The default database is
+Global options such as `--db` work before or after the subcommand. The default database is
 `db/wifi-map.db`.
 
 ## 3. Record a named walk

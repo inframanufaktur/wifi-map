@@ -5,9 +5,8 @@ export default function configureEleventy(eleventyConfig) {
   });
 
   eleventyConfig.addPassthroughCopy({ "docs/src/assets": "assets" });
-  eleventyConfig.addWatchTarget("src/wifimap/");
-  eleventyConfig.addWatchTarget("pyproject.toml");
-  eleventyConfig.addWatchTarget("docs/extract_capabilities.py");
+  eleventyConfig.addWatchTarget("src/");
+  eleventyConfig.addWatchTarget("Cargo.toml");
 
   return {
     dir: {
