@@ -29,12 +29,12 @@ pub(super) fn draw(frame: &mut Frame, app: &WalkApp) {
     {
         return;
     }
-    let has_load = app.load_latency.is_some() && !app.load_running;
+    let load_report = app.load_latency.as_ref().filter(|_| !app.load_running);
     let regions = Layout::vertical([
         Constraint::Length(3),
         Constraint::Length(1),
         Constraint::Length(5),
-        Constraint::Length(if has_load { 7 } else { 3 }),
+        Constraint::Length(if load_report.is_some() { 7 } else { 3 }),
         Constraint::Min(5),
         Constraint::Length(3),
     ])
@@ -54,8 +54,8 @@ pub(super) fn draw(frame: &mut Frame, app: &WalkApp) {
         regions[1],
     );
     paths(frame, app, regions[2]);
-    if has_load {
-        load(frame, app.load_latency.as_ref().unwrap(), regions[3]);
+    if let Some(report) = load_report {
+        load(frame, report, regions[3]);
     } else {
         frame.render_widget(
             Paragraph::new(if app.load_running {
