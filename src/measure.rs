@@ -1,6 +1,7 @@
 //! Native WiFi, throughput, and path-quality probes.
 
 use crate::model::{PathFields, Signal, Speed};
+use crate::path_diagnostics::{LatencyPhase, LoadLatency, PathDiagnostics};
 use std::collections::{HashSet, VecDeque};
 use std::io::{self, Read};
 use std::net::IpAddr;
@@ -326,6 +327,8 @@ fn clean_bssid(value: &str) -> Option<String> {
     let value = value.trim().replace('-', ":").to_lowercase();
     let parts: Vec<_> = value.split(':').collect();
     if parts.len() == 6
+        && value != "00:00:00:00:00:00"
+        && value != "ff:ff:ff:ff:ff:ff"
         && parts
             .iter()
             .all(|p| p.len() == 2 && p.bytes().all(|b| b.is_ascii_hexdigit()))
@@ -420,7 +423,7 @@ fn helper_identity(max_age: Duration, force: bool, cancel: &CancelToken) -> Opti
         let ttl = if cached.identity.is_some() {
             max_age
         } else {
-            Duration::from_secs(30)
+            Duration::from_secs(1)
         };
         if !force && cached.checked_at.is_some_and(|time| time.elapsed() < ttl) {
             return cached.identity.clone();
@@ -476,15 +479,10 @@ pub fn sample_signal_with_cancel(cancel: &CancelToken) -> Result<Signal> {
             parse_profiler(&output.stdout)?
         }
     };
-    if signal.ssid.is_none() || signal.bssid.is_none() {
-        let age = if signal.rssi.is_some_and(|rssi| rssi <= -70.) {
-            1
-        } else {
-            10
-        };
-        if let Some(identity) = helper_identity(Duration::from_secs(age), false, cancel) {
-            apply_identity(&mut signal, identity, false);
-        }
+    if (signal.ssid.is_none() || signal.bssid.is_none())
+        && let Some(identity) = helper_identity(Duration::from_secs(1), false, cancel)
+    {
+        apply_identity(&mut signal, identity, false);
     }
     cancel.check()?;
     Ok(signal)
@@ -573,6 +571,9 @@ pub fn read_network_identity_with_cancel(
 }
 
 fn wifi_interface(cancel: &CancelToken) -> Option<String> {
+    if let Ok((_, _, Some(interface))) = corewlan::identity() {
+        return Some(interface);
+    }
     let output = run_command(
         "/usr/sbin/networksetup",
         &["-listallhardwareports"],
@@ -674,9 +675,22 @@ pub fn run_speedtest() -> Result<Speed> {
 }
 
 pub fn run_speedtest_with_cancel(cancel: &CancelToken) -> Result<Speed> {
+    cancel.check()?;
+    let interface = wifi_interface(cancel)
+        .ok_or_else(|| MeasureError::NoWifi("no WiFi interface available".into()))?;
+    run_speedtest_on_interface(&interface, cancel)
+}
+
+fn run_speedtest_on_interface(interface: &str, cancel: &CancelToken) -> Result<Speed> {
     let output = run_command(
         "speedtest",
-        &["--format=json", "--accept-license", "--accept-gdpr"],
+        &[
+            "--format=json",
+            "--accept-license",
+            "--accept-gdpr",
+            "--interface",
+            interface,
+        ],
         Duration::from_secs(120),
         cancel,
     )
@@ -690,6 +704,183 @@ pub fn run_speedtest_with_cancel(cancel: &CancelToken) -> Result<Speed> {
         ));
     }
     parse_speedtest(&output.stdout)
+}
+
+/// Compare independent idle, speedtest-running, and recovery probe windows.
+/// The load interval spans Ookla's complete run, including server selection.
+pub fn run_speedtest_diagnostics(cancel: &CancelToken) -> (Result<Speed>, LoadLatency) {
+    if let Err(error) = cancel.check() {
+        return (Err(error), LoadLatency::default());
+    }
+    let Some(interface) = wifi_interface(cancel) else {
+        let error = if cancel.is_cancelled() {
+            MeasureError::Cancelled
+        } else {
+            MeasureError::NoWifi("no WiFi interface available".into())
+        };
+        return (Err(error), LoadLatency::default());
+    };
+    let epoch = Instant::now();
+    let mut internet_target = "1.1.1.1".to_string();
+    let mut probe_count = 0;
+    let mut previous_gateway = None;
+    let mut gateway_changed = false;
+    let (result, mut report) = run_connection_load_measurement(
+        cancel,
+        || run_speedtest_on_interface(&interface, cancel),
+        || {
+            probe_count += 1;
+            let gateway = gateway_on_interface(&interface, cancel);
+            if previous_gateway
+                .as_ref()
+                .is_some_and(|previous| previous != &gateway)
+            {
+                gateway_changed = true;
+            }
+            previous_gateway = Some(gateway.clone());
+            probe_path(
+                Some(&interface),
+                gateway,
+                &mut internet_target,
+                epoch,
+                probe_count <= 5,
+                cancel,
+            )
+        },
+        || {
+            read_network_identity_with_cancel(cancel)
+                .ok()
+                .and_then(|(ssid, _)| ssid)
+        },
+        Duration::from_secs(1),
+    );
+    if gateway_changed && !cancel.is_cancelled() {
+        invalidate_gateway_comparison(&mut report);
+    }
+    (result, report)
+}
+
+fn invalidate_gateway_comparison(report: &mut LoadLatency) {
+    report.gateway_changed = true;
+    for phase in [&mut report.idle, &mut report.loaded, &mut report.recovery] {
+        phase.path.gateway_rtt_ms = None;
+        phase.path.gateway_p95_ms = None;
+        phase.path.gateway_loss_pct = None;
+        phase.path.gateway_max_outage_ms = None;
+        phase.diagnostics.gateway_jitter_ms = None;
+        phase.diagnostics.gateway_latest_ms = None;
+    }
+}
+
+fn run_connection_load_measurement(
+    cancel: &CancelToken,
+    speedtest: impl FnOnce() -> Result<Speed> + Send,
+    mut probe: impl FnMut() -> PathSample,
+    mut identity: impl FnMut() -> Option<String>,
+    interval: Duration,
+) -> (Result<Speed>, LoadLatency) {
+    let mut known_ssid = None;
+    let mut connection_changed = false;
+    let (result, mut report) = run_load_measurement(
+        cancel,
+        speedtest,
+        || {
+            if let Some(ssid) = identity() {
+                connection_changed |= known_ssid.as_ref().is_some_and(|known| known != &ssid);
+                known_ssid = Some(ssid);
+            }
+            probe()
+        },
+        interval,
+    );
+    if connection_changed && !cancel.is_cancelled() {
+        report.connection_changed = true;
+        report.loaded = LatencyPhase::default();
+        report.recovery = LatencyPhase::default();
+    }
+    (result, report)
+}
+
+fn collect_latency_phase(
+    probe: &mut impl FnMut() -> PathSample,
+    interval: Duration,
+    cancel: &CancelToken,
+) -> LatencyPhase {
+    let mut tracker = PathTracker::new(5, interval);
+    for index in 0..5 {
+        if cancel.is_cancelled() {
+            break;
+        }
+        let started = Instant::now();
+        tracker.record_sample(&probe());
+        if index < 4 && !cancel.wait(interval.saturating_sub(started.elapsed())) {
+            break;
+        }
+    }
+    tracker.phase()
+}
+
+fn run_load_measurement(
+    cancel: &CancelToken,
+    speedtest: impl FnOnce() -> Result<Speed> + Send,
+    mut probe: impl FnMut() -> PathSample,
+    interval: Duration,
+) -> (Result<Speed>, LoadLatency) {
+    if cancel.is_cancelled() {
+        return (Err(MeasureError::Cancelled), LoadLatency::default());
+    }
+    let idle = collect_latency_phase(&mut probe, interval, cancel);
+    if cancel.is_cancelled() {
+        return (Err(MeasureError::Cancelled), LoadLatency::default());
+    }
+    let (result, loaded) = thread::scope(|scope| {
+        let speedtest = scope.spawn(speedtest);
+        let mut tracker = PathTracker::new(120, interval);
+        while !speedtest.is_finished() && !cancel.is_cancelled() {
+            let started = Instant::now();
+            let sample = probe();
+            // A probe completed after the load stopped belongs to neither the
+            // loaded window nor its independently collected recovery window.
+            if speedtest.is_finished() || cancel.is_cancelled() {
+                break;
+            }
+            tracker.record_sample(&sample);
+            if !cancel.wait(interval.saturating_sub(started.elapsed())) {
+                break;
+            }
+        }
+        let result = speedtest.join().unwrap_or_else(|_| {
+            Err(MeasureError::SpeedtestFailed(
+                "worker stopped unexpectedly".into(),
+            ))
+        });
+        (result, tracker.phase())
+    });
+    if cancel.is_cancelled() {
+        return (Err(MeasureError::Cancelled), LoadLatency::default());
+    }
+    if result.is_err() {
+        return (
+            result,
+            LoadLatency {
+                idle,
+                ..LoadLatency::default()
+            },
+        );
+    }
+    let recovery = collect_latency_phase(&mut probe, interval, cancel);
+    if cancel.is_cancelled() {
+        return (Err(MeasureError::Cancelled), LoadLatency::default());
+    }
+    (
+        result,
+        LoadLatency {
+            idle,
+            loaded,
+            recovery,
+            ..Default::default()
+        },
+    )
 }
 
 fn parse_speedtest(text: &str) -> Result<Speed> {
@@ -735,9 +926,13 @@ pub fn gateway() -> Option<String> {
 }
 
 pub fn gateway_with_cancel(cancel: &CancelToken) -> Option<String> {
+    gateway_on_interface(&wifi_interface(cancel)?, cancel)
+}
+
+fn gateway_on_interface(interface: &str, cancel: &CancelToken) -> Option<String> {
     let output = run_command(
         "/sbin/route",
-        &["-n", "get", "default"],
+        &["-n", "get", "-ifscope", interface, "default"],
         Duration::from_secs(2),
         cancel,
     )
@@ -745,9 +940,10 @@ pub fn gateway_with_cancel(cancel: &CancelToken) -> Option<String> {
     output
         .status
         .success()
-        .then(|| parse_route_field(&output.stdout, "gateway"))
+        .then(|| parse_route_field(&output.stdout, "interface"))
         .flatten()
-        .filter(|gateway| gateway.parse::<IpAddr>().is_ok())
+        .filter(|route_interface| route_interface == interface)?;
+    parse_route_field(&output.stdout, "gateway").filter(|gateway| gateway.parse::<IpAddr>().is_ok())
 }
 
 fn parse_route_field(text: &str, field: &str) -> Option<String> {
@@ -782,6 +978,11 @@ pub fn parse_ping_rtt(text: &str) -> Option<f64> {
 
 pub fn ping_once(target: &str, cancel: &CancelToken) -> Option<f64> {
     target.parse::<IpAddr>().ok()?;
+    ping_on_interface(target, &wifi_interface(cancel)?, cancel)
+}
+
+fn ping_on_interface(target: &str, interface: &str, cancel: &CancelToken) -> Option<f64> {
+    target.parse::<IpAddr>().ok()?;
     let wait = if cfg!(target_os = "macos") {
         "1000"
     } else {
@@ -789,7 +990,7 @@ pub fn ping_once(target: &str, cancel: &CancelToken) -> Option<f64> {
     };
     let output = run_command(
         "/sbin/ping",
-        &["-n", "-c", "1", "-W", wait, target],
+        &["-n", "-c", "1", "-W", wait, "-b", interface, target],
         Duration::from_millis(1500),
         cancel,
     )
@@ -799,6 +1000,55 @@ pub fn ping_once(target: &str, cancel: &CancelToken) -> Option<f64> {
         .success()
         .then(|| parse_ping_rtt(&output.stdout))
         .flatten()
+}
+
+fn probe_path(
+    interface: Option<&str>,
+    gateway: Option<String>,
+    internet_target: &mut String,
+    epoch: Instant,
+    allow_fallback: bool,
+    cancel: &CancelToken,
+) -> PathSample {
+    let Some(interface) = interface else {
+        return PathSample {
+            gateway_target: None,
+            gateway_ms: None,
+            internet_target: String::new(),
+            internet_ms: None,
+            primary_failed: false,
+            observed_at: epoch.elapsed(),
+        };
+    };
+    thread::scope(|scope| {
+        let probe_gateway = gateway.clone();
+        let gateway_probe = scope.spawn(move || {
+            probe_gateway
+                .as_deref()
+                .and_then(|target| ping_on_interface(target, interface, cancel))
+        });
+        let mut internet_ms = ping_on_interface(internet_target, interface, cancel);
+        let primary_failed = internet_ms.is_none() && internet_target == "1.1.1.1";
+        if allow_fallback
+            && primary_failed
+            && !cancel.is_cancelled()
+            && let Some(reply) = ping_on_interface("8.8.8.8", interface, cancel)
+        {
+            // Keep a successful fallback target for this worker's remaining
+            // samples instead of alternating different hosts' RTTs.
+            internet_ms = Some(reply);
+            *internet_target = "8.8.8.8".into();
+        }
+        let gateway_ms = gateway_probe.join().unwrap_or(None);
+        PathSample {
+            gateway_target: gateway,
+            gateway_ms,
+            internet_target: internet_target.clone(),
+            internet_ms,
+            primary_failed,
+            observed_at: epoch.elapsed(),
+        }
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -888,6 +1138,8 @@ impl ProbeWindow {
 pub struct PathTracker {
     gateway: ProbeWindow,
     internet: ProbeWindow,
+    gateway_target: Option<String>,
+    internet_target: Option<String>,
 }
 
 impl Default for PathTracker {
@@ -901,6 +1153,8 @@ impl PathTracker {
         Self {
             gateway: ProbeWindow::new(window_size, interval),
             internet: ProbeWindow::new(window_size, interval),
+            gateway_target: None,
+            internet_target: None,
         }
     }
 
@@ -910,15 +1164,54 @@ impl PathTracker {
     }
 
     pub fn record_sample(&mut self, sample: &PathSample) {
+        if self.gateway_target != sample.gateway_target {
+            self.gateway.samples.clear();
+            self.gateway_target = sample.gateway_target.clone();
+        }
+        if self.internet_target.as_deref() != Some(&sample.internet_target) {
+            self.internet.samples.clear();
+            self.internet_target = Some(sample.internet_target.clone());
+        }
         if sample.gateway_target.is_some() {
             self.gateway.record(sample.gateway_ms, sample.observed_at);
         }
-        self.internet.record(sample.internet_ms, sample.observed_at);
+        if !sample.internet_target.is_empty() {
+            self.internet.record(sample.internet_ms, sample.observed_at);
+        }
     }
 
     pub fn reset(&mut self) {
         self.gateway.samples.clear();
         self.internet.samples.clear();
+        self.gateway_target = None;
+        self.internet_target = None;
+    }
+
+    pub fn diagnostics(&self) -> PathDiagnostics {
+        let jitter = |window: &ProbeWindow| {
+            let deltas: Vec<_> = window
+                .samples
+                .iter()
+                .zip(window.samples.iter().skip(1))
+                .filter_map(|((previous, _), (current, _))| {
+                    previous.zip(*current).map(|(a, b)| (b - a).abs())
+                })
+                .collect();
+            (!deltas.is_empty()).then(|| deltas.iter().sum::<f64>() / deltas.len() as f64)
+        };
+        PathDiagnostics {
+            gateway_jitter_ms: jitter(&self.gateway),
+            internet_jitter_ms: jitter(&self.internet),
+            gateway_latest_ms: self.gateway.samples.back().and_then(|(value, _)| *value),
+            internet_latest_ms: self.internet.samples.back().and_then(|(value, _)| *value),
+        }
+    }
+
+    fn phase(&self) -> LatencyPhase {
+        LatencyPhase {
+            path: self.fields(),
+            diagnostics: self.diagnostics(),
+        }
     }
 
     pub fn fields(&self) -> PathFields {
@@ -943,6 +1236,7 @@ pub struct PathWorker {
     cancel: CancelToken,
     receiver: mpsc::Receiver<PathSample>,
     thread: Option<JoinHandle<()>>,
+    epoch: Instant,
 }
 
 impl PathWorker {
@@ -950,39 +1244,32 @@ impl PathWorker {
         Self::start_with_cancel(gateway, &CancelToken::default())
     }
 
-    pub fn start_with_cancel(gateway: Option<String>, parent: &CancelToken) -> Self {
+    pub fn start_with_cancel(_gateway: Option<String>, parent: &CancelToken) -> Self {
         let cancel = parent.child();
         let worker_cancel = cancel.clone();
         let (sender, receiver) = mpsc::sync_channel(120);
+        let epoch = Instant::now();
         let thread = thread::spawn(move || {
-            let epoch = Instant::now();
+            let mut interface = wifi_interface(&worker_cancel);
+            let mut internet_target = "1.1.1.1".to_string();
             while !worker_cancel.is_cancelled() {
                 let start = Instant::now();
-                let sample = thread::scope(|scope| {
-                    let gateway_probe = scope.spawn(|| {
-                        gateway
-                            .as_deref()
-                            .and_then(|target| ping_once(target, &worker_cancel))
-                    });
-                    let mut internet_target = "1.1.1.1".to_string();
-                    let mut internet_ms = ping_once(&internet_target, &worker_cancel);
-                    let primary_failed = internet_ms.is_none();
-                    if primary_failed
-                        && !worker_cancel.is_cancelled()
-                        && let Some(reply) = ping_once("8.8.8.8", &worker_cancel)
-                    {
-                        internet_ms = Some(reply);
-                        internet_target = "8.8.8.8".into();
-                    }
-                    PathSample {
-                        gateway_target: gateway.clone(),
-                        gateway_ms: gateway_probe.join().unwrap_or(None),
-                        internet_target,
-                        internet_ms,
-                        primary_failed,
-                        observed_at: epoch.elapsed(),
-                    }
-                });
+                if interface.is_none() {
+                    interface = wifi_interface(&worker_cancel);
+                }
+                // Resolve the WiFi-scoped route each cycle, so moving between
+                // networks cannot keep pinging the previous gateway.
+                let gateway = interface
+                    .as_deref()
+                    .and_then(|interface| gateway_on_interface(interface, &worker_cancel));
+                let sample = probe_path(
+                    interface.as_deref(),
+                    gateway,
+                    &mut internet_target,
+                    epoch,
+                    true,
+                    &worker_cancel,
+                );
                 if worker_cancel.is_cancelled() {
                     break;
                 }
@@ -999,11 +1286,18 @@ impl PathWorker {
             cancel,
             receiver,
             thread: Some(thread),
+            epoch,
         }
     }
 
     pub fn try_recv(&self) -> Option<PathSample> {
         self.receiver.try_recv().ok()
+    }
+
+    /// The actual probe completion time, retained even while queued. The
+    /// sample's elapsed timestamp is stamped after both path probes finish.
+    pub fn sample_instant(&self, sample: &PathSample) -> Instant {
+        self.epoch + sample.observed_at
     }
 }
 
@@ -1031,21 +1325,6 @@ pub fn parse_netstat_ib(text: &str, interface: &str) -> Option<(u64, u64)> {
         ));
     }
     None
-}
-
-fn default_interface(cancel: &CancelToken) -> Option<String> {
-    let output = run_command(
-        "/sbin/route",
-        &["-n", "get", "default"],
-        Duration::from_secs(2),
-        cancel,
-    )
-    .ok()?;
-    output
-        .status
-        .success()
-        .then(|| parse_route_field(&output.stdout, "interface"))
-        .flatten()
 }
 
 fn interface_counters(interface: &str, cancel: &CancelToken) -> Option<(u64, u64)> {
@@ -1086,7 +1365,7 @@ impl TrafficSampler {
 
     pub fn sample_with_cancel(&mut self, cancel: &CancelToken) -> Option<(f64, f64)> {
         if self.interface.is_none() {
-            self.interface = default_interface(cancel);
+            self.interface = wifi_interface(cancel);
         }
         let counters = self
             .interface
@@ -1437,6 +1716,294 @@ mod tests {
         assert_eq!(parse_ping_rtt("64 bytes: time=12.345 ms"), Some(12.345));
         assert_eq!(parse_ping_rtt("64 bytes: time<1 ms"), Some(1.0));
         assert_eq!(parse_ping_rtt("Request timeout"), None);
+    }
+
+    #[test]
+    fn path_jitter_uses_adjacent_successes_without_bridging_losses() {
+        let mut tracker = PathTracker::new(6, Duration::from_secs(1));
+        for (i, rtt) in [Some(2.), Some(6.), None, Some(100.), Some(110.), None]
+            .into_iter()
+            .enumerate()
+        {
+            tracker.record(rtt, rtt, Duration::from_secs(i as u64));
+        }
+        let diagnostics = tracker.diagnostics();
+        assert_eq!(diagnostics.gateway_jitter_ms, Some(7.));
+        assert_eq!(diagnostics.internet_jitter_ms, Some(7.));
+        assert_eq!(diagnostics.gateway_latest_ms, None);
+        assert_eq!(diagnostics.internet_latest_ms, None);
+        tracker.reset();
+        tracker.record(Some(42.), Some(15.), Duration::ZERO);
+        assert_eq!(tracker.diagnostics().gateway_jitter_ms, None);
+        assert_eq!(tracker.diagnostics().gateway_latest_ms, Some(42.));
+    }
+
+    #[test]
+    fn path_windows_reset_when_targets_change_or_gateway_disappears() {
+        let mut tracker = PathTracker::default();
+        let mut sample = PathSample {
+            gateway_target: Some("192.168.1.1".into()),
+            gateway_ms: None,
+            internet_target: "1.1.1.1".into(),
+            internet_ms: Some(15.),
+            primary_failed: false,
+            observed_at: Duration::ZERO,
+        };
+        tracker.record_sample(&sample);
+        sample.gateway_target = Some("192.168.2.1".into());
+        sample.gateway_ms = Some(2.);
+        sample.internet_target = "8.8.8.8".into();
+        sample.internet_ms = Some(100.);
+        sample.observed_at = Duration::from_secs(1);
+        tracker.record_sample(&sample);
+        assert_eq!(tracker.fields().gateway_loss_pct, Some(0.));
+        assert_eq!(tracker.fields().internet_rtt_ms, Some(100.));
+        assert_eq!(tracker.diagnostics().internet_jitter_ms, None);
+        sample.gateway_target = None;
+        sample.gateway_ms = None;
+        tracker.record_sample(&sample);
+        assert_eq!(tracker.fields().gateway_rtt_ms, None);
+        assert_eq!(tracker.fields().gateway_loss_pct, None);
+    }
+
+    #[test]
+    fn queued_probe_timestamp_keeps_its_original_age() {
+        let epoch = Instant::now() - Duration::from_secs(60);
+        let (_, receiver) = mpsc::channel();
+        let worker = PathWorker {
+            cancel: CancelToken::default(),
+            receiver,
+            thread: None,
+            epoch,
+        };
+        let sample = PathSample {
+            gateway_target: Some("192.168.1.1".into()),
+            gateway_ms: Some(2.),
+            internet_target: "1.1.1.1".into(),
+            internet_ms: Some(10.),
+            primary_failed: false,
+            observed_at: Duration::from_secs(2),
+        };
+        assert_eq!(
+            worker.sample_instant(&sample),
+            epoch + Duration::from_secs(2)
+        );
+        assert!(worker.sample_instant(&sample).elapsed() >= Duration::from_secs(58));
+    }
+
+    #[test]
+    fn invalid_ap_addresses_are_not_roaming_identities() {
+        assert_eq!(clean_bssid("00:00:00:00:00:00"), None);
+        assert_eq!(clean_bssid("FF-FF-FF-FF-FF-FF"), None);
+    }
+
+    #[test]
+    fn changed_gateway_discards_only_gateway_comparison() {
+        let mut tracker = PathTracker::default();
+        tracker.record(Some(2.), Some(10.), Duration::ZERO);
+        tracker.record(Some(4.), Some(20.), Duration::from_secs(1));
+        let phase = tracker.phase();
+        let mut report = LoadLatency {
+            idle: phase.clone(),
+            loaded: phase.clone(),
+            recovery: phase,
+            ..Default::default()
+        };
+        invalidate_gateway_comparison(&mut report);
+        assert!(report.gateway_changed);
+        for phase in [&report.idle, &report.loaded, &report.recovery] {
+            assert_eq!(phase.path.gateway_rtt_ms, None);
+            assert_eq!(phase.path.gateway_loss_pct, None);
+            assert_eq!(phase.diagnostics.gateway_jitter_ms, None);
+            assert_eq!(phase.diagnostics.gateway_latest_ms, None);
+            assert_eq!(phase.path.internet_rtt_ms, Some(15.));
+            assert_eq!(phase.diagnostics.internet_jitter_ms, Some(10.));
+        }
+    }
+
+    #[test]
+    fn load_phases_keep_separate_windows_and_failed_load_is_unavailable() {
+        let mut count = 0;
+        let mut probe = || {
+            count += 1;
+            PathSample {
+                gateway_target: Some("192.168.1.1".into()),
+                gateway_ms: Some(if count <= 5 { 2. } else { 50. }),
+                internet_target: "1.1.1.1".into(),
+                internet_ms: Some(if count <= 5 { 10. } else { 100. }),
+                primary_failed: false,
+                observed_at: Duration::from_secs(count),
+            }
+        };
+        let cancel = CancelToken::default();
+        let idle = collect_latency_phase(&mut probe, Duration::ZERO, &cancel);
+        let recovery = collect_latency_phase(&mut probe, Duration::ZERO, &cancel);
+        assert_eq!(idle.path.gateway_rtt_ms, Some(2.));
+        assert_eq!(recovery.path.gateway_rtt_ms, Some(50.));
+        assert_eq!(idle.path.path_probe_count, Some(5));
+
+        let (result, report) = run_load_measurement(
+            &cancel,
+            || Err(MeasureError::SpeedtestUnavailable),
+            probe,
+            Duration::ZERO,
+        );
+        assert!(matches!(result, Err(MeasureError::SpeedtestUnavailable)));
+        assert_eq!(report.loaded.path.path_probe_count, None);
+        assert_eq!(report.recovery.path.path_probe_count, None);
+    }
+
+    #[test]
+    fn cancelled_load_never_starts_speedtest_or_collects_samples() {
+        let cancel = CancelToken::default();
+        cancel.cancel();
+        let (result, report) = run_load_measurement(
+            &cancel,
+            || panic!("cancelled speedtest must not start"),
+            || panic!("cancelled probes must not start"),
+            Duration::ZERO,
+        );
+        assert!(matches!(result, Err(MeasureError::Cancelled)));
+        assert_eq!(report.idle.path.path_probe_count, None);
+    }
+
+    #[test]
+    fn successful_load_reports_idle_loaded_and_recovery_independently() {
+        let (sender, receiver) = mpsc::sync_channel(0);
+        let completed = AtomicBool::new(false);
+        let speed_completed = &completed;
+        let mut count = 0;
+        let (result, report) = run_load_measurement(
+            &CancelToken::default(),
+            move || {
+                receiver.recv().unwrap();
+                speed_completed.store(true, Ordering::Release);
+                Ok(Speed::default())
+            },
+            || {
+                count += 1;
+                let rtt = if count <= 5 {
+                    10.
+                } else if completed.load(Ordering::Acquire) {
+                    20.
+                } else {
+                    100.
+                };
+                if count == 7 {
+                    sender.send(()).unwrap();
+                }
+                PathSample {
+                    gateway_target: Some("192.168.1.1".into()),
+                    gateway_ms: Some(rtt),
+                    internet_target: "1.1.1.1".into(),
+                    internet_ms: Some(rtt),
+                    primary_failed: false,
+                    observed_at: Duration::from_secs(count),
+                }
+            },
+            Duration::ZERO,
+        );
+        assert!(result.is_ok());
+        assert_eq!(report.idle.path.internet_rtt_ms, Some(10.));
+        assert_eq!(report.loaded.path.internet_rtt_ms, Some(100.));
+        assert_eq!(report.recovery.path.internet_rtt_ms, Some(20.));
+        assert_eq!(report.recovery.path.path_probe_count, Some(5));
+    }
+
+    #[test]
+    fn cancelling_during_load_stops_worker_and_discards_partial_report() {
+        let cancel = CancelToken::default();
+        let start = Instant::now();
+        let mut count = 0;
+        let (result, report) = run_load_measurement(
+            &cancel,
+            || {
+                cancel.wait(Duration::from_secs(60));
+                Err(MeasureError::Cancelled)
+            },
+            || {
+                count += 1;
+                if count == 6 {
+                    cancel.cancel();
+                }
+                PathSample {
+                    gateway_target: None,
+                    gateway_ms: None,
+                    internet_target: "1.1.1.1".into(),
+                    internet_ms: Some(10.),
+                    primary_failed: false,
+                    observed_at: Duration::from_secs(count),
+                }
+            },
+            Duration::ZERO,
+        );
+        assert!(matches!(result, Err(MeasureError::Cancelled)));
+        assert_eq!(report.idle.path.path_probe_count, None);
+        assert_eq!(report.loaded.path.path_probe_count, None);
+        assert_eq!(report.recovery.path.path_probe_count, None);
+        assert!(start.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn injected_network_change_discards_load_comparison_but_same_ssid_roam_does_not() {
+        for change_network in [true, false] {
+            let (sender, receiver) = mpsc::sync_channel(0);
+            let mut probe_count = 0;
+            let mut identity_count = 0;
+            let (result, report) = run_connection_load_measurement(
+                &CancelToken::default(),
+                move || {
+                    receiver.recv().unwrap();
+                    Ok(Speed::default())
+                },
+                || {
+                    probe_count += 1;
+                    if probe_count == 7 {
+                        sender.send(()).unwrap();
+                    }
+                    PathSample {
+                        gateway_target: Some("192.168.1.1".into()),
+                        gateway_ms: Some(2.),
+                        internet_target: "1.1.1.1".into(),
+                        internet_ms: Some(10.),
+                        primary_failed: false,
+                        observed_at: Duration::from_secs(probe_count),
+                    }
+                },
+                || {
+                    identity_count += 1;
+                    if identity_count == 6 {
+                        return None;
+                    }
+                    // The second AP can use the same gateway IP. Only a known
+                    // SSID change invalidates the comparison; a redaction gap
+                    // must not erase the previously known network.
+                    let signal = Signal {
+                        ssid: Some(if change_network && identity_count >= 6 {
+                            "new-network".into()
+                        } else {
+                            "mesh-network".into()
+                        }),
+                        bssid: Some(if identity_count >= 6 {
+                            "02:00:00:00:00:02".into()
+                        } else {
+                            "02:00:00:00:00:01".into()
+                        }),
+                        ..Default::default()
+                    };
+                    signal.ssid
+                },
+                Duration::ZERO,
+            );
+            assert!(result.is_ok());
+            assert_eq!(report.connection_changed, change_network);
+            assert_eq!(report.idle.path.internet_rtt_ms, Some(10.));
+            assert_eq!(report.loaded.path.internet_rtt_ms.is_none(), change_network);
+            assert_eq!(
+                report.recovery.path.internet_rtt_ms.is_none(),
+                change_network
+            );
+        }
     }
 
     #[test]
