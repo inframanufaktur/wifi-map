@@ -89,9 +89,17 @@ The PTY smoke test uses Python's standard library as development tooling.
 Documentation capabilities are generated from the Rust command tree.
 
 Documentation: [quick start](docs/src/quick-start.md),
-[walk TUI](docs/src/walk-tui.md), [evaluation](docs/src/evaluate.md),
+[walk TUI](docs/src/walk-tui.md), [TUI controls](docs/src/tui-controls.njk),
+[evaluation](docs/src/evaluate.md),
 [CLI reference](docs/src/cli-reference.md), and
 [data and troubleshooting](docs/src/data-troubleshooting.md).
+The [design language](docs/src/design-language.md) and
+[development guide](docs/src/development.md) follow the
+[TUI toolkit template](https://github.com/inframanufaktur/tui-template), adapted
+to wifimap's rendering helpers, metadata, and deployment workflow.
+
+Use Node.js 26 for the documentation toolchain. `npm run docs:serve` watches
+documentation and Rust sources; command metadata refreshes on every rebuild.
 
 [Repository](https://github.com/inframanufaktur/wifi-map) ·
 [Documentation](https://wifimap.inframanufaktur.org/)

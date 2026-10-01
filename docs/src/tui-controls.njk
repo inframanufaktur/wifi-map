@@ -1,0 +1,67 @@
+---
+layout: layouts/base.njk
+title: TUI controls
+description: Keyboard shortcuts for surveys, connection diagnostics, evaluation, pickers, and editors.
+navKey: tui-controls
+permalink: /tui-controls/index.html
+---
+<h1>TUI controls</h1>
+<p>Run <code>wifimap</code> for the live survey dashboard or <code>wifimap eval</code> for saved readings. Add <code>--demo</code> to explore either view with isolated simulated data. Press <kbd>?</kbd> to open help; <kbd>?</kbd> or <kbd>Escape</kbd> closes it.</p>
+
+<h2>Survey dashboard</h2>
+<p>These primary shortcuts come from the application's <code>capabilities</code> output. See <a href="/walk-tui/">Walk TUI</a> for capture behavior and measurement limits.</p>
+{% set actions = {
+  snapshot: "Measure and save a snapshot for the selected spot.",
+  speed_probe: "Run an unsaved speed probe with idle, loaded, and recovery latency.",
+  diagnostics: "Open connection diagnostics and the roaming timeline.",
+  compare: "Select a previous named walk to compare, or turn comparison off.",
+  benchmark: "Capture an ideal-condition benchmark for this location; confirm before replacing one.",
+  switch: "Open the location picker.",
+  new: "Create a location, room, or spot, depending on the current selection.",
+  quit: "Finish the named walk and quit."
+} %}
+<div class="table-scroll" tabindex="0" role="region" aria-label="Survey shortcuts"><table>
+  <thead><tr><th scope="col">Key</th><th scope="col">Action</th></tr></thead>
+  <tbody>{% for control in capabilities.walk.controls %}<tr>
+    <th scope="row"><kbd>{{ control.key }}</kbd></th>
+    <td>{{ actions[control.name] }}</td>
+  </tr>{% endfor %}</tbody>
+</table></div>
+<div class="table-scroll" tabindex="0" role="region" aria-label="Additional survey shortcuts"><table>
+  <thead><tr><th scope="col">Keys</th><th scope="col">Action</th></tr></thead>
+  <tbody>
+    <tr><th scope="row"><kbd>↑</kbd> / <kbd>↓</kbd> or <kbd>j</kbd> / <kbd>k</kbd></th><td>Select a survey spot.</td></tr>
+    <tr><th scope="row"><kbd>Home</kbd> / <kbd>End</kbd></th><td>Select the first or last spot.</td></tr>
+    <tr><th scope="row"><kbd>r</kbd> / <kbd>p</kbd> / <kbd>w</kbd></th><td>Choose a room, spot, or network / SSID.</td></tr>
+    <tr><th scope="row"><kbd>a</kbd></th><td>Name the connected access point.</td></tr>
+  </tbody>
+</table></div>
+
+<h2>Connection diagnostics</h2>
+<p>Press <kbd>d</kbd> in the survey dashboard. <kbd>Tab</kbd> or <kbd>Shift-Tab</kbd> switches between events and samples. Use <kbd>↑</kbd> / <kbd>↓</kbd>, <kbd>j</kbd> / <kbd>k</kbd>, or <kbd>Home</kbd> / <kbd>End</kbd> to scroll. <kbd>t</kbd> starts an unsaved speed probe; <kbd>d</kbd> or <kbd>Escape</kbd> returns to the dashboard.</p>
+
+<h2>Evaluation</h2>
+<p>See <a href="/evaluate/">Evaluate</a> for ranking and named-walk comparison rules.</p>
+<div class="table-scroll" tabindex="0" role="region" aria-label="Evaluation shortcuts"><table>
+  <thead><tr><th scope="col">Keys</th><th scope="col">Action</th></tr></thead>
+  <tbody>
+    <tr><th scope="row"><kbd>↑</kbd> / <kbd>↓</kbd> or <kbd>j</kbd> / <kbd>k</kbd></th><td>Select a row; in details, move through readings.</td></tr>
+    <tr><th scope="row"><kbd>Home</kbd> / <kbd>End</kbd></th><td>Select the first or last row or reading.</td></tr>
+    <tr><th scope="row"><kbd>Tab</kbd> / <kbd>Shift-Tab</kbd></th><td>Change ranking metric; in details, change radio, throughput, or path page.</td></tr>
+    <tr><th scope="row"><kbd>r</kbd></th><td>Reverse best / worst order.</td></tr>
+    <tr><th scope="row"><kbd>m</kbd></th><td>Toggle spot medians / individual readings.</td></tr>
+    <tr><th scope="row"><kbd>l</kbd> / <kbd>w</kbd></th><td>Filter by location / SSID.</td></tr>
+    <tr><th scope="row"><kbd>c</kbd></th><td>Choose before and after named walks.</td></tr>
+    <tr><th scope="row"><kbd>f</kbd></th><td>Include or hide spots missing from one walk in comparison.</td></tr>
+    <tr><th scope="row"><kbd>x</kbd></th><td>Swap before and after walks in comparison.</td></tr>
+    <tr><th scope="row"><kbd>Enter</kbd></th><td>Inspect the selected result's readings.</td></tr>
+    <tr><th scope="row"><kbd>←</kbd> / <kbd>→</kbd></th><td>Switch before / after readings in detail view.</td></tr>
+    <tr><th scope="row"><kbd>Escape</kbd></th><td>Close details or return from comparison.</td></tr>
+  </tbody>
+</table></div>
+
+<h2>Pickers and editors</h2>
+<p>Move in pickers with <kbd>↑</kbd> / <kbd>↓</kbd>, <kbd>j</kbd> / <kbd>k</kbd>, or <kbd>Home</kbd> / <kbd>End</kbd>. <kbd>Enter</kbd> selects; <kbd>Escape</kbd> cancels. In survey place pickers, <kbd>n</kbd> or <kbd>+</kbd> creates a place. In text editors, <kbd>Enter</kbd> saves, <kbd>Backspace</kbd> deletes a character, <kbd>Ctrl-U</kbd> clears text, and <kbd>Escape</kbd> cancels.</p>
+
+<h2>Terminal behavior</h2>
+<p>Use a terminal at least 76 columns × 24 rows; 110 × 32 is preferred. Smaller terminals show a resize hint. The dashboard uses an alternate screen and restores terminal state when it exits. <kbd>q</kbd>, <kbd>Q</kbd>, or <kbd>Ctrl-C</kbd> quits; while editing text, use <kbd>Ctrl-C</kbd> to quit because letters are entered as text. Quitting cancels unfinished captures and speed probes.</p>

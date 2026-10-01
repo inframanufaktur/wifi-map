@@ -11,8 +11,11 @@
     { "key": "overview", "label": "Overview", "href": "/" },
     { "key": "quick-start", "label": "Quick start", "href": "/quick-start/" },
     { "key": "walk-tui", "label": "Walk TUI", "href": "/walk-tui/" },
+    { "key": "tui-controls", "label": "TUI controls", "href": "/tui-controls/" },
     { "key": "evaluate", "label": "Evaluate", "href": "/evaluate/" },
     { "key": "cli-reference", "label": "CLI reference", "href": "/cli-reference/" },
-    { "key": "data-troubleshooting", "label": "Data + troubleshooting", "href": "/data-troubleshooting/" }
+    { "key": "data-troubleshooting", "label": "Data + troubleshooting", "href": "/data-troubleshooting/" },
+    { "key": "design-language", "label": "Design language", "href": "/design-language/" },
+    { "key": "development", "label": "Development", "href": "/development/" }
   ]
 }

@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const pages = ["index.html", "quick-start/index.html", "walk-tui/index.html", "evaluate/index.html", "cli-reference/index.html", "data-troubleshooting/index.html"];
+const pages = ["index.html", "quick-start/index.html", "walk-tui/index.html", "tui-controls/index.html", "evaluate/index.html", "cli-reference/index.html", "data-troubleshooting/index.html", "design-language/index.html", "development/index.html"];
 const extract = () => execFileSync(path.join(root, "scripts/cargo"), ["run", "--quiet", "--locked", "--", "capabilities"], { cwd: root, encoding: "utf8" });
 const doc = JSON.parse(extract());
 
@@ -32,6 +32,7 @@ test("all documentation pages render without unresolved templates or stale runti
     assert.ok(!/\{[{%]/u.test(html), `${page}: unresolved template`);
     assert.ok(!html.includes("pip install") && !html.includes("Python &gt;="), `${page}: stale runtime requirement`);
     assert.ok(html.includes(`v${doc.package.version}`), `${page}: version`);
+    assert.equal((html.match(/aria-current="page"/gu) ?? []).length, 1, `${page}: active navigation`);
     assert.ok(html.includes("assets/site.css") && html.includes("assets/site.js"), `${page}: assets`);
     const ids = [...html.matchAll(/\bid="([^"]+)"/gu)].map(m => m[1]);
     assert.equal(new Set(ids).size, ids.length, `${page}: duplicate element ID`);
@@ -60,4 +61,6 @@ test("generated CLI reference includes actual options and walk controls", () => 
   for (const flag of ["--db", "--demo", "--compare-to", "--no-speedtest", "--room-floor", "--force"]) assert.ok(cli.includes(flag), flag);
   const walk = readFileSync(path.join(root, "docs/_site/walk-tui/index.html"), "utf8");
   for (const control of doc.walk.controls) assert.ok(walk.includes(`<kbd>${control.key}</kbd>`), control.key);
+  const controls = readFileSync(path.join(root, "docs/_site/tui-controls/index.html"), "utf8");
+  for (const control of doc.walk.controls) assert.ok(controls.includes(`<kbd>${control.key}</kbd>`), `controls: ${control.key}`);
 });

@@ -68,6 +68,9 @@ controls and measurement limits.
 
 - [Installation and first survey](/quick-start/)
 - [Walk TUI](/walk-tui/)
+- [TUI controls](/tui-controls/)
 - [Evaluation](/evaluate/)
 - [CLI reference](/cli-reference/)
 - [Data and troubleshooting](/data-troubleshooting/)
+- [Design language](/design-language/)
+- [Development and deployment](/development/)
