@@ -1,7 +1,7 @@
 ---
 layout: layouts/base.njk
 title: Walk TUI
-description: Walk TUI controls, measurements, snapshots, benchmarks, and comparison behavior.
+description: Live connection diagnostics, roaming timeline, walk controls, snapshots, and comparisons.
 navKey: walk-tui
 permalink: /walk-tui/index.html
 ---
@@ -63,11 +63,12 @@ Move with `↑`/`↓` or `j`/`k`. Select with `Enter`; return with `Escape`.
 
 ## Live signal
 
-`SIGNAL` samples RSSI, noise, and SNR about once per second. RSSI and SNR use
+By default, `SIGNAL` samples RSSI, noise, and SNR about once per second. RSSI and SNR use
 the rating thresholds below: green for strong signal, amber for fair, and red
 for weak. These colors also appear in the signal history. Missing readings stay
-muted and leave gaps in the chart. `WIFI UNAVAILABLE` blocks saves while the Mac
-is disconnected.
+muted and leave gaps in the chart. `WIFI UNAVAILABLE` means the latest radio
+sample failed; the message explains the connection or backend error. A sampling
+failure alone does not establish that WiFi disconnected.
 
 ## Link details
 
@@ -77,8 +78,8 @@ for live readings. Link rate is not Internet throughput.
 
 ## Network path
 
-`PATH` probes the connected Wi-Fi interface's router and `1.1.1.1` once per second. If
-`1.1.1.1` misses and `8.8.8.8` replies, subsequent probes use `8.8.8.8`. The
+`PATH` probes the connected Wi-Fi interface's router and `1.1.1.1` about once
+per second. If `1.1.1.1` misses and `8.8.8.8` replies, subsequent probes use `8.8.8.8`. The
 Internet window resets when switching endpoints; missing replies count as loss.
 The display includes latency, p95, loss, and outages.
 
@@ -123,13 +124,14 @@ When BSSID is unavailable, roaming and AP dwell cannot be determined.
 
 `Tab` switches between events and correlated signal/rate/AP samples. Use `↑`/`↓`
 or `j`/`k` to scroll, `Home` for newest, and `End` for oldest. Sample times are
-elapsed time within this walk. RTT columns use fresh individual probes, while
+elapsed time within this session. RTT columns use fresh individual probes, while
 the path summary uses rolling aggregates; `—` means unavailable, including a
 missing fresh probe. AP dwell is time observed on this AP, not association age.
 
 The session retains up to 120 samples and 60 events. Moving between rooms or
-spots preserves the timeline; starting a new walk resets it. This timeline and
-the additional jitter/load details remain in memory and are not written into
+spots preserves the timeline; a new walk, location, or selected survey network
+resets it. This timeline and the additional jitter/load details remain in memory
+and are not written into
 saved readings or CSV. `d` or `Escape` returns to the survey dashboard.
 
 ## Latency under load
@@ -138,6 +140,10 @@ The existing speed probe (`t`) now measures five idle probes, latency during
 the throughput test, and five recovery probes. Diagnostics show separate
 gateway and Internet medians, p95, and loss, plus loaded-minus-idle median RTT.
 The probe uses the Wi-Fi interface and the existing optional Ookla backend.
+It works without a selected survey location or spot; cancel any initial picker
+with `Escape`, then use `d` and `t`.
+Snapshot and benchmark captures also update the load report when throughput
+testing is enabled.
 The idle and recovery windows each take approximately five seconds; timeouts
 can extend them. Other applications may already be using bandwidth during the
 idle window.
@@ -160,8 +166,9 @@ requires confirmation. Later readings show their deltas from the benchmark.
 
 ## Snapshots and throughput
 
-`s` saves the active network, AP, radio, link, path aggregates, walk, and
-optional throughput result. `t` runs an unsaved throughput probe.
+`s` starts a new capture and saves the selected survey network, observed AP,
+radio, link, path aggregates, walk, and optional throughput result. `t` runs an
+unsaved throughput probe. Pressing `s` afterward starts another capture.
 
 `--no-speedtest` records signal without Ookla. A failed speed test produces a
 warning and preserves the signal reading. Snapshot, benchmark, and throughput

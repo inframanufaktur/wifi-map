@@ -21,9 +21,12 @@ monitor mode.
   are observed roams; other transitions are described conservatively.
 - Missing/redacted BSSIDs do not become disconnects. Sampling gaps and identity
   gaps remain visible; a sampling interval is not a measured handoff duration.
-- Timeline history is bounded and lasts for the current walk, including across
-  spot changes. A new walk resets it. Late worker results cannot pollute a new
-  session.
+- Timeline history is bounded and lasts for the current session, including
+  across room and spot changes. A new walk, location, or selected survey network
+  resets it. Late worker results cannot pollute a new session.
+- The unsaved speed probe works without a selected survey location or spot.
+  Completed load reports are cleared on later known AP/network transitions;
+  a same-SSID roam during the test can remain part of the complete-run result.
 - The dashboard has a keyboard-accessible diagnostics view, renders at 76x24,
   and includes simulated data in demo mode.
 
@@ -41,18 +44,25 @@ Terminal verification: `python3 scripts/smoke_tui.py`
 
 Documentation: `npm run docs:build` and `npm run docs:test`
 
-## Project structure and plan
+## Source organization
 
-1. `src/measure.rs` and `src/path_diagnostics.rs`: Wi-Fi-bound probes, jitter,
-   and latency phases; deterministic measurement tests.
-2. `src/timeline.rs`: bounded connection samples/events and conservative roaming
-   detection; deterministic transition and gap tests.
-3. `src/app.rs`: cancellable worker integration and session/result ownership.
-4. `src/ui.rs`: diagnostics view and compact live summaries; terminal render tests.
-5. `docs/src/walk-tui.md`: controls, measurement definitions, and limitations.
-
-Measurement and timeline work proceed in parallel, followed by integrated tests,
-terminal verification, and a separate review.
+- `src/measure.rs` exposes the measurement API. `src/measure/radio.rs` and
+  `corewlan.rs` read radio/identity data; `path.rs`, `throughput.rs`, and
+  `traffic.rs` own Wi-Fi-bound probes, latency phases, and passive counters.
+  `process.rs` owns cancellable subprocesses.
+- `src/path_diagnostics.rs` defines session-only jitter and load reports.
+- `src/timeline.rs` retains bounded connection samples/events and detects
+  observed roams, other transitions, and sampling gaps.
+- `src/app.rs` owns shared state, controls, and terminal entry points.
+  `src/app/survey.rs` manages survey sessions and places; `measurement.rs`
+  schedules captures and applies results; `live.rs` owns current-connection
+  sampling and probe freshness; `eval.rs` owns evaluation state and controls.
+- `src/ui.rs` shares the terminal palette and drawing helpers.
+  `src/ui/walk.rs`, `evaluation.rs`, `reading.rs`, `diagnostics.rs`, and
+  `overlays.rs` render the dashboard, reports, details, diagnostics, and dialogs.
+- `src/measure/tests/`, `src/app/tests.rs`, `src/ui/tests.rs`, and inline
+  timeline tests cover measurement behavior, session ownership, and rendering.
+  `docs/src/walk-tui.md` describes controls and measurement limits.
 
 ## Code style and testing
 

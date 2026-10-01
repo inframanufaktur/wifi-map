@@ -58,6 +58,9 @@ extensions. Blank values are valid. Missing required columns, non-finite or
 malformed numbers, and invalid integers produce a nonzero exit instead of
 being silently coerced.
 
+The connection timeline, jitter, and idle/loaded/recovery reports are
+session-local. They are not written to SQLite or added to the CSV columns.
+
 ## Privacy and external integrations
 
 Survey data remains in SQLite or the requested export file. The integrations
@@ -86,13 +89,17 @@ wifiwand-macos-setup
 
 wifimap searches `~/Library/Application Support/WifiWand/`. Set
 `WIFIMAP_WIFIWAND_HELPER` for a custom path. Detection order is CoreWLAN,
-WifiWand, then `networksetup` for SSID only. `--ssid NAME` bypasses detection.
+WifiWand, then `networksetup` for SSID only. `--ssid NAME` selects the survey
+network without a prompt; live diagnostics still read the actual connection's
+identity.
 See
 [WifiWand's helper documentation](https://github.com/keithrbennett/wifiwand/blob/main/docs/MACOS_HELPER_APP_DETAILS.md)
 for its security and permission model.
 
-BSSID refreshes every 10 seconds above -70 dBm, every second near -75 dBm, and
-before a save. Manual SSID selection works without WifiWand.
+When native identity is unavailable, live samples use an approximately
+one-second helper cache and refresh it before a capture. Manual SSID selection
+works without WifiWand and sets the survey label. Roaming detection requires
+observed network and AP identity.
 
 ### Ookla throughput
 
@@ -103,18 +110,22 @@ server identity. Install the official binary from
 
 Ookla sees the public IP and request timing. Failures preserve the signal
 reading with blank throughput fields. `--no-speedtest` disables the test. In
-walk mode, `t` is temporary and `s` saves the result.
+walk mode, `t` runs an unsaved probe with idle, loaded, and recovery latency.
+`s` starts and saves a separate capture; it does not persist the previous probe.
 
 ### Path and passive traffic instruments
 
-PATH sends one ICMP probe per second to the default router and `1.1.1.1`.
-Missed Internet replies are checked against `8.8.8.8`. Saved readings contain
-count, median, p95, loss, and longest outage, not individual probes.
+PATH sends ICMP probes about once per second through the connected WiFi interface
+to its router and `1.1.1.1`. If `1.1.1.1` misses and `8.8.8.8` replies, subsequent
+probes keep the successful fallback. Within a speed probe, the Internet target
+chosen during idle stays fixed for loaded and recovery measurements. Saved walk
+readings contain count, median, p95, loss, and longest outage, not individual probes.
 
 No SSID, BSSID, room, or spot is sent. External targets see the public IP and
-timing. Traffic graphs read default-interface byte counters through `route` and
-`netstat`; a VPN can be the default interface. They show utilization, not link
-capacity.
+timing. Gateway and Internet probes, Ookla traffic, and passive byte counters
+use the WiFi interface even when Ethernet or a VPN supplies the global default
+route. Traffic graphs read counters through `netstat` and show utilization,
+not link capacity. An unknown gateway is unavailable and is not counted as loss.
 
 ## Exit codes
 
@@ -140,8 +151,9 @@ capacity.
     </thead>
     <tbody>
       <tr><th scope="row"><code>scan</code> exits 2 with a signal error</th><td>Check that WiFi is enabled and associated. Live radio reads require macOS; use <code>--demo</code> to explore simulated data.</td></tr>
-      <tr><th scope="row"><code>SSID selection requires a terminal</code></th><td>For non-interactive <code>scan</code> or <code>walk</code>, pass both <code>--location NAME</code> and <code>--ssid NAME</code>.</td></tr>
+      <tr><th scope="row"><code>SSID selection requires a terminal</code></th><td>For non-interactive <code>scan</code>, pass <code>--location NAME</code> and <code>--ssid NAME</code>. The walk dashboard always requires an interactive terminal.</td></tr>
       <tr><th scope="row">SSID detection is blank or redacted</th><td>Run <code>wifiwand-macos-setup</code>, choose an existing SSID, or pass <code>--ssid NAME</code>. BSSID capture requires WifiWand or unredacted CoreWLAN.</td></tr>
+      <tr><th scope="row"><code>WIFI UNAVAILABLE</code> in the dashboard</th><td>The latest radio sample failed. Read the message for connection or backend details; missing identity alone does not establish a disconnection.</td></tr>
       <tr><th scope="row"><code>Warning: … speedtest …; proceeding signal-only</code></th><td>The Ookla binary is missing or failed. The row was kept with blank throughput; use <code>--no-speedtest</code> to silence the probe.</td></tr>
       <tr><th scope="row"><code>walk</code> cannot open the terminal</th><td>Open the Ratatui dashboard in an interactive terminal at least 76 columns by 24 rows. Noninteractive evaluation prints a report.</td></tr>
       <tr><th scope="row"><code>Error: cannot open DB</code> or <code>cannot store reading</code> (exit 3)</th><td>Check the <code>--db</code> path and permissions. Check that the parent directory is writable.</td></tr>

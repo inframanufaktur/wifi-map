@@ -1,16 +1,17 @@
 ---
 layout: layouts/base.njk
 title: wifimap documentation
-description: Install wifimap, record WiFi measurements, compare walks, and inspect survey data.
+description: Diagnose the current WiFi connection, record measurements at named spots, and compare surveys.
 navKey: overview
 permalink: /index.html
 ---
 
 # wifimap
 
-wifimap records WiFi measurements at named spots on macOS. Data stays in a
-local SQLite database. CSV export is optional. The application is written in Rust;
-building requires Rust {{ capabilities.package.rust_requires }} or newer.
+wifimap diagnoses the current WiFi connection and records measurements at named
+spots on macOS. Saved readings stay in a local SQLite database. CSV export is
+optional. The application is written in Rust; building requires
+Rust {{ capabilities.package.rust_requires }} or newer.
 
 ## Commands
 
@@ -26,8 +27,21 @@ building requires Rust {{ capabilities.package.rust_requires }} or newer.
 - optional Ookla ping, download, upload, and server details
 - location, room, floor, indoor or outdoor status, spot, note, and AP name
 
-Traffic graphs show current interface use. They do not measure Internet
+Traffic graphs show current WiFi interface use. They do not measure Internet
 capacity and are not stored as throughput results.
+
+## Current connection diagnostics
+
+In `walk`, press `d` for gateway and Internet loss/jitter, latency under load,
+and a correlated signal/rate/AP timeline with observed roaming events. `Tab`
+switches events and samples; `t` runs the optional unsaved speed probe. You can
+cancel the initial pickers with `Escape` and inspect the current connection
+without selecting a survey place.
+
+Jitter, load reports, and timeline history stay in memory for the current
+session. Saved readings and CSV contain the existing radio, throughput, and
+path aggregates. See [Walk TUI](/walk-tui/) for
+controls and measurement limits.
 
 ## Documentation
 

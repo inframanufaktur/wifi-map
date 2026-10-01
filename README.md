@@ -1,8 +1,9 @@
 # wifimap
 
-A Rust terminal dashboard for named WiFi surveys on macOS. Record radio,
-gateway/Internet path quality, and optional throughput measurements in SQLite;
-compare spots, ideal-condition benchmarks, and named walks.
+A Rust terminal dashboard for current WiFi diagnostics and named surveys on
+macOS. Inspect gateway loss/jitter, latency under load, and a correlated
+signal/rate/AP timeline. Save radio, path, and optional throughput measurements
+in SQLite; compare spots, ideal-condition benchmarks, and named walks.
 
 ```sh
 ./wifimap --demo       # Explore simulated data without touching your database
@@ -38,12 +39,15 @@ provides throughput; use `--no-speedtest` for signal-only captures.
 ./wifimap export --csv readings.csv
 ```
 
-`s` saves a snapshot, `t` runs a temporary speed probe, `b` captures a location
-benchmark, and `c` selects a previous walk to compare. `l`, `r`, and `p` open the
+`s` measures and saves a new snapshot, `t` runs an unsaved speed probe, and `b`
+captures a location benchmark. `c` selects a previous walk to compare. `l`, `r`, and `p` open the
 location, room, and spot pickers. `n` creates a place and `a` names an access point.
 `d` opens connection diagnostics: gateway loss/jitter, idle/loaded/recovery
 latency from the speed probe, and a correlated signal/rate/AP timeline with
-observed roaming events. `Tab` switches events/samples; arrows scroll.
+observed roaming events. `Tab` switches events/samples; arrows scroll. Cancel
+initial pickers with `Escape` to inspect the current connection without selecting
+a survey place. The unsaved probe also works without one. Jitter, load reports,
+and timeline history remain in memory and are not exported to CSV.
 
 ## Existing data
 
@@ -60,9 +64,10 @@ python3 scripts/migrate_ssid_entities.py db/wifi-map.db
 ```
 
 The application runs entirely in Rust. Readings stay local unless exported.
-Path probes send ICMP to the router, 1.1.1.1, and 8.8.8.8; Ookla tests use its
-external servers. Demo data is isolated in memory. Non-macOS builds support
-demo, storage, CSV, and evaluation.
+Path probes send ICMP through WiFi to its router and 1.1.1.1, with 8.8.8.8 as a
+fallback. Traffic counters and Ookla tests also use the WiFi interface; Ookla
+tests contact its external servers. Demo data is isolated in memory. Non-macOS
+builds support demo, storage, CSV, and evaluation.
 
 ## Build and verify
 

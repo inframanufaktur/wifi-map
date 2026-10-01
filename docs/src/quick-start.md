@@ -29,10 +29,25 @@ required. Run demo mode to explore without live WiFi or a saved database.
 ./wifimap --demo
 scripts/cargo install --locked --path .</code></pre>
 
-## 2. Save a first snapshot
+## 2. Inspect the current connection
 
-This records a signal-only reading. `scan` creates unknown location, room, spot,
-and SSID names.
+Open the live dashboard:
+
+<pre class="command-block" data-copy><code>wifimap --db /tmp/demo.db walk</code></pre>
+
+Press `Escape` to cancel the initial picker, then `d` for connection diagnostics.
+Inspect gateway loss/jitter and the roaming timeline; `Tab` switches to
+correlated signal/rate/AP samples. With the optional Ookla binary installed,
+`t` measures latency under load. No survey location or spot is required for this
+unsaved probe. Press `d` or `Escape` to return and `q` to quit.
+
+These diagnostic details stay in memory. The next steps record readings you can
+save and compare later.
+
+## 3. Save a first snapshot
+
+This records a signal-only reading. `scan` creates the supplied location, room,
+spot, and SSID names when they do not exist.
 
 <pre class="command-block" data-copy><code>wifimap --db /tmp/demo.db scan --no-speedtest \
   --location HOME --room KITCHEN --spot WINDOW --room-floor 0 \
@@ -41,7 +56,7 @@ and SSID names.
 Global options such as `--db` work before or after the subcommand. The default database is
 `db/wifi-map.db`.
 
-## 3. Record a named walk
+## 4. Record a named walk
 
 Open the walk TUI:
 
@@ -51,7 +66,7 @@ Open the walk TUI:
 Select or create a room and spot. Press `s` to save a reading and `q` to finish
 the walk.
 
-## 4. Compare after a change
+## 5. Compare after a change
 
 Record a second walk against the first:
 
@@ -61,13 +76,13 @@ Record a second walk against the first:
 
 Matching spots show the current measurements beside the first walk's medians.
 
-## 5. Evaluate weak spots
+## 6. Evaluate weak spots
 
 Open the evaluation TUI:
 
 <pre class="command-block" data-copy><code>wifimap --db /tmp/demo.db eval</code></pre>
 
-Choose a location or SSID. Select a row to inspect its readings. Press `c` to
+Press `l` to filter by location or `w` by SSID. Select a row to inspect its readings. Press `c` to
 compare `before-install` and `after-install`.
 
 Export and evaluate CSV data with:

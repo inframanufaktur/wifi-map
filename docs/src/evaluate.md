@@ -17,8 +17,9 @@ wifimap eval --csv readings.csv
 
 ## Choose what to evaluate
 
-Choose a location or SSID, then choose its value. `Unknown` contains readings
-without an SSID. Results open in spot-summary mode.
+Results open in spot-summary mode. Press `l` to filter by location or `w` to
+filter by SSID, then choose its value. `(SSID unavailable)` selects readings
+without an SSID.
 
 Move with `↑`/`↓` or `j`/`k`. `Home`/`End` jump to the first or last row.
 `Enter` selects, `Escape` returns, and `q` or `Ctrl-C` exits.
