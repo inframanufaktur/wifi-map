@@ -5,4 +5,5 @@ pub mod measure;
 pub mod model;
 pub mod path_diagnostics;
 pub mod store;
+pub mod timeline;
 pub mod ui;
