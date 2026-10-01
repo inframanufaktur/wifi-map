@@ -29,7 +29,9 @@ at least 76 columns by 24 rows. `wifimap --demo` explores isolated simulated dat
       <dd>{%- if control.name == "snapshot" -%}
         Measure and save a snapshot for the active spot.
       {%- elif control.name == "speed_probe" -%}
-        Run an unsaved throughput probe for the active spot.
+        Run an unsaved throughput probe with idle, loaded, and recovery latency.
+      {%- elif control.name == "diagnostics" -%}
+        Inspect gateway loss/jitter, loaded latency, and the roaming timeline.
       {%- elif control.name == "compare" -%}
         Choose a previous named walk as the live comparison, or turn comparison off.
       {%- elif control.name == "benchmark" -%}
@@ -75,9 +77,16 @@ for live readings. Link rate is not Internet throughput.
 
 ## Network path
 
-`PATH` probes the default router and `1.1.1.1` once per second. A missed
-Internet reply is retried against `8.8.8.8`; `×` means both targets missed.
+`PATH` probes the connected Wi-Fi interface's router and `1.1.1.1` once per second. If
+`1.1.1.1` misses and `8.8.8.8` replies, subsequent probes use `8.8.8.8`. The
+Internet window resets when switching endpoints; missing replies count as loss.
 The display includes latency, p95, loss, and outages.
+
+Press `d` for the connection diagnostics view. It shows median RTT, p95 RTT,
+loss, longest observed outage, and jitter for both paths. Jitter is the mean
+absolute RTT change between consecutive successful probes; a timeout breaks the
+pair. A single reply cannot establish jitter. Gateway and Internet windows reset
+when their probe target changes, so different targets' RTTs are not mixed.
 
 Replies are green and nonzero loss is amber. Missing RTT is red only when the
 path window confirms 100% loss; an unknown target stays muted.
@@ -88,15 +97,60 @@ IP and probe timing, but receive no survey data.
 
 ## Passive traffic
 
-`TRAFFIC` reads default-interface byte counters through `netstat` and `route`.
-A VPN may become the default interface. Values are marked unavailable when counters cannot be read. Traffic is
+`TRAFFIC` reads the Wi-Fi interface's byte counters through `netstat`, even when
+a VPN or Ethernet connection supplies the global default route. Values are marked unavailable when counters cannot be read. Traffic is
 utilization, not capacity; it does not start a speed test.
 
 ## Access points
 
-`AP` shows the BSSID and its local alias. When CoreWLAN redacts identity, the helper cache refreshes every ten seconds
-above -70 dBm, every second at weaker signal levels, and before each save. Manage aliases
+`AP` shows the BSSID and its local alias. When CoreWLAN redacts identity, the
+existing optional helper cache refreshes about once per second and before each save. Manage aliases
 with the `aps` commands.
+
+## Connection and roaming timeline
+
+Press `d` to inspect observed AP, network, and channel changes. A changed BSSID
+on the same known SSID is recorded as a **roam**. The event shows the old and new
+BSSID, signal strength, PHY transmit rate, and available gateway/Internet RTTs.
+The interval describes the gap between observations, not the actual handoff
+duration. Short transitions between polls can be missed. No channels are scanned
+or changed to collect this timeline.
+
+Missing or redacted identity does not imply disconnection. AP changes after an
+identity gap are labeled conservatively. Sampling failures and recovery appear
+as separate events; a measurement error does not establish that Wi-Fi disconnected.
+When BSSID is unavailable, roaming and AP dwell cannot be determined.
+
+`Tab` switches between events and correlated signal/rate/AP samples. Use `↑`/`↓`
+or `j`/`k` to scroll, `Home` for newest, and `End` for oldest. Sample times are
+elapsed time within this walk. RTT columns use fresh individual probes, while
+the path summary uses rolling aggregates; `—` means unavailable, including a
+missing fresh probe. AP dwell is time observed on this AP, not association age.
+
+The session retains up to 120 samples and 60 events. Moving between rooms or
+spots preserves the timeline; starting a new walk resets it. This timeline and
+the additional jitter/load details remain in memory and are not written into
+saved readings or CSV. `d` or `Escape` returns to the survey dashboard.
+
+## Latency under load
+
+The existing speed probe (`t`) now measures five idle probes, latency during
+the throughput test, and five recovery probes. Diagnostics show separate
+gateway and Internet medians, p95, and loss, plus loaded-minus-idle median RTT.
+The probe uses the Wi-Fi interface and the existing optional Ookla backend.
+The idle and recovery windows each take approximately five seconds; timeouts
+can extend them. Other applications may already be using bandwidth during the
+idle window.
+
+The loaded window spans the complete speed-test run, including server selection;
+upload and download phases are not separated. The Internet endpoint selected
+during idle is kept for the loaded and recovery windows. A failed speed test
+leaves loaded and recovery measurements unavailable. If the gateway changes
+during the test, gateway comparisons are unavailable. A known network switch
+makes loaded/recovery comparisons unavailable even if its gateway has the same
+address. Completed reports are cleared on observed AP/network changes.
+An increase in RTT is
+evidence of delay under load, not proof of its cause.
 
 ## Location benchmark
 

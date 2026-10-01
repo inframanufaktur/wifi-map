@@ -41,6 +41,9 @@ provides throughput; use `--no-speedtest` for signal-only captures.
 `s` saves a snapshot, `t` runs a temporary speed probe, `b` captures a location
 benchmark, and `c` selects a previous walk to compare. `l`, `r`, and `p` open the
 location, room, and spot pickers. `n` creates a place and `a` names an access point.
+`d` opens connection diagnostics: gateway loss/jitter, idle/loaded/recovery
+latency from the speed probe, and a correlated signal/rate/AP timeline with
+observed roaming events. `Tab` switches events/samples; arrows scroll.
 
 ## Existing data
 
