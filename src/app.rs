@@ -25,7 +25,9 @@ use crate::{
     evaluation::{self, AnalysisRow, ComparisonRow},
     measure::{self, CancelToken},
     model::{PathFields, Reading, Signal, Speed, timestamp},
+    path_diagnostics::{LoadLatency, PathDiagnostics},
     store::{Filter, Store},
+    timeline::Timeline,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,17 +89,36 @@ pub struct Editor {
     pub action: Edit,
 }
 
-type LiveResult = Result<(Signal, PathFields, Option<(f64, f64)>), String>;
-type MeasurementResult = Result<(Signal, Speed, Option<String>), String>;
+#[derive(Debug)]
+struct LiveSample {
+    signal: Signal,
+    path: PathFields,
+    diagnostics: PathDiagnostics,
+    latest_probe: Option<(Option<f64>, Option<f64>)>,
+    rates: Option<(f64, f64)>,
+}
+
+type LiveResult = Result<LiveSample, String>;
+
+#[derive(Debug)]
+struct LoadReport {
+    latency: LoadLatency,
+    association: Signal,
+    completed_at: Instant,
+}
+
+type MeasurementResult = Result<(Signal, Speed, Option<String>, Option<Box<LoadReport>>), String>;
 
 #[derive(Debug)]
 enum WorkerEvent {
     Live {
         generation: u64,
+        observed_at: Instant,
         result: LiveResult,
     },
     Measured {
         target: Box<Reading>,
+        generation: u64,
         kind: WorkKind,
         result: MeasurementResult,
     },
@@ -130,6 +151,14 @@ pub struct WalkApp {
     pub pending: usize,
     pub saved: usize,
     pub help: bool,
+    pub diagnostics_open: bool,
+    pub diagnostics_events: bool,
+    pub diagnostics_offset: usize,
+    pub timeline: Timeline,
+    pub path_diagnostics: PathDiagnostics,
+    pub load_latency: Option<LoadLatency>,
+    pub diagnostics_epoch: Instant,
+    pub load_running: bool,
     pub picker: Option<Picker>,
     pub editor: Option<Editor>,
     store: Store,
@@ -143,6 +172,9 @@ pub struct WalkApp {
     cancel: CancelToken,
     generation: Arc<AtomicU64>,
     probe_running: bool,
+    last_association: Signal,
+    ssid_observed_at: Option<Instant>,
+    bssid_observed_at: Option<Instant>,
 }
 
 impl WalkApp {
@@ -168,6 +200,14 @@ impl WalkApp {
             pending: 0,
             saved: 0,
             help: false,
+            diagnostics_open: false,
+            diagnostics_events: true,
+            diagnostics_offset: 0,
+            timeline: Timeline::default(),
+            path_diagnostics: PathDiagnostics::default(),
+            load_latency: None,
+            diagnostics_epoch: Instant::now(),
+            load_running: false,
             picker: None,
             editor: None,
             store,
@@ -181,6 +221,9 @@ impl WalkApp {
             cancel: CancelToken::default(),
             generation: Arc::new(AtomicU64::new(0)),
             probe_running: false,
+            last_association: Signal::default(),
+            ssid_observed_at: None,
+            bssid_observed_at: None,
         };
         if args.demo {
             let first = app.store.list_locations()?.first().map(|l| l.id);
@@ -209,8 +252,56 @@ impl WalkApp {
         self.generation.fetch_add(1, Ordering::Relaxed);
         self.speed = Speed::default();
         self.path = PathFields::default();
+        self.path_diagnostics = PathDiagnostics::default();
+        self.load_latency = None;
+        self.load_running = false;
         self.rates = None;
         self.history.clear();
+    }
+
+    fn reset_diagnostics_session(&mut self) {
+        self.timeline.reset();
+        self.diagnostics_epoch = Instant::now();
+        self.diagnostics_offset = 0;
+        self.last_association = Signal::default();
+        self.ssid_observed_at = None;
+        self.bssid_observed_at = None;
+    }
+
+    fn observe_association(&mut self, signal: &Signal, observed_at: Instant) {
+        let (ssid, bssid) = known_association(signal);
+        if let Some(ssid) = ssid
+            && self
+                .ssid_observed_at
+                .is_none_or(|latest| latest <= observed_at)
+        {
+            if self
+                .last_association
+                .ssid
+                .as_deref()
+                .is_some_and(|old| old != ssid)
+            {
+                self.load_latency = None;
+            }
+            self.last_association.ssid = Some(ssid.into());
+            self.ssid_observed_at = Some(observed_at);
+        }
+        if let Some(bssid) = bssid
+            && self
+                .bssid_observed_at
+                .is_none_or(|latest| latest <= observed_at)
+        {
+            if self
+                .last_association
+                .bssid
+                .as_ref()
+                .is_some_and(|old| old != &bssid)
+            {
+                self.load_latency = None;
+            }
+            self.last_association.bssid = Some(bssid);
+            self.bssid_observed_at = Some(observed_at);
+        }
     }
 
     fn set_ssid(&mut self, name: &str) -> Result<()> {
@@ -230,6 +321,7 @@ impl WalkApp {
         }
         self.finish_session()?;
         self.reset_live();
+        self.reset_diagnostics_session();
         self.walk_name = self.initial_name.take().unwrap_or_else(|| {
             format!("walk {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))
         });
@@ -274,6 +366,7 @@ impl WalkApp {
         if self.active.location_id != id {
             self.finish_session()?;
             self.reset_live();
+            self.reset_diagnostics_session();
             self.baseline_id = None;
             self.baseline_name = None;
             self.baseline = None;
@@ -329,10 +422,10 @@ impl WalkApp {
             .iter()
             .enumerate()
             .find(|(_, p)| p.spot_id == id)
+            .map(|(index, place)| (index, place.clone()))
         {
             if self.active.spot_id != id {
-                self.generation.fetch_add(1, Ordering::Relaxed);
-                self.history.clear();
+                self.reset_live();
             }
             self.selected = index;
             self.active.room_id = place.room_id;
@@ -633,10 +726,12 @@ impl WalkApp {
         if self.pending > 0 {
             bail!("a measurement is already running; wait for it to finish");
         }
-        if self.active.location_id == 0 || self.active.ssid_id.is_none() {
+        if kind != WorkKind::Probe
+            && (self.active.location_id == 0 || self.active.ssid_id.is_none())
+        {
             bail!("select a location and network first (l / w)");
         }
-        if kind != WorkKind::Benchmark && self.active.spot_id == 0 {
+        if kind == WorkKind::Snapshot && self.active.spot_id == 0 {
             bail!("select a spot first (p)");
         }
         if kind == WorkKind::Probe && self.probe_running {
@@ -654,6 +749,9 @@ impl WalkApp {
         target.walk_name = Some(self.walk_name.clone());
         self.pending += 1;
         self.probe_running |= kind == WorkKind::Probe;
+        self.load_running = !self.no_speedtest;
+        self.load_latency = None;
+        let generation = self.generation.load(Ordering::Relaxed);
         self.message = match kind {
             WorkKind::Snapshot => "Capturing snapshot…",
             WorkKind::Benchmark => "Capturing ideal benchmark…",
@@ -669,8 +767,20 @@ impl WalkApp {
             let signal = self.signal.clone();
             self.apply_event(WorkerEvent::Measured {
                 target: Box::new(target),
+                generation,
                 kind,
-                result: Ok((signal, speed, None)),
+                result: Ok((
+                    signal,
+                    speed,
+                    None,
+                    (!self.no_speedtest).then(|| {
+                        Box::new(LoadReport {
+                            latency: demo_load_latency(),
+                            association: self.signal.clone(),
+                            completed_at: Instant::now(),
+                        })
+                    }),
+                )),
             });
         } else {
             let sender = self.sender.clone();
@@ -681,25 +791,39 @@ impl WalkApp {
                     let mut signal = measure::sample_signal_for(Duration::from_secs(5), &cancel)
                         .map_err(|e| e.to_string())?;
                     let _ = measure::refresh_signal_identity(&mut signal, &cancel);
-                    let (speed, warning) = if no_speedtest {
-                        (Speed::default(), None)
+                    let (speed, warning, load_latency) = if no_speedtest {
+                        (Speed::default(), None, None)
                     } else {
-                        match measure::run_speedtest_with_cancel(&cancel) {
-                            Ok(speed) => (speed, None),
+                        let (result, load_latency) = measure::run_speedtest_diagnostics(&cancel);
+                        let (ssid, bssid) =
+                            measure::read_network_identity_with_cancel(&cancel).unwrap_or_default();
+                        let load_latency = Box::new(LoadReport {
+                            latency: load_latency,
+                            association: Signal {
+                                ssid,
+                                bssid,
+                                ..Default::default()
+                            },
+                            completed_at: Instant::now(),
+                        });
+                        match result {
+                            Ok(speed) => (speed, None, Some(load_latency)),
                             Err(error) => (
                                 Speed {
                                     server: Some(format!("ERROR: {error}")),
                                     ..Default::default()
                                 },
                                 Some(error.to_string()),
+                                Some(load_latency),
                             ),
                         }
                     };
-                    Ok((signal, speed, warning))
+                    Ok((signal, speed, warning, load_latency))
                 })();
                 if !cancel.is_cancelled() {
                     let _ = sender.send(WorkerEvent::Measured {
                         target: Box::new(target),
+                        generation,
                         kind,
                         result,
                     });
@@ -711,13 +835,32 @@ impl WalkApp {
 
     fn apply_event(&mut self, event: WorkerEvent) {
         match event {
-            WorkerEvent::Live { generation, result } => {
+            WorkerEvent::Live {
+                generation,
+                observed_at,
+                result,
+            } => {
                 if generation != self.generation.load(Ordering::Relaxed) {
                     return;
                 }
                 match result {
-                    Ok((mut signal, path, rates)) => {
-                        signal.ssid = self.active.signal.ssid.clone().or(signal.ssid);
+                    Ok(sample) => {
+                        let LiveSample {
+                            signal,
+                            path,
+                            diagnostics,
+                            latest_probe,
+                            rates,
+                        } = sample;
+                        self.observe_association(&signal, observed_at);
+                        let (gateway, internet) = latest_probe.unwrap_or((None, None));
+                        self.timeline.record(
+                            observed_at.saturating_duration_since(self.diagnostics_epoch),
+                            Some(&signal),
+                            gateway,
+                            internet,
+                            rates,
+                        );
                         self.active.ap_name = signal
                             .bssid
                             .as_deref()
@@ -728,13 +871,24 @@ impl WalkApp {
                         }
                         self.signal = signal;
                         self.path = path;
+                        self.path_diagnostics = diagnostics;
                         self.rates = rates;
                         self.sample_error = false;
                     }
                     Err(error) => {
+                        self.timeline.record(
+                            observed_at.saturating_duration_since(self.diagnostics_epoch),
+                            None,
+                            None,
+                            None,
+                            None,
+                        );
                         self.message = format!("WiFi unavailable · {error}");
                         self.sample_error = true;
                         self.signal = Signal::default();
+                        self.path = PathFields::default();
+                        self.path_diagnostics = PathDiagnostics::default();
+                        self.rates = None;
                         self.history.push_back(None);
                         while self.history.len() > 60 {
                             self.history.pop_front();
@@ -744,29 +898,56 @@ impl WalkApp {
             }
             WorkerEvent::Measured {
                 mut target,
+                generation,
                 kind,
                 result,
             } => {
                 self.pending = self.pending.saturating_sub(1);
+                let current_target = generation == self.generation.load(Ordering::Relaxed)
+                    && target.location_id == self.active.location_id
+                    && target.spot_id == self.active.spot_id
+                    && target.ssid_id == self.active.ssid_id
+                    && target.walk_id == self.walk_id;
+                if self.pending == 0 {
+                    self.load_running = false;
+                }
                 if kind == WorkKind::Probe {
                     self.probe_running = false;
                 }
-                let (mut signal, speed, warning) = match result {
+                let (mut signal, speed, warning, load_latency) = match result {
                     Ok(value) => value,
                     Err(error) => {
                         self.message = error;
                         return;
                     }
                 };
+                if current_target
+                    && !self.no_speedtest
+                    && let Some(report) = load_latency
+                {
+                    let current_since_completion = Signal {
+                        ssid: self
+                            .ssid_observed_at
+                            .filter(|latest| *latest > report.completed_at)
+                            .and(self.last_association.ssid.clone()),
+                        bssid: self
+                            .bssid_observed_at
+                            .filter(|latest| *latest > report.completed_at)
+                            .and(self.last_association.bssid.clone()),
+                        ..Default::default()
+                    };
+                    let changed_since_completion =
+                        association_changed(&report.association, &current_since_completion);
+                    if !changed_since_completion {
+                        self.observe_association(&report.association, report.completed_at);
+                        self.load_latency = Some(report.latency);
+                    }
+                }
                 signal.ssid = target.signal.ssid.clone().or(signal.ssid);
                 target.signal = signal;
                 target.speed = speed.clone();
                 if kind == WorkKind::Probe {
-                    if target.location_id == self.active.location_id
-                        && target.spot_id == self.active.spot_id
-                        && target.ssid_id == self.active.ssid_id
-                        && target.walk_id == self.walk_id
-                    {
+                    if current_target {
                         self.speed = speed;
                     }
                     self.message = warning
@@ -785,11 +966,7 @@ impl WalkApp {
                 };
                 match result {
                     Ok(id) => {
-                        if target.location_id == self.active.location_id
-                            && target.spot_id == self.active.spot_id
-                            && target.ssid_id == self.active.ssid_id
-                            && target.walk_id == self.walk_id
-                        {
+                        if current_target {
                             self.speed = speed;
                         }
                         if kind == WorkKind::Benchmark {
@@ -876,10 +1053,46 @@ impl WalkApp {
                     Ok(())
                 }
             }
+        } else if self.diagnostics_open {
+            let count = if self.diagnostics_events {
+                self.timeline.events.len()
+            } else {
+                self.timeline.samples.len()
+            };
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('d') => {
+                    self.diagnostics_open = false;
+                    Ok(())
+                }
+                KeyCode::Tab | KeyCode::BackTab => {
+                    self.diagnostics_events = !self.diagnostics_events;
+                    self.diagnostics_offset = 0;
+                    Ok(())
+                }
+                KeyCode::Char('?') => {
+                    self.help = true;
+                    Ok(())
+                }
+                KeyCode::Char('t') => self.start_work(WorkKind::Probe),
+                code @ (KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::Home
+                | KeyCode::End
+                | KeyCode::Char('j')
+                | KeyCode::Char('k')) => {
+                    self.diagnostics_offset = move_cursor(self.diagnostics_offset, count, code);
+                    Ok(())
+                }
+                _ => Ok(()),
+            }
         } else {
             match key.code {
                 KeyCode::Char('?') => {
                     self.help = true;
+                    Ok(())
+                }
+                KeyCode::Char('d') => {
+                    self.diagnostics_open = !self.diagnostics_open;
                     Ok(())
                 }
                 KeyCode::Char('l') => self.open_picker(Level::Location),
@@ -1324,6 +1537,34 @@ fn demo_speed(tick: u64) -> Speed {
     }
 }
 
+fn demo_load_latency() -> LoadLatency {
+    use crate::path_diagnostics::LatencyPhase;
+    let phase = |gateway, internet, jitter| LatencyPhase {
+        path: PathFields {
+            path_probe_count: Some(6),
+            gateway_rtt_ms: Some(gateway),
+            gateway_p95_ms: Some(gateway + jitter),
+            gateway_loss_pct: Some(0.),
+            internet_rtt_ms: Some(internet),
+            internet_p95_ms: Some(internet + jitter),
+            internet_loss_pct: Some(0.),
+            ..Default::default()
+        },
+        diagnostics: PathDiagnostics {
+            gateway_jitter_ms: Some(jitter),
+            internet_jitter_ms: Some(jitter),
+            gateway_latest_ms: Some(gateway),
+            internet_latest_ms: Some(internet),
+        },
+    };
+    LoadLatency {
+        idle: phase(2., 12., 0.3),
+        loaded: phase(24., 140., 18.),
+        recovery: phase(3., 15., 1.),
+        ..Default::default()
+    }
+}
+
 pub fn demo_store() -> Result<Store> {
     let store = Store::memory()?;
     let location = store.create_location("Demo home")?;
@@ -1401,38 +1642,122 @@ fn with_terminal(
     draw_loop(&mut terminal)
 }
 
+fn known_association(signal: &Signal) -> (Option<&str>, Option<String>) {
+    let ssid = signal.ssid.as_deref().map(str::trim).filter(|ssid| {
+        !ssid.is_empty()
+            && !["<hidden>", "<redacted>"]
+                .iter()
+                .any(|unknown| ssid.eq_ignore_ascii_case(unknown))
+    });
+    let bssid = signal
+        .bssid
+        .as_deref()
+        .and_then(|bssid| crate::store::normalize_bssid(bssid).ok())
+        .filter(|bssid| {
+            bssid != "00:00:00:00:00:00"
+                && u8::from_str_radix(&bssid[..2], 16).is_ok_and(|first| first & 1 == 0)
+        });
+    (ssid, bssid)
+}
+
+fn association_changed(before: &Signal, after: &Signal) -> bool {
+    let (before_ssid, before_bssid) = known_association(before);
+    let (after_ssid, after_bssid) = known_association(after);
+    before_ssid
+        .zip(after_ssid)
+        .is_some_and(|(before, after)| before != after)
+        || before_bssid
+            .zip(after_bssid)
+            .is_some_and(|(before, after)| before != after)
+}
+
+fn retain_association(previous: &mut Signal, signal: &Signal) {
+    let (ssid, bssid) = known_association(signal);
+    if let Some(ssid) = ssid {
+        previous.ssid = Some(ssid.into());
+    }
+    if bssid.is_some() {
+        previous.bssid = bssid;
+    }
+}
+
+fn record_recent_probes(
+    tracker: &mut measure::PathTracker,
+    samples: impl IntoIterator<Item = (measure::PathSample, Instant)>,
+    observed_at: Instant,
+    boundary: Instant,
+) -> Option<(Option<f64>, Option<f64>)> {
+    let mut latest = None;
+    for (sample, sampled_at) in samples {
+        if sampled_at >= boundary
+            && let Some(age) = observed_at.checked_duration_since(sampled_at)
+        {
+            tracker.record_sample(&sample);
+            if age <= Duration::from_secs(2) {
+                latest = Some((sample.gateway_ms, sample.internet_ms));
+            }
+        }
+    }
+    latest
+}
+
 fn spawn_live(app: &WalkApp, interval: Duration) {
     let sender = app.sender.clone();
     let cancel = app.cancel.clone();
     let generation = app.generation.clone();
     thread::spawn(move || {
-        let path_worker =
-            measure::PathWorker::start_with_cancel(measure::gateway_with_cancel(&cancel), &cancel);
+        let mut probe_boundary = Instant::now();
+        let mut path_worker = measure::PathWorker::start_with_cancel(None, &cancel);
         let mut tracker = measure::PathTracker::default();
         let mut traffic = measure::TrafficSampler::default();
         let mut previous_generation = generation.load(Ordering::Relaxed);
+        let mut known_identity = Signal::default();
         while !cancel.is_cancelled() {
             let current_generation = generation.load(Ordering::Relaxed);
             if previous_generation != current_generation {
-                while path_worker.try_recv().is_some() {}
+                probe_boundary = Instant::now();
+                path_worker = measure::PathWorker::start_with_cancel(None, &cancel);
                 tracker.reset();
+                traffic = measure::TrafficSampler::default();
                 previous_generation = current_generation;
             }
+            let sampled_signal = measure::sample_signal_with_cancel(&cancel);
+            let observed_at = Instant::now();
+            let mut probes = Vec::new();
             while let Some(sample) = path_worker.try_recv() {
-                tracker.record_sample(&sample);
+                let sampled_at = path_worker.sample_instant(&sample);
+                probes.push((sample, sampled_at));
             }
-            let result = measure::sample_signal_with_cancel(&cancel)
+            let result = sampled_signal
                 .map(|signal| {
-                    (
+                    if association_changed(&known_identity, &signal) {
+                        probe_boundary = Instant::now();
+                        path_worker = measure::PathWorker::start_with_cancel(None, &cancel);
+                        tracker.reset();
+                        traffic = measure::TrafficSampler::default();
+                    }
+                    retain_association(&mut known_identity, &signal);
+                    let latest_probe =
+                        record_recent_probes(&mut tracker, probes, observed_at, probe_boundary);
+                    LiveSample {
                         signal,
-                        tracker.fields(),
-                        traffic.sample_with_cancel(&cancel),
-                    )
+                        path: tracker.fields(),
+                        diagnostics: tracker.diagnostics(),
+                        latest_probe,
+                        rates: traffic.sample_with_cancel(&cancel),
+                    }
                 })
                 .map_err(|e| e.to_string());
+            if result.is_err() {
+                probe_boundary = Instant::now();
+                path_worker = measure::PathWorker::start_with_cancel(None, &cancel);
+                tracker.reset();
+                traffic = measure::TrafficSampler::default();
+            }
             if sender
                 .send(WorkerEvent::Live {
                     generation: current_generation,
+                    observed_at,
                     result,
                 })
                 .is_err()
@@ -1471,9 +1796,10 @@ pub fn run_walk(db_path: &Path, args: &WalkArgs) -> Result<()> {
                 tick += 1;
                 app.apply_event(WorkerEvent::Live {
                     generation: app.generation.load(Ordering::Relaxed),
-                    result: Ok((
-                        measure::demo_signal(tick),
-                        PathFields {
+                    observed_at: Instant::now(),
+                    result: Ok(LiveSample {
+                        signal: measure::demo_signal(tick),
+                        path: PathFields {
                             path_probe_count: Some(60),
                             gateway_rtt_ms: Some(2.0 + (tick % 4) as f64 / 10.0),
                             internet_rtt_ms: Some(12.0 + (tick % 6) as f64),
@@ -1481,8 +1807,18 @@ pub fn run_walk(db_path: &Path, args: &WalkArgs) -> Result<()> {
                             internet_loss_pct: Some(0.0),
                             ..Default::default()
                         },
-                        Some((4.0 + (tick % 5) as f64, 1.2)),
-                    )),
+                        diagnostics: PathDiagnostics {
+                            gateway_jitter_ms: Some(0.15),
+                            internet_jitter_ms: Some(1.5),
+                            gateway_latest_ms: Some(2.0 + (tick % 4) as f64 / 10.0),
+                            internet_latest_ms: Some(12.0 + (tick % 6) as f64),
+                        },
+                        latest_probe: Some((
+                            Some(2.0 + (tick % 4) as f64 / 10.0),
+                            Some(12.0 + (tick % 6) as f64),
+                        )),
+                        rates: Some((4.0 + (tick % 5) as f64, 1.2)),
+                    }),
                 });
                 last_demo = Instant::now();
             }
@@ -1572,6 +1908,28 @@ mod tests {
         }
     }
 
+    fn live_event(app: &WalkApp, signal: Signal, elapsed: Duration) -> WorkerEvent {
+        WorkerEvent::Live {
+            generation: app.generation.load(Ordering::Relaxed),
+            observed_at: app.diagnostics_epoch + elapsed,
+            result: Ok(LiveSample {
+                signal,
+                path: PathFields::default(),
+                diagnostics: PathDiagnostics::default(),
+                latest_probe: None,
+                rates: None,
+            }),
+        }
+    }
+
+    fn load_report(app: &WalkApp, latency: LoadLatency) -> Box<LoadReport> {
+        Box::new(LoadReport {
+            latency,
+            association: app.signal.clone(),
+            completed_at: Instant::now(),
+        })
+    }
+
     #[test]
     fn demo_snapshots_belong_to_named_session_and_finish_cleanly() {
         let mut app = WalkApp::new(demo_store().unwrap(), &args()).unwrap();
@@ -1617,8 +1975,9 @@ mod tests {
         app.select_spot(app.places[1].spot_id).unwrap();
         app.apply_event(WorkerEvent::Measured {
             target: Box::new(target),
+            generation: app.generation.load(Ordering::Relaxed),
             kind: WorkKind::Snapshot,
-            result: Ok((measure::demo_signal(0), demo_speed(0), None)),
+            result: Ok((measure::demo_signal(0), demo_speed(0), None, None)),
         });
         let readings = app
             .store
@@ -1629,6 +1988,456 @@ mod tests {
             .unwrap();
         assert_eq!(readings[0].spot_id, original);
         assert!(app.speed.down_mbps.is_none());
+    }
+
+    #[test]
+    fn live_signal_tracks_the_actual_network_instead_of_the_survey_label() {
+        let mut app = WalkApp::new(demo_store().unwrap(), &args()).unwrap();
+        let mut signal = measure::demo_signal(0);
+        signal.ssid = Some("Actual WiFi".into());
+        app.apply_event(WorkerEvent::Live {
+            generation: app.generation.load(Ordering::Relaxed),
+            observed_at: Instant::now(),
+            result: Ok(LiveSample {
+                signal,
+                path: PathFields::default(),
+                diagnostics: PathDiagnostics::default(),
+                latest_probe: None,
+                rates: None,
+            }),
+        });
+        assert_eq!(app.signal.ssid.as_deref(), Some("Actual WiFi"));
+        assert_eq!(app.active.signal.ssid.as_deref(), Some("Demo WiFi"));
+        assert_eq!(
+            app.timeline
+                .samples
+                .back()
+                .unwrap()
+                .signal
+                .as_ref()
+                .unwrap()
+                .ssid
+                .as_deref(),
+            Some("Actual WiFi")
+        );
+    }
+
+    #[test]
+    fn roaming_history_survives_spot_and_room_changes_but_resets_for_a_new_session() {
+        use crate::timeline::TimelineEventKind;
+        let mut app = WalkApp::new(demo_store().unwrap(), &args()).unwrap();
+        let epoch = app.diagnostics_epoch;
+        app.apply_event(live_event(
+            &app,
+            measure::demo_signal(0),
+            Duration::from_secs(1),
+        ));
+        app.select_spot(app.places[1].spot_id).unwrap();
+        assert_eq!(app.timeline.samples.len(), 1);
+        assert_eq!(app.diagnostics_epoch, epoch);
+        let room_id = app
+            .places
+            .iter()
+            .find(|place| place.room_id != app.active.room_id)
+            .unwrap()
+            .room_id;
+        app.apply_choice(Level::Room, room_id).unwrap();
+        assert_eq!(app.timeline.samples.len(), 1);
+        assert_eq!(app.diagnostics_epoch, epoch);
+        app.apply_event(live_event(
+            &app,
+            measure::demo_signal(20),
+            Duration::from_secs(2),
+        ));
+        assert_eq!(
+            app.timeline.events.back().unwrap().kind,
+            TimelineEventKind::Roam
+        );
+        app.start_session().unwrap();
+        assert!(app.timeline.samples.is_empty());
+        assert!(app.timeline.events.is_empty());
+        app.apply_event(live_event(
+            &app,
+            measure::demo_signal(0),
+            Duration::from_secs(1),
+        ));
+        app.set_ssid("Another survey network").unwrap();
+        assert!(app.timeline.samples.is_empty());
+        app.apply_event(live_event(
+            &app,
+            measure::demo_signal(0),
+            Duration::from_secs(1),
+        ));
+        let location = app.store.create_location("Another location").unwrap();
+        app.select_location(location).unwrap();
+        assert!(app.timeline.samples.is_empty());
+    }
+
+    #[test]
+    fn live_timeline_uses_collection_time_and_raw_rtt_instead_of_rolling_median() {
+        let mut app = WalkApp::new(demo_store().unwrap(), &args()).unwrap();
+        let collected_at = Duration::from_secs(3);
+        app.apply_event(WorkerEvent::Live {
+            generation: app.generation.load(Ordering::Relaxed),
+            observed_at: app.diagnostics_epoch + collected_at,
+            result: Ok(LiveSample {
+                signal: measure::demo_signal(0),
+                path: PathFields {
+                    gateway_rtt_ms: Some(10.),
+                    ..Default::default()
+                },
+                diagnostics: PathDiagnostics {
+                    gateway_latest_ms: Some(42.),
+                    ..Default::default()
+                },
+                latest_probe: Some((Some(42.), Some(18.))),
+                rates: Some((7., 1.)),
+            }),
+        });
+        let sample = app.timeline.samples.back().unwrap();
+        assert_eq!(sample.observed_at, collected_at);
+        assert_eq!(sample.gateway_ms, Some(42.));
+        assert_eq!(sample.internet_ms, Some(18.));
+        assert_eq!(sample.rates_mbps, Some((7., 1.)));
+        assert_eq!(app.path.gateway_rtt_ms, Some(10.));
+        app.apply_event(live_event(
+            &app,
+            measure::demo_signal(0),
+            Duration::from_secs(4),
+        ));
+        assert_eq!(app.timeline.samples.back().unwrap().gateway_ms, None);
+    }
+
+    #[test]
+    fn hidden_identity_and_measurement_errors_have_distinct_timeline_events() {
+        use crate::timeline::TimelineEventKind;
+        let mut app = WalkApp::new(demo_store().unwrap(), &args()).unwrap();
+        app.apply_event(live_event(
+            &app,
+            measure::demo_signal(0),
+            Duration::from_secs(1),
+        ));
+        let mut redacted = measure::demo_signal(1);
+        redacted.ssid = None;
+        redacted.bssid = None;
+        app.apply_event(live_event(&app, redacted, Duration::from_secs(2)));
+        assert!(app.timeline.events.is_empty());
+        app.apply_event(WorkerEvent::Live {
+            generation: app.generation.load(Ordering::Relaxed),
+            observed_at: app.diagnostics_epoch + Duration::from_secs(3),
+            result: Err("radio sample failed".into()),
+        });
+        assert_eq!(
+            app.timeline.events.back().unwrap().kind,
+            TimelineEventKind::SampleUnavailable
+        );
+        assert!(app.sample_error);
+        assert!(app.rates.is_none());
+        app.apply_event(live_event(
+            &app,
+            measure::demo_signal(3),
+            Duration::from_secs(4),
+        ));
+        assert_eq!(
+            app.timeline.events.back().unwrap().kind,
+            TimelineEventKind::SampleRecovered
+        );
+        assert!(!app.sample_error);
+    }
+
+    #[test]
+    fn load_latency_report_is_accepted_for_current_work_and_rejected_after_generation_changes() {
+        let mut app = WalkApp::new(demo_store().unwrap(), &args()).unwrap();
+        app.start_work(WorkKind::Probe).unwrap();
+        assert_eq!(
+            app.load_latency
+                .as_ref()
+                .unwrap()
+                .loaded
+                .path
+                .gateway_rtt_ms,
+            Some(24.)
+        );
+        assert!(!app.load_running);
+        let target = app.active.clone();
+        let generation = app.generation.load(Ordering::Relaxed);
+        let original_spot = app.active.spot_id;
+        app.select_spot(app.places[1].spot_id).unwrap();
+        app.select_spot(original_spot).unwrap();
+        app.pending = 1;
+        app.load_running = true;
+        app.apply_event(WorkerEvent::Measured {
+            target: Box::new(target),
+            generation,
+            kind: WorkKind::Probe,
+            result: Ok((
+                measure::demo_signal(0),
+                demo_speed(0),
+                None,
+                Some(load_report(&app, demo_load_latency())),
+            )),
+        });
+        assert!(app.load_latency.is_none());
+        assert!(app.speed.down_mbps.is_none());
+        assert_eq!(app.pending, 0);
+        assert!(!app.load_running);
+    }
+
+    #[test]
+    fn disabled_speedtests_never_produce_load_reports() {
+        let mut selected = args();
+        selected.no_speedtest = true;
+        let mut app = WalkApp::new(demo_store().unwrap(), &selected).unwrap();
+        app.start_work(WorkKind::Snapshot).unwrap();
+        assert!(app.load_latency.is_none());
+        assert!(!app.load_running);
+        assert!(app.start_work(WorkKind::Probe).is_err());
+        app.apply_event(WorkerEvent::Measured {
+            target: Box::new(app.active.clone()),
+            generation: app.generation.load(Ordering::Relaxed),
+            kind: WorkKind::Snapshot,
+            result: Ok((
+                measure::demo_signal(0),
+                demo_speed(0),
+                None,
+                Some(load_report(&app, demo_load_latency())),
+            )),
+        });
+        assert!(app.load_latency.is_none());
+    }
+
+    #[test]
+    fn diagnostics_controls_switch_timeline_views_and_preserve_survey_selection() {
+        let mut app = WalkApp::new(demo_store().unwrap(), &args()).unwrap();
+        app.picker = None;
+        let spot = app.active.spot_id;
+        for tick in 0..4 {
+            app.apply_event(live_event(
+                &app,
+                measure::demo_signal(tick),
+                Duration::from_secs(tick),
+            ));
+        }
+        app.press(key(KeyCode::Char('d')));
+        assert!(app.diagnostics_open);
+        assert!(app.diagnostics_events);
+        app.press(key(KeyCode::Tab));
+        assert!(!app.diagnostics_events);
+        app.press(key(KeyCode::Down));
+        assert_eq!(app.diagnostics_offset, 1);
+        assert_eq!(app.active.spot_id, spot);
+        app.press(key(KeyCode::End));
+        assert_eq!(app.diagnostics_offset, 3);
+        app.press(key(KeyCode::Home));
+        assert_eq!(app.diagnostics_offset, 0);
+        app.press(key(KeyCode::Char('r')));
+        assert!(app.picker.is_none());
+        app.press(key(KeyCode::Esc));
+        assert!(!app.diagnostics_open);
+    }
+
+    #[test]
+    fn recovery_discards_expired_probes_and_probes_from_a_previous_generation() {
+        let epoch = Instant::now();
+        let recovered_at = epoch + Duration::from_secs(120);
+        let boundary = epoch + Duration::from_secs(110);
+        let probe = |rtt, elapsed| measure::PathSample {
+            gateway_target: Some("192.168.1.1".into()),
+            gateway_ms: Some(rtt),
+            internet_target: "1.1.1.1".into(),
+            internet_ms: Some(rtt + 10.),
+            primary_failed: false,
+            observed_at: Duration::from_secs(elapsed),
+        };
+        let mut tracker = measure::PathTracker::default();
+        let latest = record_recent_probes(
+            &mut tracker,
+            [
+                (probe(90., 30), epoch + Duration::from_secs(30)),
+                (probe(80., 109), epoch + Duration::from_secs(109)),
+                (probe(70., 117), epoch + Duration::from_secs(117)),
+                (probe(2., 119), epoch + Duration::from_secs(119)),
+            ],
+            recovered_at,
+            boundary,
+        );
+        assert_eq!(latest, Some((Some(2.), Some(12.))));
+        assert_eq!(tracker.fields().path_probe_count, Some(2));
+        assert_eq!(tracker.fields().gateway_rtt_ms, Some(36.));
+        tracker.reset();
+        assert_eq!(
+            record_recent_probes(
+                &mut tracker,
+                [(probe(90., 30), epoch + Duration::from_secs(30))],
+                recovered_at,
+                boundary,
+            ),
+            None
+        );
+        assert!(tracker.fields().gateway_rtt_ms.is_none());
+    }
+
+    #[test]
+    fn completed_load_reports_clear_on_ap_or_network_changes_but_survive_redaction() {
+        for network_change in [false, true] {
+            let mut app = WalkApp::new(demo_store().unwrap(), &args()).unwrap();
+            app.apply_event(live_event(
+                &app,
+                measure::demo_signal(0),
+                Duration::from_secs(1),
+            ));
+            app.load_latency = Some(demo_load_latency());
+            let redacted = Signal {
+                ssid: Some("<redacted>".into()),
+                ..Default::default()
+            };
+            app.apply_event(live_event(&app, redacted, Duration::from_secs(2)));
+            assert!(app.load_latency.is_some());
+            let mut changed = measure::demo_signal(if network_change { 0 } else { 20 });
+            if network_change {
+                changed.ssid = Some("Another actual WiFi".into());
+            }
+            app.apply_event(live_event(&app, changed, Duration::from_secs(3)));
+            assert!(app.load_latency.is_none());
+        }
+    }
+
+    #[test]
+    fn slow_radio_sampling_preserves_all_current_path_probes_for_loss_and_jitter() {
+        let epoch = Instant::now();
+        let samples = (1..=10).map(|second| {
+            let rtt = (second != 2 && second != 3).then_some(second as f64);
+            (
+                measure::PathSample {
+                    gateway_target: Some("192.168.1.1".into()),
+                    gateway_ms: rtt,
+                    internet_target: "1.1.1.1".into(),
+                    internet_ms: rtt,
+                    primary_failed: rtt.is_none(),
+                    observed_at: Duration::from_secs(second),
+                },
+                epoch + Duration::from_secs(second),
+            )
+        });
+        let mut tracker = measure::PathTracker::default();
+        let latest = record_recent_probes(
+            &mut tracker,
+            samples,
+            epoch + Duration::from_secs(10),
+            epoch,
+        );
+        assert_eq!(latest, Some((Some(10.), Some(10.))));
+        assert_eq!(tracker.fields().path_probe_count, Some(10));
+        assert_eq!(tracker.fields().gateway_loss_pct, Some(20.));
+        assert_eq!(tracker.diagnostics().gateway_jitter_ms, Some(1.));
+    }
+
+    #[test]
+    fn queued_load_reports_do_not_reappear_after_a_later_ap_or_network_change() {
+        for network_change in [false, true] {
+            let mut app = WalkApp::new(demo_store().unwrap(), &args()).unwrap();
+            let original = measure::demo_signal(0);
+            app.apply_event(live_event(&app, original.clone(), Duration::from_secs(1)));
+            let report = Box::new(LoadReport {
+                latency: demo_load_latency(),
+                association: original.clone(),
+                completed_at: app.diagnostics_epoch + Duration::from_secs(2),
+            });
+            let mut changed = measure::demo_signal(if network_change { 0 } else { 20 });
+            if network_change {
+                changed.ssid = Some("Another actual WiFi".into());
+            }
+            app.apply_event(live_event(&app, changed, Duration::from_secs(3)));
+            app.apply_event(WorkerEvent::Measured {
+                target: Box::new(app.active.clone()),
+                generation: app.generation.load(Ordering::Relaxed),
+                kind: WorkKind::Probe,
+                result: Ok((original, demo_speed(0), None, Some(report))),
+            });
+            assert!(app.load_latency.is_none());
+        }
+    }
+
+    #[test]
+    fn a_roam_during_load_uses_completion_identity_and_ignores_older_radio_observations() {
+        let mut app = WalkApp::new(demo_store().unwrap(), &args()).unwrap();
+        let original = measure::demo_signal(0);
+        let roamed = measure::demo_signal(20);
+        app.apply_event(live_event(&app, original.clone(), Duration::from_secs(1)));
+        app.apply_event(live_event(&app, roamed.clone(), Duration::from_secs(2)));
+        app.apply_event(WorkerEvent::Measured {
+            target: Box::new(app.active.clone()),
+            generation: app.generation.load(Ordering::Relaxed),
+            kind: WorkKind::Probe,
+            result: Ok((
+                original.clone(),
+                demo_speed(0),
+                None,
+                Some(Box::new(LoadReport {
+                    latency: demo_load_latency(),
+                    association: roamed.clone(),
+                    completed_at: app.diagnostics_epoch + Duration::from_secs(3),
+                })),
+            )),
+        });
+        assert!(app.load_latency.is_some());
+        app.apply_event(live_event(
+            &app,
+            original.clone(),
+            Duration::from_millis(2500),
+        ));
+        assert!(app.load_latency.is_some());
+        app.apply_event(live_event(&app, roamed, Duration::from_secs(4)));
+        assert!(app.load_latency.is_some());
+        app.apply_event(live_event(&app, original, Duration::from_secs(5)));
+        assert!(app.load_latency.is_none());
+    }
+
+    #[test]
+    fn unsaved_speed_probe_runs_without_a_selected_survey_location_or_spot() {
+        let mut app = WalkApp::new(demo_store().unwrap(), &args()).unwrap();
+        app.finish_session().unwrap();
+        app.active = Reading::default();
+        app.picker = None;
+        app.diagnostics_open = true;
+        let readings_before = app.store.list_readings(&Filter::default()).unwrap().len();
+        app.press(key(KeyCode::Char('t')));
+        assert!(app.speed.down_mbps.is_some());
+        assert!(app.load_latency.is_some());
+        assert_eq!(
+            app.store.list_readings(&Filter::default()).unwrap().len(),
+            readings_before
+        );
+        assert!(app.start_work(WorkKind::Snapshot).is_err());
+        assert!(app.start_work(WorkKind::Benchmark).is_err());
+        app.no_speedtest = true;
+        assert!(app.start_work(WorkKind::Probe).is_err());
+    }
+
+    #[test]
+    fn newer_redacted_bssid_does_not_reject_a_report_from_a_roam_during_load() {
+        let mut app = WalkApp::new(demo_store().unwrap(), &args()).unwrap();
+        let original = measure::demo_signal(0);
+        app.apply_event(live_event(&app, original.clone(), Duration::from_secs(1)));
+        let mut redacted = original.clone();
+        redacted.bssid = None;
+        app.apply_event(live_event(&app, redacted, Duration::from_secs(4)));
+        app.apply_event(WorkerEvent::Measured {
+            target: Box::new(app.active.clone()),
+            generation: app.generation.load(Ordering::Relaxed),
+            kind: WorkKind::Probe,
+            result: Ok((
+                original,
+                demo_speed(0),
+                None,
+                Some(Box::new(LoadReport {
+                    latency: demo_load_latency(),
+                    association: measure::demo_signal(20),
+                    completed_at: app.diagnostics_epoch + Duration::from_secs(3),
+                })),
+            )),
+        });
+        assert!(app.load_latency.is_some());
     }
     #[test]
     fn evaluation_filters_groups_and_compares_real_demo_walks() {
@@ -1657,8 +2466,13 @@ mod tests {
         let mut target = app.active.clone();
         target.ts = timestamp();
         target.walk_id = app.walk_id;
+        let failed_load_report = LoadLatency {
+            idle: demo_load_latency().idle,
+            ..Default::default()
+        };
         app.apply_event(WorkerEvent::Measured {
             target: Box::new(target),
+            generation: app.generation.load(Ordering::Relaxed),
             kind: WorkKind::Snapshot,
             result: Ok((
                 measure::demo_signal(0),
@@ -1667,6 +2481,7 @@ mod tests {
                     ..Default::default()
                 },
                 Some("no speedtest".into()),
+                Some(load_report(&app, failed_load_report)),
             )),
         });
         let reading = &app
@@ -1679,6 +2494,9 @@ mod tests {
         assert!(reading.signal.rssi.is_some());
         assert!(reading.speed.down_mbps.is_none());
         assert!(app.message.contains("speed unavailable"));
+        let report = app.load_latency.as_ref().unwrap();
+        assert_eq!(report.idle.path.gateway_rtt_ms, Some(2.));
+        assert!(report.loaded.path.gateway_rtt_ms.is_none());
     }
 
     #[test]
@@ -1690,17 +2508,21 @@ mod tests {
         app.select_spot(app.places[1].spot_id).unwrap();
         app.apply_event(WorkerEvent::Live {
             generation,
-            result: Ok((
-                measure::demo_signal(0),
-                PathFields {
+            observed_at: Instant::now(),
+            result: Ok(LiveSample {
+                signal: measure::demo_signal(0),
+                path: PathFields {
                     gateway_rtt_ms: Some(99.0),
                     ..Default::default()
                 },
-                None,
-            )),
+                diagnostics: PathDiagnostics::default(),
+                latest_probe: None,
+                rates: None,
+            }),
         });
         assert!(app.path.gateway_rtt_ms.is_none());
         assert!(app.speed.down_mbps.is_none());
+        assert!(app.timeline.samples.is_empty());
     }
 
     #[test]
@@ -1783,8 +2605,9 @@ mod tests {
         app.set_ssid("Other WiFi").unwrap();
         app.apply_event(WorkerEvent::Measured {
             target: Box::new(target),
+            generation: app.generation.load(Ordering::Relaxed),
             kind: WorkKind::Probe,
-            result: Ok((measure::demo_signal(0), demo_speed(0), None)),
+            result: Ok((measure::demo_signal(0), demo_speed(0), None, None)),
         });
         assert!(app.speed.down_mbps.is_none());
     }

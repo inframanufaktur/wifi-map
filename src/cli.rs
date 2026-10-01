@@ -668,8 +668,8 @@ pub fn capabilities() -> serde_json::Value {
     serde_json::json!({
         "package": {"name":"wifimap","version":env!("CARGO_PKG_VERSION"),"rust_requires":env!("CARGO_PKG_RUST_VERSION")},
         "cli": {"program":"wifimap","summary":"Map and evaluate home WiFi.","epilog":"Exit codes: 0 success; 2 WiFi/signal or arguments; 3 storage/CSV.","commands":commands},
-        "walk": {"footer":"s snapshot · t speed probe · c compare · b benchmark · l switch · n new · q quit",
-            "controls":[{"name":"snapshot","key":"s"},{"name":"speed_probe","key":"t"},{"name":"compare","key":"c"},{"name":"benchmark","key":"b"},{"name":"switch","key":"l"},{"name":"new","key":"n"},{"name":"quit","key":"q"}],
+        "walk": {"footer":"s snapshot · t speed probe · d diagnostics · c compare · b benchmark · l switch · n new · q quit",
+            "controls":[{"name":"snapshot","key":"s"},{"name":"speed_probe","key":"t"},{"name":"diagnostics","key":"d"},{"name":"compare","key":"c"},{"name":"benchmark","key":"b"},{"name":"switch","key":"l"},{"name":"new","key":"n"},{"name":"quit","key":"q"}],
             "statuses":["GREAT","OK","WEAK","UNKNOWN"],
             "status_thresholds":[{"metric":"rssi","unit":"dBm","great_min":-60,"ok_min":-70},{"metric":"snr","unit":"dB","great_min":25,"ok_min":15}],"chart_glyphs":["▁","▂","▃","▄","▅","▆","▇","█"]},
         "evaluation": {"kinds":[{"key":"location","label":"Location"},{"key":"ssid","label":"SSID"}],

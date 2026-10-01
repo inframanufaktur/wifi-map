@@ -1,4 +1,6 @@
 //! Pure terminal rendering, using the sibling usmaybe dashboard palette.
+mod diagnostics;
+
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -86,6 +88,10 @@ fn base(frame: &mut Frame, label: &str, demo: bool, error: bool, live: bool) -> 
 }
 
 pub fn draw_walk(frame: &mut Frame, app: &WalkApp) {
+    if app.diagnostics_open {
+        diagnostics::draw(frame, app);
+        return;
+    }
     let Some(regions) = base(frame, "WiFi survey", app.demo, app.sample_error, true) else {
         return;
     };
@@ -158,12 +164,10 @@ pub fn draw_walk(frame: &mut Frame, app: &WalkApp) {
         (
             "Network",
             Line::from(
-                app.active
-                    .signal
+                app.signal
                     .ssid
                     .clone()
-                    .or_else(|| app.signal.ssid.clone())
-                    .unwrap_or_else(|| "Unknown · w to set".into()),
+                    .unwrap_or_else(|| "SSID unavailable".into()),
             ),
         ),
         (
@@ -231,7 +235,7 @@ pub fn draw_walk(frame: &mut Frame, app: &WalkApp) {
     footer(
         frame,
         &app.message,
-        "↑/↓ spot  l location  r room  p spot  s save  t speed  b ideal  c compare  ?  q",
+        "↑/↓ spot  l location  r room  p spot  s save  t speed  d diagnostics  ?  q",
         regions[4],
     );
     if app.help {
@@ -930,12 +934,12 @@ fn draw_picker(frame: &mut Frame, picker: &Picker, create: bool) {
 }
 
 fn help(frame: &mut Frame, evaluation: bool) {
-    let area = popup(frame.area(), 78, 20);
+    let area = popup(frame.area(), 78, 24);
     frame.render_widget(Clear, area);
     let content = if evaluation {
         "↑/↓ or j/k     Select a ranked row\nTab / Shift-Tab Change ranking metric\nr              Reverse best / worst order\nm              Toggle spot medians / individual readings\nl / w          Filter by location / SSID\nc              Choose before and after named walks\nf              Include spots missing from one walk\nx              Swap before and after\nEnter          Inspect readings, signal, path and metadata\n←/→ in detail  Switch before / after readings\nEsc            Close details or return from comparison\nq / Ctrl-C     Quit\n\nMissing metrics are shown as — and rank last.\nDemo data is simulated and stored only in memory."
     } else {
-        "↑/↓ or j/k     Select a survey spot\nl / r / p      Choose location / room / spot\nw              Choose a network / SSID\nn or +         Create a place (also inside pickers)\ns              Save signal, path and optional speed snapshot\nt              Run a speed probe without saving a reading\nb              Capture an ideal benchmark for this location\nc              Compare this spot with a named prior walk\na              Name the connected access point\nEnter / Esc    Save / cancel an editor or picker\nCtrl-U         Clear editor text\nq / Ctrl-C     Finish the named walk and quit\n\nMeasurements run in the background; incomplete work is\ncancelled when quitting. Demo data stays in memory."
+        "↑/↓ or j/k     Select a survey spot\nl / r / p      Choose location / room / spot\nw              Choose a network / SSID\nn or +         Create a place (also inside pickers)\ns              Save signal, path and optional speed snapshot\nt              Run a speed probe with loaded latency\nd              Open connection diagnostics / roaming timeline\nTab in diagnostics Switch events / samples; arrows scroll\nb              Capture an ideal benchmark for this location\nc              Compare this spot with a named prior walk\na              Name the connected access point\nEnter / Esc    Save / cancel an editor or picker\nCtrl-U         Clear editor text\nq / Ctrl-C     Finish the named walk and quit\n\nMeasurements run in the background; incomplete work is\ncancelled when quitting. Demo data stays in memory."
     };
     let mut lines: Vec<_> = content
         .lines()
@@ -1456,5 +1460,140 @@ mod tests {
         let compact = screen(76, 24, |frame| draw_walk(frame, &app));
         assert!(compact.contains("Down 10000.0 Mbps"));
         assert!(compact.contains("Up   1000.0 Mbps"));
+    }
+
+    #[test]
+    fn diagnostics_render_roaming_and_load_at_minimum_terminal_size() {
+        use crate::{model::Signal, path_diagnostics::LoadLatency};
+        use std::time::Duration;
+
+        let mut app = WalkApp::new(
+            demo_store().unwrap(),
+            &crate::cli::WalkArgs {
+                demo: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        app.diagnostics_open = true;
+        let mut signal = Signal {
+            ssid: Some("Actual WiFi".into()),
+            bssid: Some("02:00:00:00:00:01".into()),
+            rssi: Some(-72.),
+            tx_rate: Some("144".into()),
+            ..Default::default()
+        };
+        app.timeline.record(
+            Duration::from_secs(1),
+            Some(&signal),
+            Some(12.),
+            Some(60.),
+            None,
+        );
+        signal.bssid = Some("02:00:00:00:00:02".into());
+        signal.rssi = Some(-53.);
+        signal.tx_rate = Some("866".into());
+        app.timeline.record(
+            Duration::from_secs(2),
+            Some(&signal),
+            Some(2.),
+            Some(18.),
+            None,
+        );
+        app.signal = signal;
+        app.path.gateway_rtt_ms = Some(2.);
+        app.path.gateway_loss_pct = Some(0.);
+        app.path_diagnostics.gateway_jitter_ms = Some(1.2);
+        let mut load = LoadLatency::default();
+        load.idle.path.gateway_rtt_ms = Some(2.);
+        load.loaded.path.gateway_rtt_ms = Some(22.);
+        load.idle.path.internet_rtt_ms = Some(18.);
+        load.loaded.path.internet_rtt_ms = Some(78.);
+        app.load_latency = Some(load);
+        for (width, height) in [(76, 24), (120, 36)] {
+            let output = screen(width, height, |frame| draw_walk(frame, &app));
+            for expected in [
+                "Connection diagnostics",
+                "Actual WiFi",
+                "Jitter",
+                "Loss",
+                "Recovery",
+                "Roam",
+                "02:00:00:00:00:02",
+                "+20.0",
+                "+60.0",
+            ] {
+                assert!(
+                    output.contains(expected),
+                    "missing {expected} at {width}x{height}"
+                );
+            }
+        }
+        app.diagnostics_events = false;
+        let output = screen(76, 24, |frame| draw_walk(frame, &app));
+        for expected in [
+            "Signal / rate / AP timeline",
+            "RSSI",
+            "SNR",
+            "TX",
+            "866",
+            "-53",
+        ] {
+            assert!(output.contains(expected), "missing {expected}");
+        }
+    }
+
+    #[test]
+    fn diagnostics_missing_identity_and_empty_history_are_actionable() {
+        let mut app = WalkApp::new(
+            demo_store().unwrap(),
+            &crate::cli::WalkArgs {
+                demo: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        app.diagnostics_open = true;
+        app.signal.bssid = None;
+        let output = screen(76, 24, |frame| draw_walk(frame, &app));
+        assert!(output.contains("BSSID unavailable"));
+        assert!(output.contains("No observed connection changes"));
+        assert!(output.contains("Press t"));
+        app.diagnostics_events = false;
+        let output = screen(76, 24, |frame| draw_walk(frame, &app));
+        assert!(output.contains("Waiting for connection samples"));
+        app.load_running = true;
+        let output = screen(76, 24, |frame| draw_walk(frame, &app));
+        assert!(output.contains("Measuring idle"));
+    }
+
+    #[test]
+    fn diagnostics_explain_invalidated_load_comparisons() {
+        use crate::path_diagnostics::LoadLatency;
+
+        let mut app = WalkApp::new(
+            demo_store().unwrap(),
+            &crate::cli::WalkArgs {
+                demo: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        app.diagnostics_open = true;
+        let mut report = LoadLatency {
+            gateway_changed: true,
+            ..Default::default()
+        };
+        report.idle.path.internet_rtt_ms = Some(18.);
+        report.loaded.path.internet_rtt_ms = Some(78.);
+        app.load_latency = Some(report.clone());
+        let output = screen(76, 24, |frame| draw_walk(frame, &app));
+        assert!(output.contains("Gateway changed: comparison"));
+        assert!(output.contains("+60.0"));
+        report.connection_changed = true;
+        app.load_latency = Some(report);
+        let output = screen(76, 24, |frame| draw_walk(frame, &app));
+        assert!(output.contains("Connection changed; latency comparison unavailable"));
+        assert!(!output.contains("+60.0"));
     }
 }
