@@ -15,10 +15,31 @@ Rust {{ capabilities.package.rust_requires }} or newer.
 
 ## Commands
 
-- `wifimap scan` records one reading.
-- `wifimap walk` opens the survey TUI and groups readings into a named walk.
-- `wifimap eval` ranks readings and compares walks.
-- `wifimap export --csv FILE` writes the database to CSV.
+Run `wifimap` to open the live dashboard. No subcommand is required:
+
+<pre class="command-block" data-copy><code>wifimap</code></pre>
+
+Explore simulated measurements:
+
+<pre class="command-block" data-copy><code>wifimap --demo</code></pre>
+
+Give the survey an explicit name. The `walk` subcommand remains available for
+survey options:
+
+<pre class="command-block" data-copy><code>wifimap walk --name before-install</code></pre>
+
+Rank saved readings and compare walks:
+
+<pre class="command-block" data-copy><code>wifimap eval</code></pre>
+
+Export saved readings:
+
+<pre class="command-block" data-copy><code>wifimap export --csv readings.csv</code></pre>
+
+For a single reading, `scan` requires a location, room, and spot. Supply an SSID
+to avoid a network-selection prompt:
+
+<pre class="command-block" data-copy><code>wifimap scan --location HOME --room KITCHEN --spot WINDOW --ssid HOME-WIFI</code></pre>
 
 ## Recorded data
 
@@ -32,7 +53,7 @@ capacity and are not stored as throughput results.
 
 ## Current connection diagnostics
 
-In `walk`, press `d` for gateway and Internet loss/jitter, latency under load,
+In the dashboard, press `d` for gateway and Internet loss/jitter, latency under load,
 and a correlated signal/rate/AP timeline with observed roaming events. `Tab`
 switches events and samples; `t` runs the optional unsaved speed probe. You can
 cancel the initial pickers with `Escape` and inspect the current connection

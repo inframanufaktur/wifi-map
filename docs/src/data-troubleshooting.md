@@ -82,10 +82,8 @@ returns local JSON.
 
 Install WifiWand with Ruby 3.2 or newer, then complete its one-time setup:
 
-```sh
-gem install wifi-wand
-wifiwand-macos-setup
-```
+<pre class="command-block" data-copy><code>gem install wifi-wand
+wifiwand-macos-setup</code></pre>
 
 wifimap searches `~/Library/Application Support/WifiWand/`. Set
 `WIFIMAP_WIFIWAND_HELPER` for a custom path. Detection order is CoreWLAN,

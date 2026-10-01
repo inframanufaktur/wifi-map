@@ -10,10 +10,11 @@ permalink: /evaluate/index.html
 
 `eval` reads a SQLite database or CSV export. Database access is read-only.
 
-```sh
-wifimap --db /path/to/wifi-map.db eval
-wifimap eval --csv readings.csv
-```
+<pre class="command-block" data-copy><code>wifimap --db /path/to/wifi-map.db eval</code></pre>
+
+Or evaluate a CSV export:
+
+<pre class="command-block" data-copy><code>wifimap eval --csv readings.csv</code></pre>
 
 ## Choose what to evaluate
 
