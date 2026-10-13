@@ -151,3 +151,16 @@ fn invalid_ping_target_never_starts_a_process() {
         None
     );
 }
+
+#[test]
+fn vpn_default_route_falls_back_to_physical_gateway() {
+    let vpn_route = "route to: default\ndestination: default\nmask: default\ninterface: utun10\nflags: <UP,DONE,CLONING,STATIC,GLOBAL>\n";
+    assert_eq!(parse_route_field(vpn_route, "gateway"), None);
+    let table = "Routing tables\nInternet:\nDestination Gateway Flags Netif Expire\ndefault link#33 UCSg utun10\ndefault 192.168.1.1 UGScIg en0\n";
+    assert_eq!(
+        parse_routing_table_gateway(table, "en0"),
+        Some("192.168.1.1".into())
+    );
+    let vpn_only = "default link#33 UCSg utun10\n";
+    assert_eq!(parse_routing_table_gateway(vpn_only, "en0"), None);
+}

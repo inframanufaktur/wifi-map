@@ -20,20 +20,59 @@ pub fn gateway_with_cancel(cancel: &CancelToken) -> Option<String> {
 }
 
 pub(super) fn gateway_on_interface(interface: &str, cancel: &CancelToken) -> Option<String> {
-    let output = run_command(
+    if let Ok(output) = run_command(
         "/sbin/route",
         &["-n", "get", "-ifscope", interface, "default"],
         Duration::from_secs(2),
         cancel,
-    )
-    .ok()?;
-    output
+    ) && let Some(gateway) = output
         .status
         .success()
         .then(|| parse_route_field(&output.stdout, "interface"))
         .flatten()
-        .filter(|route_interface| route_interface == interface)?;
-    parse_route_field(&output.stdout, "gateway").filter(|gateway| gateway.parse::<IpAddr>().is_ok())
+        .filter(|route_interface| route_interface == interface)
+        .and_then(|_| parse_route_field(&output.stdout, "gateway"))
+        .filter(|gateway| gateway.parse::<IpAddr>().is_ok())
+    {
+        return Some(gateway);
+    }
+    // A VPN (utun) default route carries no gateway IP, so `route get default`
+    // can yield no `gateway:` line. Fall back to the first IP gateway for
+    // `default` in the routing table (usually the physical Wi-Fi router),
+    // preferring entries that egress over the requested interface.
+    run_command(
+        "/usr/sbin/netstat",
+        &["-rn"],
+        Duration::from_secs(2),
+        cancel,
+    )
+    .ok()
+    .and_then(|output| {
+        output
+            .status
+            .success()
+            .then(|| parse_routing_table_gateway(&output.stdout, interface))
+            .flatten()
+    })
+}
+
+fn parse_routing_table_gateway(text: &str, interface: &str) -> Option<String> {
+    let mut ip_gateways = text.lines().filter_map(|line| {
+        let tokens: Vec<_> = line.split_whitespace().collect();
+        let (destination, gateway) = (tokens.first()?, tokens.get(1)?);
+        Some((*destination == "default" && gateway.parse::<IpAddr>().is_ok()).then(|| {
+            (
+                (*gateway).to_string(),
+                tokens.get(5).copied().unwrap_or_default(),
+            )
+        }))
+        .flatten()
+    });
+    ip_gateways
+        .clone()
+        .find(|(_, netif)| *netif == interface)
+        .or_else(|| ip_gateways.next())
+        .map(|(gateway, _)| gateway)
 }
 
 fn parse_route_field(text: &str, field: &str) -> Option<String> {
