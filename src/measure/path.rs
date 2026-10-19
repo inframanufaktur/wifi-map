@@ -60,12 +60,14 @@ fn parse_routing_table_gateway(text: &str, interface: &str) -> Option<String> {
     let mut ip_gateways = text.lines().filter_map(|line| {
         let tokens: Vec<_> = line.split_whitespace().collect();
         let (destination, gateway) = (tokens.first()?, tokens.get(1)?);
-        Some((*destination == "default" && gateway.parse::<IpAddr>().is_ok()).then(|| {
-            (
-                (*gateway).to_string(),
-                tokens.get(5).copied().unwrap_or_default(),
-            )
-        }))
+        Some(
+            (*destination == "default" && gateway.parse::<IpAddr>().is_ok()).then(|| {
+                (
+                    (*gateway).to_string(),
+                    tokens.get(5).copied().unwrap_or_default(),
+                )
+            }),
+        )
         .flatten()
     });
     ip_gateways
