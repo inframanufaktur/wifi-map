@@ -15,7 +15,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, SparklineBar, Wrap},
+    widgets::{Block, Borders, Paragraph, RenderDirection, SparklineBar, Wrap},
 };
 
 use overlays::help;
@@ -260,7 +260,10 @@ fn signal_history(
     let columns = history.len().min(area.width as usize);
     // Keep a visible sliver for every actual reading, even at or below -100 dBm.
     let minimum_height = 80_u64.div_ceil(8 * u64::from(area.height.max(1)));
+    // Newest first: with RightToLeft rendering, data[0] anchors at the right
+    // edge so short histories fill from right to left.
     (0..columns)
+        .rev()
         .map(|column| {
             let start = column * history.len() / columns;
             let end = (column + 1) * history.len() / columns;

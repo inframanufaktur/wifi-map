@@ -150,7 +150,8 @@ fn history_colors_each_sample_and_keeps_real_weak_readings_visible() {
             frame.render_widget(
                 Sparkline::default()
                     .data(signal_history(&history, frame.area()))
-                    .max(80),
+                    .max(80)
+                    .direction(RenderDirection::RightToLeft),
                 frame.area(),
             );
         })
@@ -178,7 +179,8 @@ fn history_colors_each_sample_and_keeps_real_weak_readings_visible() {
             frame.render_widget(
                 Sparkline::default()
                     .data(signal_history(&history, frame.area()))
-                    .max(80),
+                    .max(80)
+                    .direction(RenderDirection::RightToLeft),
                 frame.area(),
             );
         })
@@ -189,6 +191,30 @@ fn history_colors_each_sample_and_keeps_real_weak_readings_visible() {
     assert_eq!(buffer[(2, 4)].fg, BAD);
     assert_ne!(buffer[(2, 4)].symbol(), " ");
     assert!(signal_history(&history, Rect::default()).is_empty());
+}
+
+#[test]
+fn history_anchors_newest_at_right_edge() {
+    // Two readings in a 4-wide area: newest must sit at the right edge,
+    // older extends left, empty space stays left.
+    let history = [Some(-60.0), Some(-70.0)].into();
+    let mut terminal = Terminal::new(TestBackend::new(4, 5)).unwrap();
+    terminal
+        .draw(|frame| {
+            frame.render_widget(
+                Sparkline::default()
+                    .data(signal_history(&history, frame.area()))
+                    .max(80)
+                    .direction(RenderDirection::RightToLeft),
+                frame.area(),
+            );
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    assert_eq!(buffer[(0, 4)].symbol(), " ");
+    assert_eq!(buffer[(1, 4)].symbol(), " ");
+    assert_eq!(buffer[(2, 4)].fg, GOOD);
+    assert_eq!(buffer[(3, 4)].fg, WARN);
 }
 
 #[test]

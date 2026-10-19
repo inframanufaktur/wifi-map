@@ -4,7 +4,10 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Cell, Clear, List, ListItem, ListState, Paragraph, Row, Sparkline, Table, Wrap},
+    widgets::{
+        Cell, Clear, List, ListItem, ListState, Paragraph, RenderDirection, Row, Sparkline, Table,
+        Wrap,
+    },
 };
 
 use super::{
@@ -245,6 +248,7 @@ fn walk_details(frame: &mut Frame, app: &WalkApp, area: Rect) {
             .block(block(" Signal history · last 60 polls "))
             .data(data)
             .max(80)
+            .direction(RenderDirection::RightToLeft)
             .absent_value_style(Style::default().fg(DIM))
             .style(Style::default().fg(ACCENT)),
         graph[0],
